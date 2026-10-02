@@ -6,6 +6,9 @@ import { onAuthStateChanged, signInWithPopup, signOut, type User } from "firebas
 import { addDoc, collection, deleteDoc, doc, getDoc, getDocs } from "firebase/firestore";
 import { getDb, getFirebaseAuth, getGoogleProvider } from "../../lib/firebase";
 import { jevRank, classifyJob, type JobInput, type RankedJob } from "../../lib/prioritize";
+import { getCarbonSignal } from "../../lib/api/client";
+import type { CarbonSignalResponse } from "../../lib/api/types";
+import CarbonChart from "./CarbonChart";
 import Onboarding from "./Onboarding";
 
 type Profile = { username?: string; occupation?: string; place?: string; rooms?: number | null; onboarded?: boolean };
@@ -94,6 +97,8 @@ export default function Dashboard() {
   const [fPower, setFPower] = useState("");
   const [fReady, setFReady] = useState("06:00");
   const [fFlex, setFFlex] = useState(2);
+  const [signal, setSignal] = useState<CarbonSignalResponse | null>(null);
+  const [signalError, setSignalError] = useState<string | null>(null);
 
   const loadAll = useCallback(async (u: User) => {
     const db = getDb();
@@ -124,6 +129,14 @@ export default function Dashboard() {
       if (u) void loadAll(u);
     });
   }, [auth, loadAll]);
+
+  useEffect(() => {
+    const end = new Date();
+    const start = new Date(end.getTime() - 24 * 3600 * 1000);
+    getCarbonSignal({ start: start.toISOString(), end: end.toISOString() })
+      .then(setSignal)
+      .catch(() => setSignalError("Backend signal unreachable — is it running?"));
+  }, []);
 
   async function addJob() {
     if (!user || !fName.trim() || !fReady) return;
@@ -354,6 +367,16 @@ export default function Dashboard() {
             </div>
           </div>
         </section>
+
+        <div className="mt-3 rounded-2xl border border-white/10 bg-[#0a0a0a] p-6 sm:p-8">
+          {signal ? (
+            <CarbonChart signal={signal} />
+          ) : signalError ? (
+            <p className="font-mono text-[12px] text-zinc-600">{signalError}</p>
+          ) : (
+            <p className="font-mono text-[12px] text-zinc-600">reading grid signal…</p>
+          )}
+        </div>
 
         <div className="mt-3 grid gap-3 md:grid-cols-3">
           <div className="rounded-2xl border border-white/10 bg-[#0a0a0a] p-6">
