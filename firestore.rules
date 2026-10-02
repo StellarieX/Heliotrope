@@ -1,0 +1,18 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Private per-user data: only the owner reads/writes.
+    match /users/{uid} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+      match /jobs/{jobId} {
+        allow read, write: if request.auth != null && request.auth.uid == uid;
+      }
+    }
+    // Username registry: anyone may read (public /{username} pages),
+    // any signed-in user may write (claims run in a transaction).
+    match /usernames/{name} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+  }
+}

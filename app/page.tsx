@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { onAuthStateChanged, signInWithPopup, type User } from "firebase/auth";
-import { getFirebaseAuth, getGoogleProvider, isFirebaseConfigured } from "../lib/firebase";
+import { getFirebaseAuth, getGoogleProvider } from "../lib/firebase";
 
 function useInView<T extends HTMLElement>(threshold = 0.2) {
   const ref = useRef<T | null>(null);
@@ -87,6 +88,8 @@ function curvePath(values: number[], w: number, h: number, max: number, min: num
 }
 
 export default function Home() {
+  const router = useRouter();
+  const [auth] = useState(() => getFirebaseAuth());
   const [withHeliotrope, setWithHeliotrope] = useState(true);
   const [flex, setFlex] = useState(2);
   const [user, setUser] = useState<User | null>(null);
@@ -94,17 +97,15 @@ export default function Home() {
   const [signingIn, setSigningIn] = useState(false);
 
   useEffect(() => {
-    if (!isFirebaseConfigured()) return;
-    const auth = getFirebaseAuth();
     if (!auth) return;
     return onAuthStateChanged(auth, (u) => {
       if (u) {
-        window.location.href = "/dashboard";
+        router.push("/dashboard");
         return;
       }
       setUser(u);
     });
-  }, []);
+  }, [auth, router]);
 
   useEffect(() => {
     const els = Array.from(document.querySelectorAll(".js-reveal"));
@@ -125,7 +126,6 @@ export default function Home() {
 
   async function handleSignIn() {
     setAuthError(null);
-    const auth = getFirebaseAuth();
     if (!auth) {
       setAuthError("Add Firebase keys to .env.local first.");
       return;
@@ -133,7 +133,7 @@ export default function Home() {
     setSigningIn(true);
     try {
       await signInWithPopup(auth, getGoogleProvider());
-      window.location.href = "/dashboard";
+      router.push("/dashboard");
     } catch {
       setAuthError("Sign-in failed. Try again.");
       setSigningIn(false);
@@ -141,7 +141,7 @@ export default function Home() {
   }
 
   function handleAccountClick() {
-    if (user) window.location.href = "/dashboard";
+    if (user) router.push("/dashboard");
   }
 
   const hours = useMemo(() => Array.from({ length: 97 }, (_, i) => (i * 24) / 96), []);
@@ -452,7 +452,7 @@ export default function Home() {
               </ol>
             </div>
             <p className="mx-auto mt-8 max-w-lg text-center text-[13px] leading-6 text-zinc-600">
-              In shared buildings, Heliotrope also staggers everyone automatically — so twenty geysers don't all fire at once and create a new peak.
+              In shared buildings, Heliotrope also staggers everyone automatically — so twenty geysers don&apos;t all fire at once and create a new peak.
             </p>
           </div>
         </section>
@@ -492,7 +492,7 @@ export default function Home() {
                 <ul className="mt-3 space-y-2.5 text-[13px] leading-6 text-zinc-400">
                   <li><span className="text-zinc-200">Loads</span> — clamp + plug meters on each geyser, washer, EV point; 15-min hostel register.</li>
                   <li><span className="text-zinc-200">Grid</span> — marginal intensity from Electricity Maps, or net-load proxy where unavailable.</li>
-                  <li><span className="text-zinc-200">Bill</span> — hostel's actual day/night tariff applied to both weeks, line by line.</li>
+                  <li><span className="text-zinc-200">Bill</span> — hostel&apos;s actual day/night tariff applied to both weeks, line by line.</li>
                 </ul>
               </div>
             </div>

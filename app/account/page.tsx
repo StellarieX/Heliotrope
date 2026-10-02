@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { deleteUser, onAuthStateChanged, reauthenticateWithPopup, signOut, updateProfile, type User } from "firebase/auth";
 import { deleteDoc, doc, getDoc, runTransaction, serverTimestamp, setDoc } from "firebase/firestore";
-import { getDb, getFirebaseAuth, getGoogleProvider, isFirebaseConfigured } from "../../lib/firebase";
+import { getDb, getFirebaseAuth, getGoogleProvider } from "../../lib/firebase";
 
 type Status = { kind: "idle" | "ok" | "err"; text: string };
 
@@ -12,8 +14,10 @@ function validUsername(v: string) {
 }
 
 export default function Account() {
+  const router = useRouter();
+  const [auth] = useState(() => getFirebaseAuth());
   const [user, setUser] = useState<User | null>(null);
-  const [ready, setReady] = useState(false);
+  const [ready, setReady] = useState(() => getFirebaseAuth() === null);
   const [name, setName] = useState("");
   const [username, setUsername] = useState("");
   const [currentUsername, setCurrentUsername] = useState<string | null>(null);
@@ -27,15 +31,7 @@ export default function Account() {
   const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
-    if (!isFirebaseConfigured()) {
-      setReady(true);
-      return;
-    }
-    const auth = getFirebaseAuth();
-    if (!auth) {
-      setReady(true);
-      return;
-    }
+    if (!auth) return;
     return onAuthStateChanged(auth, async (u) => {
       setUser(u);
       setReady(true);
@@ -50,7 +46,7 @@ export default function Account() {
         }
       }
     });
-  }, []);
+  }, [auth]);
 
   if (!ready) {
     return (
@@ -66,7 +62,7 @@ export default function Account() {
         <div>
           <h1 className="text-3xl font-semibold tracking-tight">Sign in to manage your account</h1>
           <p className="mt-6 text-[13px]">
-            <a href="/" className="text-zinc-500 transition hover:text-white">← back home</a>
+            <Link href="/" className="text-zinc-500 transition hover:text-white">← back home</Link>
           </p>
         </div>
       </main>
@@ -155,7 +151,7 @@ export default function Account() {
         if (currentUsername) await deleteDoc(doc(db, "usernames", currentUsername)).catch(() => {});
         await deleteDoc(doc(db, "users", auth.currentUser?.uid ?? user!.uid)).catch(() => {});
       }
-      window.location.href = "/";
+      router.push("/");
     } catch {
       setDeleteStatus({ kind: "err", text: "Deletion needs a fresh sign-in — it failed. Try again." });
       setDeleting(false);
@@ -166,7 +162,7 @@ export default function Account() {
     <main className="min-h-screen bg-black text-zinc-100">
       <div className="mx-auto max-w-3xl px-6 py-6 sm:px-10">
         <header className="flex items-center justify-between">
-          <a href="/" className="text-[13px] font-semibold uppercase tracking-[0.28em]">Heliotrope</a>
+          <Link href="/" className="text-[13px] font-semibold uppercase tracking-[0.28em]">Heliotrope</Link>
           <div className="relative flex items-center gap-3">
             {user.photoURL ? (
               // eslint-disable-next-line @next/next/no-img-element
@@ -184,12 +180,12 @@ export default function Account() {
               <>
                 <button aria-label="Close menu" onClick={() => setMenuOpen(false)} className="fixed inset-0 z-10 cursor-default" />
                 <div className="absolute right-0 top-10 z-20 w-44 overflow-hidden rounded-xl border border-white/10 bg-[#111] shadow-xl shadow-black/50">
-                  <a
+                  <Link
                     href="/dashboard"
                     className="block px-4 py-2.5 text-[13px] text-zinc-300 transition hover:bg-white/5 hover:text-white"
                   >
                     Dashboard
-                  </a>
+                  </Link>
                   <button
                     onClick={async () => {
                       const auth = getFirebaseAuth();
@@ -279,7 +275,7 @@ export default function Account() {
           <h2 className="text-[15px] font-medium text-red-300">Delete account</h2>
           <p className="mt-2 text-sm leading-6 text-zinc-500">
             Permanently removes your profile, username{currentUsername ? ` (@${currentUsername})` : ""} and sign-in.
-            This can't be undone.
+            This can&apos;t be undone.
           </p>
           {!confirmDelete ? (
             <button
@@ -303,7 +299,7 @@ export default function Account() {
         </section>
 
         <p className="mt-10 pb-10 text-center text-[13px] italic text-red-400/90">
-          Email or password changes aren't supported — Google is our only sign-in, so your email stays the one your Google account uses.
+          Email or password changes aren&apos;t supported — Google is our only sign-in, so your email stays the one your Google account uses.
         </p>
       </div>
     </main>
