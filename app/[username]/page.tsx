@@ -1,27 +1,21 @@
 "use client";
 
 import { use, useEffect, useState } from "react";
+import Link from "next/link";
 import { doc, getDoc } from "firebase/firestore";
-import { getDb, isFirebaseConfigured } from "../../lib/firebase";
+import { getDb } from "../../lib/firebase";
 
 type Profile = { username: string; displayName: string | null; photoURL: string | null };
 
 export default function PublicProfile({ params }: { params: Promise<{ username: string }> }) {
   const { username } = use(params);
   const name = username.toLowerCase();
+  const [db] = useState(() => getDb());
   const [profile, setProfile] = useState<Profile | null>(null);
-  const [missing, setMissing] = useState(false);
+  const [missing, setMissing] = useState(() => getDb() === null);
 
   useEffect(() => {
-    if (!isFirebaseConfigured()) {
-      setMissing(true);
-      return;
-    }
-    const db = getDb();
-    if (!db) {
-      setMissing(true);
-      return;
-    }
+    if (!db) return;
     (async () => {
       const claim = await getDoc(doc(db, "usernames", name));
       if (!claim.exists()) {
@@ -36,7 +30,7 @@ export default function PublicProfile({ params }: { params: Promise<{ username: 
       const d = snap.data();
       setProfile({ username: name, displayName: (d.displayName as string | null) ?? null, photoURL: (d.photoURL as string | null) ?? null });
     })().catch(() => setMissing(true));
-  }, [name]);
+  }, [db, name]);
 
   return (
     <main className="grid min-h-screen place-items-center bg-black px-6 text-center text-zinc-100">
@@ -53,15 +47,15 @@ export default function PublicProfile({ params }: { params: Promise<{ username: 
           <h1 className="mt-5 text-3xl font-semibold tracking-tight">{profile.displayName ?? `@${profile.username}`}</h1>
           <p className="mt-2 font-mono text-[13px] text-zinc-500">@{profile.username}</p>
           <p className="mt-8">
-            <a href="/" className="font-mono text-[12px] text-zinc-600 transition hover:text-white">heliotrope</a>
+            <Link href="/" className="font-mono text-[12px] text-zinc-600 transition hover:text-white">heliotrope</Link>
           </p>
         </div>
       ) : missing ? (
         <div>
           <h1 className="text-3xl font-semibold tracking-tight">Nobody here yet</h1>
-          <p className="mt-3 font-mono text-[13px] text-zinc-500">@{name} isn't claimed.</p>
+          <p className="mt-3 font-mono text-[13px] text-zinc-500">@{name} isn&apos;t claimed.</p>
           <p className="mt-8">
-            <a href="/" className="font-mono text-[12px] text-zinc-600 transition hover:text-white">← home</a>
+            <Link href="/" className="font-mono text-[12px] text-zinc-600 transition hover:text-white">← home</Link>
           </p>
         </div>
       ) : (

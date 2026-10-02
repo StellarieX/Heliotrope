@@ -1,21 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { onAuthStateChanged, signInWithPopup, signOut, type User } from "firebase/auth";
 import { addDoc, collection, deleteDoc, doc, getDoc, getDocs } from "firebase/firestore";
-import { getDb, getFirebaseAuth, getGoogleProvider, isFirebaseConfigured } from "../../lib/firebase";
+import { getDb, getFirebaseAuth, getGoogleProvider } from "../../lib/firebase";
 import { jevRank, classifyJob, type JobInput, type RankedJob } from "../../lib/prioritize";
 import Onboarding from "./Onboarding";
 
 type Profile = { username?: string; occupation?: string; place?: string; rooms?: number | null; onboarded?: boolean };
-
-const KINDS: Record<string, number> = {
-  "EV charger": 7.2,
-  Geyser: 3.0,
-  "Washing machine": 2.1,
-  "Air conditioner": 1.4,
-  Other: 2.0,
-};
 
 function KindIcon({ kind }: { kind: string }) {
   const cls = "h-5 w-5";
@@ -87,8 +80,9 @@ const inputCls =
   "rounded-xl border border-white/10 bg-black px-4 py-2.5 text-sm text-white placeholder:text-zinc-700 focus:border-white/30 focus:outline-none";
 
 export default function Dashboard() {
+  const [auth] = useState(() => getFirebaseAuth());
   const [user, setUser] = useState<User | null>(null);
-  const [ready, setReady] = useState(false);
+  const [ready, setReady] = useState(() => getFirebaseAuth() === null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [profile, setProfile] = useState<Profile | null>(null);
@@ -123,21 +117,13 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
-    if (!isFirebaseConfigured()) {
-      setReady(true);
-      return;
-    }
-    const auth = getFirebaseAuth();
-    if (!auth) {
-      setReady(true);
-      return;
-    }
+    if (!auth) return;
     return onAuthStateChanged(auth, (u) => {
       setUser(u);
       setReady(true);
       if (u) void loadAll(u);
     });
-  }, [loadAll]);
+  }, [auth, loadAll]);
 
   async function addJob() {
     if (!user || !fName.trim() || !fReady) return;
@@ -203,7 +189,7 @@ export default function Dashboard() {
             {busy ? "Signing in…" : "Sign in with Google"}
           </button>
           <p className="mt-6 text-[13px]">
-            <a href="/" className="text-zinc-500 transition hover:text-white">← back home</a>
+            <Link href="/" className="text-zinc-500 transition hover:text-white">← back home</Link>
           </p>
         </div>
       </main>
@@ -217,7 +203,7 @@ export default function Dashboard() {
       {needsOnboarding && <Onboarding user={user} onDone={() => void loadAll(user)} />}
       <div className="mx-auto max-w-7xl px-6 py-6 sm:px-10 lg:px-16">
         <header className="flex items-center justify-between">
-          <a href="/" className="text-[13px] font-semibold uppercase tracking-[0.28em]">Heliotrope</a>
+          <Link href="/" className="text-[13px] font-semibold uppercase tracking-[0.28em]">Heliotrope</Link>
           <div className="relative flex items-center gap-3">
             {user.photoURL ? (
               // eslint-disable-next-line @next/next/no-img-element
@@ -235,18 +221,18 @@ export default function Dashboard() {
               <>
                 <button aria-label="Close menu" onClick={() => setMenuOpen(false)} className="fixed inset-0 z-10 cursor-default" />
                 <div className="absolute right-0 top-10 z-20 w-44 overflow-hidden rounded-xl border border-white/10 bg-[#111] shadow-xl shadow-black/50">
-                  <a
+                  <Link
                     href="/account"
                     className="block px-4 py-2.5 text-[13px] text-zinc-300 transition hover:bg-white/5 hover:text-white"
                   >
                     Account
-                  </a>
+                  </Link>
                   <button
                     onClick={async () => {
+                      if (!auth) return;
                       setBusy(true);
                       try {
-                        const auth = getFirebaseAuth();
-                        if (auth) await signOut(auth);
+                        await signOut(auth);
                       } finally {
                         setBusy(false);
                       }
