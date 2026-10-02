@@ -1,5 +1,5 @@
 // Single boundary for all backend calls. No raw fetch() elsewhere.
-import type { HealthResponse, NotImplementedError, ScheduleRequest } from "./types";
+import type { CarbonSignalResponse, HealthResponse, NotImplementedError, ScheduleRequest } from "./types";
 
 const BASE = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
 
@@ -33,7 +33,7 @@ export async function getCarbonSignal(params: {
   end: string;
   resolution_minutes?: number;
   provider?: string;
-}): Promise<never> {
+}): Promise<CarbonSignalResponse> {
   const q = new URLSearchParams({
     start: params.start,
     end: params.end,
@@ -41,5 +41,5 @@ export async function getCarbonSignal(params: {
     provider: params.provider ?? "synthetic",
   });
   const res = await fetch(`${BASE}/api/v1/carbon?${q}`);
-  return read<never>(res);
+  return read<CarbonSignalResponse>(res);
 }

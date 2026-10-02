@@ -35,3 +35,27 @@ export interface HealthResponse {
   service: string;
   env: string;
 }
+
+export type SignalType = "MARGINAL" | "AVERAGE" | "PROXY" | "SYNTHETIC";
+
+export interface CarbonPointOut {
+  timestamp: string;
+  carbon_intensity_gco2_per_kwh: number;
+}
+
+export interface CarbonSignalResponse {
+  start: string;
+  end: string;
+  resolution_minutes: number;
+  signal_type: SignalType;
+  source: string;
+  points: CarbonPointOut[];
+  quality: {
+    complete: boolean;
+    missing_points: number;
+    interpolated_points: number;
+    source: string;
+    signal_type: SignalType;
+    is_forecast: boolean;
+  };
+}
