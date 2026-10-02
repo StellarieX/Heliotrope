@@ -1,0 +1,5 @@
+# Keep server/python bulk out of Vercel frontend deploys
+backend/.venv
+backend/__pycache__
+*.pyc
+.env.local
