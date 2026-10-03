@@ -1,8 +1,7 @@
-"""Heliotrope backend — Phase 1 contracts, Phase 2 carbon, Phase 3 load intelligence.
+"""Heliotrope backend — scheduling, carbon, forecasting, coordination, execution.
 
-No solver engine yet: POST /api/v1/schedule still returns 501 because the
-optimizer belongs to Phase 4. Phase 3 adds classification and feasibility,
-which are pure physical reasoning and are live.
+POST /api/v1/schedule runs the real engines (ASAP/Greedy/CP-SAT); classification
+and feasibility are pure physical reasoning and are live.
 """
 
 from fastapi import FastAPI, Request
@@ -11,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
-from .api.routes import carbon, coordination, forecast, health, loads, schedule
+from .api.routes import carbon, coordination, execution, forecast, health, loads, schedule
 from .core import config
 
 app = FastAPI(title="Heliotrope Backend", version="0.1.0")
@@ -67,6 +66,7 @@ app.include_router(carbon.router, prefix="/api/v1", tags=["carbon"])
 app.include_router(forecast.router, prefix="/api/v1", tags=["forecast"])
 app.include_router(loads.router, prefix="/api/v1", tags=["loads"])
 app.include_router(coordination.router, prefix="/api/v1", tags=["coordination"])
+app.include_router(execution.router, prefix="/api/v1", tags=["execution"])
 
 
 @app.get("/")

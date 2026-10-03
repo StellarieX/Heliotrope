@@ -196,7 +196,6 @@ def test_aggregate_matches_individual_schedules():
         assert point.timestamp == agg.timestamp
         assert agg.utilization == pytest.approx(point.total_kw / point.capacity_kw)
         assert agg.congestion_score >= 0
-    totals = [0.0] * len(result.aggregate_profile)
     assert all(p.flexible_kw >= 0 and p.baseline_kw >= 0 for p in result.aggregate_profile)
 
 

@@ -72,8 +72,6 @@ class GreedyScheduler(BaseScheduler):
         because a chunk is charged as one stretch — a run with one beautiful
         hour and nine filthy ones is not a cheap run.
         """
-        slot_minutes = scheduler_input.horizon.slot_minutes
-
         objective = scheduler_input.objective_carbon()
 
         def key(run: tuple[int, int]) -> tuple[float, int]:

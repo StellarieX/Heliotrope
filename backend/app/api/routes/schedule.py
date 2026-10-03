@@ -26,8 +26,6 @@ from ...domain.horizon import SchedulingHorizon
 from ...domain.loads import LoadSpec
 from ...domain.scheduling import (
     ObjectiveWeights,
-    ScheduleStatus,
-    SchedulerComparison,
     SchedulerConfig,
     SchedulerResult,
     TimeOfUseTariff,

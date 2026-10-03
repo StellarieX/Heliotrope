@@ -649,7 +649,7 @@ def test_realized_evaluation_refuses_an_incomplete_actual_signal(service):
 
 
 def test_realized_evaluation_reports_forecast_error_when_given_a_forecast(service):
-    from app.services.forecasting import CarbonHistory, SeasonalForecaster
+    from app.services.forecasting import SeasonalForecaster
 
     jobs = mixed_scenario()
     forecast_signal = covering_signal(jobs)

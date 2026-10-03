@@ -29,7 +29,7 @@ from pydantic import BaseModel, Field, field_validator
 from .forecasting import ForecastMode
 from .horizon import SchedulingHorizon
 from .loads import LoadType
-from .scaling import ThermalScale
+from .scaling import ThermalScale, WMIN_PER_KWH
 
 
 # --- solver status (§21) ----------------------------------------------------

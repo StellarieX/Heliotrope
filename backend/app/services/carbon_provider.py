@@ -9,8 +9,6 @@ from datetime import datetime
 from enum import Enum
 from typing import Protocol
 
-from ..domain.carbon import CarbonPoint
-
 
 class ProviderNotAvailable(RuntimeError):
     """Raised when a carbon provider is requested before it exists."""

@@ -28,22 +28,19 @@ from ..domain.coordination import (
     CoordinationMode,
     CoordinationRequest,
     CoordinationResult,
-    FairnessMode,
     ParticipantJobResult,
     ParticipantMetrics,
 )
-from ..domain.loads import LoadSpec
 from ..domain.scaling import to_power_w
 from ..domain.scheduling import (
     BaselineProfile,
-    ReasonCode,
     SchedulerInput,
     ScheduleStatus,
 )
 from .carbon_accounting import CarbonAccountingService, Placement
 from .coordinated_cpsat import MILLI, CoordinatedCPSATScheduler
 from .schedule_validator import ScheduleValidator
-from .scheduler_normalizer import NormalizationError, SchedulerNormalizer
+from .scheduler_normalizer import SchedulerNormalizer
 from .schedulers.asap import ASAPScheduler
 from .schedulers.greedy import GreedyScheduler
 
@@ -74,11 +71,32 @@ class MultiUserCoordinator:
         if request.coordination_mode is CoordinationMode.INDEPENDENT:
             result = self._run_independent(request, merged, by_participant, solver_time_limit)
         else:
-            result = self._run_coordinated(request, merged, by_participant, solver_time_limit)
+            result, _solved, _placement = self._run_coordinated_detailed(
+                request, merged, by_participant, solver_time_limit
+            )
 
         result.metrics.solve_time_ms = int((time.perf_counter() - started) * 1000)
         result.solve_time_ms = result.metrics.solve_time_ms
         return result
+
+    def coordinate_detailed(
+        self,
+        request: CoordinationRequest,
+        signal: CarbonSignal,
+        solver_time_limit: float | None = None,
+    ):
+        """Coordinated run returning (result, slot-level SchedulerResult, merged
+        input) so execution tracking can follow the exact placement produced."""
+        started = time.perf_counter()
+        self._validate_request(request)
+        merged = self._merged_input(request, signal)
+        by_participant = self._split_inputs(request, merged)
+        result, solved, _placement = self._run_coordinated_detailed(
+            request, merged, by_participant, solver_time_limit
+        )
+        result.metrics.solve_time_ms = int((time.perf_counter() - started) * 1000)
+        result.solve_time_ms = result.metrics.solve_time_ms
+        return result, solved, merged
 
     def compare(
         self,
@@ -99,6 +117,56 @@ class MultiUserCoordinator:
             solver_time_limit,
         )
         return CoordinationComparison(independent=indep, coordinated=coord)
+
+    def build_merged(self, request: CoordinationRequest, signal: CarbonSignal) -> SchedulerInput:
+        """Public entry for replanning: the merged problem, rebuilt identically."""
+        self._validate_request(request)
+        return self._merged_input(request, signal)
+
+    def replan_coordinated(
+        self,
+        request: CoordinationRequest,
+        merged: SchedulerInput,
+        states: dict,
+        delivered: dict[str, dict[int, int]],
+        delivered_kwh: dict[str, float],
+        now_slot: int,
+    ):
+        """One coordinated replan over remaining requirements. Returns
+        (result, changes, notes, lifted, solve_input)."""
+        from .receding import RecedingHorizon
+
+        receding = RecedingHorizon(
+            solve_fn=lambda inp: self._solve_coordinated(request, inp),
+            commitment_slots=2,
+        )
+        remaining, notes = receding.remaining_input(merged, states, delivered, delivered_kwh, now_slot)
+        result, changes, notes2, lifted = receding.replan(
+            merged, {}, remaining, now_slot, reason="replan"
+        )
+        return result, changes, notes + notes2, lifted, remaining
+
+    def _solve_coordinated(self, request: CoordinationRequest, solve_input: SchedulerInput):
+        from ..domain.scheduling import SchedulerConfig
+
+        preferred = self._preferred_starts(solve_input)
+        target_w = int(solve_input.capacity_w * request.weights.target_utilization)
+        engine = CoordinatedCPSATScheduler(
+            preferred_starts=preferred,
+            target_w=target_w,
+            congestion_weight=request.weights.congestion,
+            inconvenience_weight=request.weights.inconvenience,
+            fairness_mode=request.fairness_mode,
+            participant_of={j.id: j.participant_id for j in solve_input.jobs},
+            priority_weight={p.id: p.priority_weight for p in request.participants},
+            max_inconvenience_millislots={
+                p.id: p.max_inconvenience_slots
+                for p in request.participants
+                if p.max_inconvenience_slots is not None
+            },
+            config=request.solver_config or SchedulerConfig(),
+        )
+        return engine.schedule(solve_input)
 
     # --- validation ---------------------------------------------------------
 
@@ -250,12 +318,30 @@ class MultiUserCoordinator:
             for alloc in scheduled.allocations:
                 placement.set(scheduled.job_id, alloc.slot, alloc.power_w)
         placements = self._placements_by_participant(merged, placement)
-        return self._assemble(
-            request, merged, placements, CoordinationMode.COORDINATED,
-            "OPTIMAL" if result.status is ScheduleStatus.OPTIMAL else "FEASIBLE",
-            "", solver_time_limit, solver_status=result.solver.status.value,
-            solve_ms=result.solver.solve_time_ms, preferred=preferred,
+        return (
+            self._assemble(
+                request, merged, placements, CoordinationMode.COORDINATED,
+                "OPTIMAL" if result.status is ScheduleStatus.OPTIMAL else "FEASIBLE",
+                "", solver_time_limit, solver_status=result.solver.status.value,
+                solve_ms=result.solver.solve_time_ms, preferred=preferred,
+            ),
+            result,
+            placement,
         )
+
+    def _run_coordinated_detailed(
+        self,
+        request: CoordinationRequest,
+        merged: SchedulerInput,
+        by_participant: dict[str, SchedulerInput],
+        solver_time_limit: float | None,
+    ):
+        """Same as _run_coordinated but also returns the slot-level result and
+        placement, so execution tracking follows the exact produced schedule."""
+        out = self._run_coordinated(request, merged, by_participant, solver_time_limit)
+        if isinstance(out, tuple):
+            return out
+        return out, None, None
 
     def _placements_by_participant(
         self, merged: SchedulerInput, placement: Placement
@@ -328,8 +414,6 @@ class MultiUserCoordinator:
         horizon = merged.horizon
         n = horizon.slot_count
         slot_minutes = horizon.slot_minutes
-        slot_hours = slot_minutes / 60.0
-        capacity_kw = merged.capacity_w / 1000.0
         target_w = int(merged.capacity_w * request.weights.target_utilization)
 
         agg_flex_w = [0] * n
@@ -381,11 +465,10 @@ class MultiUserCoordinator:
             if active:
                 start, end = horizon.slot_start(active[0]), horizon.slot_end(active[-1])
                 energy = stats["energy_kwh"]
-                peak = max(slots.values()) / 1000.0
             else:
                 start = horizon.slot_start(job.release_slot)
                 end = start
-                energy, peak = 0.0, 0.0
+                energy = 0.0
             pref = (preferred or {}).get(job.id, job.release_slot)
             delay_min = max(0.0, ((active[0] if active else job.release_slot) - pref)) * slot_minutes
             m = parts.setdefault(pid, ParticipantMetrics(participant_id=pid))

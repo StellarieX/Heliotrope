@@ -22,7 +22,7 @@ Flexible jobs are placed into that headroom, never into the raw capacity, so a
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Optional
 
 from ..domain.carbon import CarbonSignal
@@ -120,10 +120,10 @@ class SchedulerNormalizer:
             # the exact lie this check exists to prevent.
             if uncertainty_upper is None:
                 raise NormalizationError(
-                    f"forecast_mode is ROBUST but no per-slot upper prediction bound "
-                    f"was supplied, so there is no uncertainty to schedule against. "
-                    f"Refusing to run a 'robust' schedule with no uncertainty. Use "
-                    f"EXPECTED to optimize the point forecast alone."
+                    "forecast_mode is ROBUST but no per-slot upper prediction bound "
+                    "was supplied, so there is no uncertainty to schedule against. "
+                    "Refusing to run a 'robust' schedule with no uncertainty. Use "
+                    "EXPECTED to optimize the point forecast alone."
                 )
             if len(uncertainty_upper) != horizon.slot_count:
                 raise NormalizationError(
