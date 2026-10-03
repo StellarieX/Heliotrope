@@ -1,13 +1,13 @@
-// Jev-style classification step: free-text name in, category + shiftability out.
+// Local classification hint: free-text name in, category + shiftability out.
 // Only interval loads (power needed for a stretch we can move) are schedulable.
 // Always-on loads are filtered out — there is no window to optimize.
 //
-// ARCHITECTURAL NOTE (Phase 3, §27). This local `classifyJob` is a UI hint only.
+// ARCHITECTURAL NOTE. This local `classifyJob` is a UI hint only.
 // The three layers below are DIFFERENT things and are kept separate:
 //
 //   1. CLASSIFICATION  what kind of load is this? -> backend /api/v1/loads/classify
 //   2. PRIORITIZATION  which one matters first?  -> jevRank(), below
-//   3. OPTIMIZATION   when should it actually run? -> Phase 4, not built yet
+//   3. OPTIMIZATION   when should it actually run? -> backend /api/v1/schedule
 //
 // jevRank is a heuristic display order, NOT the physical scheduler. It is kept
 // as-is for back-compat. Classification now lives in the backend; the two may
@@ -43,10 +43,9 @@ export function classifyKind(name: string): string {
 
 import type { JobType } from "./api/types";
 
-// Jev-style decision step: state in, structured decision out.
-// Each job's state (deadline, size, flexibility) returns a Score + band + reason.
-// Mirrors Jev's Choice/Score pattern; runs locally until wired to the model API.
+// Local scoring heuristic: state in, structured Score + band + reason out.
 // This is PRIORITIZATION, not optimization — see the note at the top of the file.
+// It never calls any model API; all numbers come from the job's own fields.
 
 export type JobInput = {
   id: string;
