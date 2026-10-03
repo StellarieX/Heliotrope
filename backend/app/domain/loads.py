@@ -288,6 +288,9 @@ class LoadSpec(BaseModel):
 
     id: str = Field(default="", max_length=120)
     user_input: str = Field(default="", max_length=400)
+    #: owner in multi-user runs; "" means unassigned. Phase 6 addition with a
+    #: default so every existing LoadSpec still validates.
+    participant_id: str = Field(default="", max_length=120)
     normalized_name: str = Field(min_length=1, max_length=120)
     category: str = Field(min_length=1, max_length=60)
     job_type: LoadType

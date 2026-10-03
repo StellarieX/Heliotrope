@@ -94,23 +94,29 @@ class CPSATScheduler(BaseScheduler):
         # baseline headroom. This is the constraint most worth writing twice to
         # check.
         for slot in range(n):
-            terms_for_slot = []
-            for job in scheduler_input.jobs:
-                if job.job_type is LoadType.DEFERRABLE_ATOMIC:
-                    var = run_atomic.get(job.id, {}).get(slot)
-                    if var is not None:
-                        terms_for_slot.append(job.power_w * var)
-                elif job.job_type is LoadType.DEFERRABLE_INTERRUPTIBLE:
-                    var = pw_interruptible.get(job.id, {}).get(slot)
-                    if var is not None:
-                        terms_for_slot.append(var)
-                elif job.job_type is LoadType.THERMAL:
-                    var = pw_thermal.get(job.id, {}).get(slot)
-                    if var is not None:
-                        terms_for_slot.append(var)
+            terms_for_slot = self._flex_load_terms(
+                scheduler_input, slot, run_atomic, pw_interruptible, pw_thermal
+            )
             if terms_for_slot:
                 headroom = scheduler_input.headroom_w(slot)
                 model.Add(sum(terms_for_slot) <= headroom)
+
+        # --- coordination hooks (Phase 6) ------------------------------------
+        # No-ops on the single-user path: the shared capacity constraint above
+        # is unchanged, and `terms` gains nothing. A coordinated scheduler
+        # overrides these to add congestion/fairness structure around the same
+        # variables, rather than re-implementing the model.
+        ctx = {
+            "run_atomic": run_atomic,
+            "start_atomic": start_atomic,
+            "pw_interruptible": pw_interruptible,
+            "on_interruptible": on_interruptible,
+            "pw_thermal": pw_thermal,
+            "temp_thermal": temp_thermal,
+            "n": n,
+            "slot_minutes": slot_minutes,
+        }
+        self._extra_constraints(model, scheduler_input, ctx)
 
         # --- objective (§15, §16, §17) -------------------------------------
         carbon_weight = to_objective_weight(weights.carbon)
@@ -141,6 +147,7 @@ class CPSATScheduler(BaseScheduler):
             # will happily return any solution. Zero is correct here.
             terms.append(0)
 
+        terms.extend(self._extra_terms(model, scheduler_input, ctx))
         model.Minimize(sum(terms))
         self._last_model = model
 
@@ -178,6 +185,33 @@ class CPSATScheduler(BaseScheduler):
         return self._extract(scheduler_input, run_atomic, pw_interruptible, pw_thermal)
 
     # --- variable construction ---------------------------------------------
+
+    @staticmethod
+    def _flex_load_terms(scheduler_input, slot, run_atomic, pw_interruptible, pw_thermal) -> list:
+        """Per-slot flexible load terms in watts. Factored out of the capacity
+        loop so coordination hooks build the identical expression (Phase 6)."""
+        terms = []
+        for job in scheduler_input.jobs:
+            if job.job_type is LoadType.DEFERRABLE_ATOMIC:
+                var = run_atomic.get(job.id, {}).get(slot)
+                if var is not None:
+                    terms.append(job.power_w * var)
+            elif job.job_type is LoadType.DEFERRABLE_INTERRUPTIBLE:
+                var = pw_interruptible.get(job.id, {}).get(slot)
+                if var is not None:
+                    terms.append(var)
+            elif job.job_type is LoadType.THERMAL:
+                var = pw_thermal.get(job.id, {}).get(slot)
+                if var is not None:
+                    terms.append(var)
+        return terms
+
+    def _extra_constraints(self, model, scheduler_input, ctx) -> None:
+        """Phase 6 hook. Single-user path: nothing beyond shared capacity."""
+
+    def _extra_terms(self, model, scheduler_input, ctx) -> list:
+        """Phase 6 hook. Single-user path: no extra objective terms."""
+        return []
 
     def _model_atomic(self, model, job, run_atomic, start_atomic) -> None:
         """§10: exactly one binary start, then a contiguous run.

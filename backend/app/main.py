@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
-from .api.routes import carbon, forecast, health, loads, schedule
+from .api.routes import carbon, coordination, forecast, health, loads, schedule
 from .core import config
 
 app = FastAPI(title="Heliotrope Backend", version="0.1.0")
@@ -66,6 +66,7 @@ app.include_router(schedule.router, prefix="/api/v1", tags=["schedule"])
 app.include_router(carbon.router, prefix="/api/v1", tags=["carbon"])
 app.include_router(forecast.router, prefix="/api/v1", tags=["forecast"])
 app.include_router(loads.router, prefix="/api/v1", tags=["loads"])
+app.include_router(coordination.router, prefix="/api/v1", tags=["coordination"])
 
 
 @app.get("/")

@@ -356,6 +356,7 @@ class SchedulerNormalizer:
         return NormalizedJob(
             id=spec.id or spec.normalized_name,
             name=spec.normalized_name,
+            participant_id=spec.participant_id,
             job_type=spec.job_type,
             power_w=power_w or max_power_w,
             max_power_w=max_power_w,
