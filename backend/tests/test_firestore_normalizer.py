@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app.domain.loads import LoadType, ParameterOrigin
+from app.domain.loads import LoadSpec, LoadType, ParameterOrigin
 from app.services.firestore_normalizer import (
     FirestoreJobDocument,
     normalize_firestore_job,
@@ -33,7 +33,7 @@ def legacy(**overrides) -> dict:
     return base
 
 
-def normalize(doc, **kwargs) -> "LoadSpec":  # noqa: F821
+def normalize(doc, **kwargs) -> LoadSpec:
     return normalize_firestore_job(doc, now=NOW, tz_name="Asia/Kolkata", **kwargs)
 
 

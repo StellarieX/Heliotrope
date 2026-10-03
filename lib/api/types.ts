@@ -3,19 +3,8 @@
 
 export type JobType = "FIXED" | "DEFERRABLE_ATOMIC" | "DEFERRABLE_INTERRUPTIBLE" | "THERMAL";
 
-export interface CanonicalJob {
-  id: string;
-  name: string;
-  type: JobType;
-  power_kw: number;
-  release_time: string; // ISO, tz-aware
-  deadline: string; // ISO, tz-aware
-  duration_minutes: number;
-  energy_kwh: number;
-  flexibility_hours: number;
-  interruptible: boolean;
-  min_chunk_minutes: number;
-}
+// (Removed: the Phase-1 CanonicalJob shape. The backend consumes LoadSpec;
+// see below. History kept in git.)
 
 // --- Phase 3: load intelligence -------------------------------------------
 // Mirrors backend/app/domain/loads.py and core/feasibility.py.
@@ -61,6 +50,7 @@ export interface ThermalSpec {
 
 export interface LoadSpec {
   id: string;
+  participant_id?: string;
   user_input: string;
   normalized_name: string;
   category: string;
@@ -163,9 +153,13 @@ export interface ClassifyRequest {
 }
 
 export interface ScheduleRequest {
-  jobs: CanonicalJob[];
+  jobs: LoadSpec[];
   capacity_kw: number;
   scheduler: "ASAP" | "GREEDY" | "CPSAT";
+  objective?: Record<string, number>;
+  solver_config?: Record<string, number | string>;
+  carbon_provider?: string;
+  explain?: boolean;
 }
 
 export interface NotImplementedError {
@@ -179,6 +173,53 @@ export interface HealthResponse {
   status: string;
   service: string;
   env: string;
+}
+
+export interface ExecutionJobState {
+  job_id: string;
+  participant_id: string;
+  status: string;
+  scheduled_start: string | null;
+  scheduled_end: string | null;
+  energy_delivered_kwh: number;
+  expected_energy_kwh: number;
+  note: string;
+}
+
+export interface ExecutionState {
+  schedule_id: string;
+  lifecycle: string;
+  version: number;
+  solver_status: string;
+  jobs: ExecutionJobState[];
+}
+
+export interface ScheduleHistory {  schedule_id: string;
+  lifecycle: string;
+  versions: Array<{
+    version: number;
+    created_at: string;
+    reason: string;
+    solver_status: string;
+    carbon_estimate_kg: number | null;
+    peak_kw: number | null;
+    changed_jobs: Array<{
+      job_id: string;
+      previous_start: string | null;
+      new_start: string | null;
+      previous_end: string | null;
+      new_end: string | null;
+      change_minutes: number;
+      reason: string;
+    }>;
+  }>;
+}
+
+export interface ScheduleEventResult {
+  state: ExecutionState;
+  replan_advised: boolean;
+  notes: string[];
+  [key: string]: unknown;
 }
 
 export interface CoordinationAggregatePoint {

@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app.domain.carbon import CarbonPoint, Quality, SignalType
+from app.domain.carbon import CarbonPoint
 from app.domain.forecasting import (
     CarbonForecast,
     CarbonForecastPoint,
@@ -38,10 +38,8 @@ from app.services.forecast_evaluator import (
 )
 from app.services.forecasting import (
     CarbonHistory,
-    ForecastError,
     SeasonalForecaster,
     SyntheticCarbonHistory,
-    quantile,
 )
 
 ORIGIN = datetime(2026, 10, 5, tzinfo=timezone.utc)

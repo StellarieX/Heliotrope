@@ -14,8 +14,6 @@ into a solver unit by a written-down rule. Two classes of test live here:
     would let the solver and the validator disagree about what is feasible.
 """
 
-from datetime import datetime, timezone
-
 import pytest
 
 from app.domain.scaling import (

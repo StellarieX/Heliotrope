@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 
-from .fixtures import at, ev_job
+from .fixtures import at
 
 client = TestClient(app)
 

@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Iterable, Optional
 
-from ..domain.forecasting import CarbonForecast, ForecastConfig, ForecastMode
+from ..domain.forecasting import CarbonForecast
 from .forecasting import (
     CarbonForecaster,
     CarbonHistory,

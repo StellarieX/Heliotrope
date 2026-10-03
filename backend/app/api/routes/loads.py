@@ -8,7 +8,7 @@
     /validate   a fully specified LoadSpec -> a structured feasibility verdict.
 
 Nothing here schedules anything. Classification is not prioritization and
-neither is optimization; POST /schedule still returns 501 until Phase 4.
+neither is optimization; use POST /schedule for the real engines.
 
 Error vocabulary, matching the Phase 2 routes:
     422 invalid request

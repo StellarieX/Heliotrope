@@ -7,8 +7,6 @@ Contract-level tests. Two things they must keep proving:
 
 import pytest
 
-from app.services.load_normalizer import LoadRequest
-
 from datetime import datetime
 
 # §32 requires these to work by name.

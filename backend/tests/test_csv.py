@@ -1,6 +1,6 @@
 """CSV provider: valid loads, strict rejects, fill interpolates, big gaps refuse."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 import pytest
 

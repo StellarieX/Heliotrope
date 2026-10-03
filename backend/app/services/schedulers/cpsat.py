@@ -24,23 +24,17 @@ there is no weight value that can trade a hard constraint away.
 
 from __future__ import annotations
 
-import time
-from typing import Optional
-
 from ortools.sat.python import cp_model
 
 from ...domain.loads import LoadType
 from ...domain.scaling import (
-    WMIN_PER_KWH,
     RoundingEnvelope,
     assert_non_negative_band,
-    carbon_objective_coefficient,
     to_objective_weight,
 )
 from ...domain.scheduling import (
     NormalizedJob,
     ScheduleStatus,
-    SchedulerConfig,
     SchedulerInput,
     SolverInfo,
     SolverStatus,
@@ -482,7 +476,6 @@ class CPSATScheduler(BaseScheduler):
         self, scheduler_input, run_atomic, start_atomic, pw_interruptible, on_interruptible, pw_thermal, slot_minutes
     ):
         """Charge each slot of shift as if the job simply ran one slot longer."""
-        carbon = scheduler_input.carbon
         reference = int(round(scheduler_input.carbon.mean()))
         total = []
         for job in scheduler_input.jobs:
@@ -494,7 +487,6 @@ class CPSATScheduler(BaseScheduler):
                 for t, on_var in on.items():
                     if t == job.release_slot:
                         continue
-                    starts = start_atomic.get(job.id, {})
                     previous = on.get(t - 1)
                     # t is a start slot when on[t] and not on[t-1]
                     if previous is None:

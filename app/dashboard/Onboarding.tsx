@@ -225,7 +225,7 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
             <h2 className="mt-6 text-2xl font-semibold tracking-tight">Here is your order.</h2>
             <p className="mt-2 text-sm leading-6 text-zinc-500">
               @{username.trim().toLowerCase()} · {occupation} · {place}
-              {rooms ? ` · ${rooms} rooms` : ""} — ranked by priority, then optimized.
+              {rooms ? ` · ${rooms} rooms` : ""} — ranked by priority. Timed schedules are built later from the dashboard.
             </p>
             <ol className="mt-6 space-y-2">
               {ranked.map((j, i) => (
@@ -269,7 +269,7 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
               className="flex cursor-pointer items-center gap-2 rounded-full bg-lime-300 px-8 py-2.5 text-sm font-medium text-black transition hover:bg-lime-200 active:scale-[0.98] disabled:cursor-wait disabled:opacity-60"
             >
               {working && <span className="spinner" />}
-              {working ? "Optimizing…" : "Optimize"}
+              {working ? "Saving…" : "Save & finish"}
             </button>
           )}
         </div>

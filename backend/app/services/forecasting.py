@@ -367,7 +367,6 @@ class CarbonForecaster(ABC):
                                 ).append(error)
                 cursor -= day
 
-        step = timedelta(minutes=resolution_minutes)
         slot_times = [
             moment for moment in _slots(start, end, resolution_minutes)
         ]

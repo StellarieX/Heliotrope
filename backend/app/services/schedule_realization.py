@@ -20,9 +20,9 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from ..domain.carbon import CarbonSignal
-from ..domain.forecasting import CarbonForecast, ForecastConfig, ForecastMode
+from ..domain.forecasting import CarbonForecast, ForecastConfig
 from ..domain.scaling import CO2_KG_DIVISOR
-from ..domain.scheduling import SchedulerInput, SchedulerResult, ScheduleStatus
+from ..domain.scheduling import SchedulerResult, ScheduleStatus
 
 
 class RealizedEvaluationError(ValueError):

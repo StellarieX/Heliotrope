@@ -8,13 +8,13 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app.domain.loads import LoadType, ParameterOrigin, RequiredField
+from app.domain.loads import LoadSpec, LoadType, ParameterOrigin, RequiredField
 from app.services.load_normalizer import LoadRequest, normalize_request
 
 NOW = datetime(2026, 10, 5, 20, 0, tzinfo=timezone.utc)
 
 
-def normalize(**kwargs) -> "LoadSpec":  # noqa: F821
+def normalize(**kwargs) -> LoadSpec:
     request = LoadRequest(**{"name": "EV", **kwargs})
     return normalize_request(request, now=NOW)
 

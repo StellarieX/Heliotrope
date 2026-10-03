@@ -7,7 +7,7 @@ scheduler — and the UI — always know what they are consuming.
 
 from datetime import datetime
 from enum import Enum
-from typing import List, Optional
+from typing import List
 
 from pydantic import BaseModel, Field, field_validator
 

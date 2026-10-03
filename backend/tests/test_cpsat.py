@@ -22,10 +22,9 @@ import pytest
 from app.domain.carbon import CarbonPoint, CarbonSignal
 from app.domain.loads import LoadSpec, LoadType
 from app.domain.scaling import CO2_G_PER_KG, WMIN_PER_KWH
-from app.domain.scheduling import ObjectiveWeights, SchedulerConfig
+from app.domain.scheduling import SchedulerConfig
 from app.services.scheduler_service import SchedulerService
 from app.services.schedulers import SCHEDULERS, SchedulerName
-from app.services.schedulers.base import PlacementFailure
 
 from .fixtures import (
     DAY_START,
@@ -35,7 +34,6 @@ from .fixtures import (
     geyser_job,
     make_signal,
     mixed_scenario,
-    washing_machine_job,
 )
 
 

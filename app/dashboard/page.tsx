@@ -9,6 +9,17 @@ import { jevRank, classifyJob, type JobInput, type RankedJob } from "../../lib/p
 import { getCarbonSignal, classifyLoad } from "../../lib/api/client";
 import type { CarbonSignalResponse, JobType } from "../../lib/api/types";
 import CarbonChart from "./CarbonChart";
+import ExecutionPanel from "./ExecutionPanel";
+import {
+  advanceSimulation,
+  getScheduleHistory,
+  getScheduleState,
+  planSchedule,
+  postScheduleEvent,
+  replanSchedule,
+} from "../../lib/api/client";
+import type { ExecutionState, ScheduleHistory } from "../../lib/api/types";
+import { readyByToDeadline } from "../../lib/jobs/normalize";
 import Onboarding from "./Onboarding";
 
 type Profile = { username?: string; occupation?: string; place?: string; rooms?: number | null; onboarded?: boolean };
@@ -124,6 +135,12 @@ export default function Dashboard() {
   const activePreview = preview && preview.forName === fName.trim() ? preview : null;
   const [signal, setSignal] = useState<CarbonSignalResponse | null>(null);
   const [signalError, setSignalError] = useState<string | null>(null);
+  const [liveId, setLiveId] = useState<string | null>(null);
+  const [liveState, setLiveState] = useState<ExecutionState | null>(null);
+  const [liveHistory, setLiveHistory] = useState<ScheduleHistory | null>(null);
+  const [liveBusy, setLiveBusy] = useState(false);
+  const [liveError, setLiveError] = useState<string | null>(null);
+  const [liveCapacity, setLiveCapacity] = useState("20");
 
   const loadAll = useCallback(async (u: User) => {
     const db = getDb();
@@ -154,6 +171,113 @@ export default function Dashboard() {
       if (u) void loadAll(u);
     });
   }, [auth, loadAll]);
+
+  async function refreshLive(id: string) {
+    const [s, h] = await Promise.all([getScheduleState(id), getScheduleHistory(id)]);
+    setLiveState(s);
+    setLiveHistory(h);
+  }
+
+  function loadsToSpecs() {
+    // Documented frontend defaults: release now; thermal skipped (comfort band
+    // unknown); durations/energy assumed and labeled per spec, never silent.
+    const now = new Date();
+    const specs = [];
+    const skipped: string[] = [];
+    for (const j of jobs) {
+      if (j.shiftable === false) {
+        specs.push({
+          id: j.id, normalized_name: j.name, category: j.kind || "Always-on",
+          job_type: "FIXED", power_kw: j.powerKw,
+          release_at: now.toISOString(), deadline_at: readyByToDeadline(j.readyBy, now).toISOString(),
+          assumptions: [],
+        });
+        continue;
+      }
+      if (/heater|geyser|cool|ac\b|thermal/i.test(j.kind || "")) {
+        skipped.push(j.name);
+        continue;
+      }
+      if (/ev|charge|pump|laundry|wash/i.test(`${j.name} ${j.kind || ""}`)) {
+        specs.push({
+          id: j.id, normalized_name: j.name, category: j.kind || "Flexible",
+          job_type: "DEFERRABLE_INTERRUPTIBLE", power_kw: j.powerKw, max_power_kw: j.powerKw,
+          energy_required_kwh: j.powerKw * 2, min_chunk_minutes: 15,
+          release_at: now.toISOString(), deadline_at: readyByToDeadline(j.readyBy, now).toISOString(),
+          assumptions: ["energy assumed = rating × 2h (frontend default — declare exact values later)"],
+        });
+      } else {
+        specs.push({
+          id: j.id, normalized_name: j.name, category: j.kind || "Flexible",
+          job_type: "DEFERRABLE_ATOMIC", power_kw: j.powerKw, duration_minutes: 60,
+          release_at: now.toISOString(), deadline_at: readyByToDeadline(j.readyBy, now).toISOString(),
+          assumptions: ["duration assumed 60 min (frontend default — declare exact values later)"],
+        });
+      }
+    }
+    return { specs, skipped };
+  }
+
+  async function planLive() {
+    setLiveError(null);
+    const { specs, skipped } = loadsToSpecs();
+    if (!specs.length) {
+      setLiveError(skipped.length ? "Only thermal loads present — they need a comfort band first." : "Add a load first.");
+      return;
+    }
+    setLiveBusy(true);
+    try {
+      const state = await planSchedule({
+        jobs: specs, capacity_kw: Number(liveCapacity) || 20, scheduler: "CPSAT",
+      });
+      setLiveId(state.schedule_id);
+      await refreshLive(state.schedule_id);
+      if (skipped.length) setLiveError(`Thermal skipped for now: ${skipped.join(", ")} — comfort band unknown.`);
+    } catch (e) {
+      setLiveError(e instanceof Error ? e.message : "Planning failed.");
+    } finally {
+      setLiveBusy(false);
+    }
+  }
+
+  async function liveAdvance() {
+    if (!liveId) return;
+    setLiveBusy(true);
+    try {
+      await advanceSimulation(liveId, { to_time: new Date().toISOString(), script: [] });
+      await refreshLive(liveId);
+    } catch (e) {
+      setLiveError(e instanceof Error ? e.message : "Advance failed.");
+    } finally {
+      setLiveBusy(false);
+    }
+  }
+
+  async function liveReplan() {
+    if (!liveId) return;
+    setLiveBusy(true);
+    try {
+      await replanSchedule(liveId, { reason: "MANUAL" });
+      await refreshLive(liveId);
+    } catch (e) {
+      setLiveError(e instanceof Error ? e.message : "Replan failed.");
+    } finally {
+      setLiveBusy(false);
+    }
+  }
+
+  async function liveEvent(jobId: string, type: string) {
+    if (!liveId) return;
+    setLiveBusy(true);
+    try {
+      await postScheduleEvent(liveId, { event_type: type, job_id: jobId });
+      await refreshLive(liveId);
+    } catch (e) {
+      setLiveError(e instanceof Error ? e.message : "Event failed.");
+    } finally {
+      setLiveBusy(false);
+    }
+  }
 
   useEffect(() => {
     const end = new Date();
@@ -352,7 +476,7 @@ export default function Dashboard() {
         </h1>
         <p className="mt-3 max-w-lg text-[15px] leading-7 text-zinc-500">
           {profile?.place ? `${profile.place}${profile.rooms ? ` · ${profile.rooms} rooms` : ""} — ` : ""}
-          your loads, ranked by priority, then optimized.
+          your loads, ranked by priority. Timed schedules come from the live planner below.
         </p>
 
         {/* loads */}
@@ -369,7 +493,7 @@ export default function Dashboard() {
               disabled={jobs.length === 0}
               className="cursor-pointer rounded-full bg-lime-300 px-6 py-2 text-[13px] font-medium text-black transition hover:bg-lime-200 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-30"
             >
-              Optimize
+              Rank
             </button>
           </div>
 
@@ -422,7 +546,7 @@ export default function Dashboard() {
                     <>
                       <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${c.shiftable ? "bg-lime-300" : "bg-zinc-600"}`} />
                       <span className="ml-2 truncate text-sm text-zinc-200">
-                        {fName.trim() ? `${c.category} · ${c.why}` : "type a name — Jev files it"}
+                        {fName.trim() ? `${c.category} · ${c.why}` : "type a name — local rules file it"}
                       </span>
                     </>
                   );
@@ -501,6 +625,45 @@ export default function Dashboard() {
             <p className="font-mono text-[12px] text-zinc-600">{signalError}</p>
           ) : (
             <p className="font-mono text-[12px] text-zinc-600">reading grid signal…</p>
+          )}
+        </div>
+
+        <div className="mt-3 rounded-2xl border border-white/10 bg-[#0a0a0a] p-6 sm:p-8">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-[15px] font-medium">Live schedule</h2>
+              <p className="mt-0.5 font-mono text-[11px] text-zinc-600">
+                {liveState ? `${liveState.lifecycle} · v${liveState.version}` : "plans your loads on the backend, then tracks execution"}
+              </p>
+            </div>
+            {!liveId && (
+              <div className="flex items-center gap-2">
+                <label className="flex items-center gap-2 text-[13px] text-zinc-400">
+                  <input value={liveCapacity} onChange={(e) => setLiveCapacity(e.target.value.replace(/[^0-9.]/g, ""))} inputMode="decimal" className={`w-20 ${inputCls}`} />
+                  <span className="font-mono text-[11px] text-zinc-600">kW</span>
+                </label>
+                <button
+                  onClick={() => void planLive()}
+                  disabled={liveBusy || jobs.length === 0}
+                  className="cursor-pointer rounded-full bg-white px-5 py-2 text-[13px] font-medium text-black transition hover:bg-zinc-200 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-30"
+                >
+                  {liveBusy ? "Planning…" : "Plan live"}
+                </button>
+              </div>
+            )}
+          </div>
+          {liveError && <p className="mt-3 font-mono text-[12px] text-orange-300">{liveError}</p>}
+          {liveState && (
+            <div className="mt-4 border-t border-white/10 pt-4">
+              <ExecutionPanel
+                state={liveState}
+                history={liveHistory}
+                busy={liveBusy}
+                onAdvance={() => void liveAdvance()}
+                onReplan={() => void liveReplan()}
+                onEvent={(jobId, type) => void liveEvent(jobId, type)}
+              />
+            </div>
           )}
         </div>
 

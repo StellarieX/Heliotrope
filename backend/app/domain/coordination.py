@@ -38,7 +38,7 @@ class Participant(BaseModel):
     """A scheduling party. No personal data beyond a display label."""
 
     id: str = Field(min_length=1, max_length=120)
-    name: str = Field(min_length=1, max_length=120, default="")
+    name: str = Field(default="", max_length=120)
     priority_weight: float = Field(default=1.0, gt=0.0)
     #: optional hard cap on this participant's mean delay, in slots. None = uncapped.
     max_inconvenience_slots: Optional[float] = Field(default=None, ge=0.0)

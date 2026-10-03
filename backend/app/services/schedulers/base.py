@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
-from datetime import datetime
 from enum import Enum
 from typing import Optional
 
@@ -38,7 +37,6 @@ from ...domain.scheduling import (
     SolverStatus,
     TemperatureSample,
 )
-from ...domain.thermal import ThermalModelError
 from ..carbon_accounting import CarbonAccountingService, Placement
 from ..schedule_validator import ScheduleValidator
 

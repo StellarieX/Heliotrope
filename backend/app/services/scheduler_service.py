@@ -149,9 +149,6 @@ class SchedulerService:
         if asap_result is not None:
             self.attach_explanations(scheduler_input, asap_result, counterfactual=asap_result)
 
-        reference_co2 = (
-            asap_result.metrics.total_co2_kg if asap_result else None
-        )
         reference_peak = (
             asap_result.metrics.peak_kw if asap_result else None
         )

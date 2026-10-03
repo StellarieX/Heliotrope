@@ -19,7 +19,7 @@ import math
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
-from app.core.feasibility import is_energy_feasible, is_time_feasible, validate_load
+from app.core.feasibility import is_energy_feasible, is_time_feasible
 from app.domain.loads import LoadSpec, LoadType, ThermalSpec
 from app.domain.thermal import ThermalModel
 from app.services.classification import RuleBasedLoadClassifier

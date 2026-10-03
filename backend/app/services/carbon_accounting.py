@@ -29,12 +29,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from ..domain.scaling import CO2_KG_DIVISOR, WMIN_PER_KWH
-from ..domain.scheduling import (
-    BaselineProfile,
-    CarbonProfile,
-    NormalizedJob,
-    SchedulerInput,
-)
+from ..domain.scheduling import SchedulerInput
 
 
 @dataclass
@@ -199,8 +194,6 @@ class CarbonAccountingService:
         tariff = scheduler_input.tariff
         if tariff is None:
             return None
-        carbon = scheduler_input.carbon
-        slot_minutes = scheduler_input.horizon.slot_minutes
         total = 0.0
         for s in range(len(slot_co2_kg)):
             price_micro = tariff.price_micro_per_kwh[s] if s < len(tariff.price_micro_per_kwh) else 0
