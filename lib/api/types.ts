@@ -181,6 +181,67 @@ export interface HealthResponse {
   env: string;
 }
 
+export interface CoordinationAggregatePoint {
+  timestamp: string;
+  baseline_kw: number;
+  flexible_kw: number;
+  total_kw: number;
+  capacity_kw: number;
+  utilization: number;
+  carbon_intensity: number;
+  congestion_score: number;
+}
+
+export interface CoordinationCongestionPoint {
+  timestamp: string;
+  aggregate_load: number;
+  capacity_kw: number;
+  utilization: number;
+  congestion_score: number;
+}
+
+export interface CoordinationResult {
+  status: string;
+  coordination_mode: "INDEPENDENT" | "COORDINATED";
+  participants: Array<{
+    participant_id: string;
+    inconvenience_score: number;
+    delay_minutes: number;
+    jobs_shifted: number;
+    job_count: number;
+    co2_kg: number;
+  }>;
+  jobs: Array<{
+    participant_id: string;
+    job_id: string;
+    name: string;
+    scheduled_start: string;
+    scheduled_end: string;
+    energy_kwh: number;
+    power_kw: number;
+    delay_minutes: number;
+    carbon_kg: number;
+    reason: string;
+  }>;
+  aggregate_profile: CoordinationAggregatePoint[];
+  congestion_profile: CoordinationCongestionPoint[];
+  metrics: {
+    total_energy_kwh: number | null;
+    total_co2_kg: number | null;
+    peak_kw: number | null;
+    capacity_violations: number;
+    total_delay_minutes: number;
+    worst_inconvenience: number;
+    participant_count: number;
+    job_count: number;
+    solve_time_ms: number | null;
+  };
+  fairness_mode: string;
+  solver_status: string;
+  reason: string;
+  signal_provenance: Record<string, unknown>;
+}
+
 export type SignalType = "MARGINAL" | "AVERAGE" | "PROXY" | "SYNTHETIC";
 
 export interface CarbonPointOut {

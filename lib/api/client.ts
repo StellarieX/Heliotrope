@@ -3,6 +3,7 @@ import type {
   CarbonSignalResponse,
   ClassifyRequest,
   ClassifyResponse,
+  CoordinationResult,
   HealthResponse,
   LoadSpec,
   NotImplementedError,
@@ -73,4 +74,26 @@ export async function validateLoad(spec: LoadSpec): Promise<ValidateResponse> {
     body: JSON.stringify(spec),
   });
   return read<ValidateResponse>(res);
+}
+
+/** Phase 6: multi-user coordination. Thin call; the engine lives server-side. */
+export async function coordinateBuilding(body: Record<string, unknown>): Promise<CoordinationResult> {
+  const res = await fetch(`${BASE}/api/v1/coordination/schedule`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return read<CoordinationResult>(res);
+}
+
+/** Phase 6: independent vs coordinated on the same input, both real runs. */
+export async function compareCoordination(
+  body: Record<string, unknown>
+): Promise<{ independent: CoordinationResult; coordinated: CoordinationResult }> {
+  const res = await fetch(`${BASE}/api/v1/coordination/compare`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return read<{ independent: CoordinationResult; coordinated: CoordinationResult }>(res);
 }
