@@ -1,5 +1,14 @@
 // Single boundary for all backend calls. No raw fetch() elsewhere.
-import type { CarbonSignalResponse, HealthResponse, NotImplementedError, ScheduleRequest } from "./types";
+import type {
+  CarbonSignalResponse,
+  ClassifyRequest,
+  ClassifyResponse,
+  HealthResponse,
+  LoadSpec,
+  NotImplementedError,
+  ScheduleRequest,
+  ValidateResponse,
+} from "./types";
 
 const BASE = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
 
@@ -42,4 +51,26 @@ export async function getCarbonSignal(params: {
   });
   const res = await fetch(`${BASE}/api/v1/carbon?${q}`);
   return read<CarbonSignalResponse>(res);
+}
+
+/** Phase 3: free text -> classification + canonical LoadSpec + feasibility.
+ *  Runs against the rules-first backend classifier, so it works offline and
+ *  returns the same answer for the same input. */
+export async function classifyLoad(body: ClassifyRequest): Promise<ClassifyResponse> {
+  const res = await fetch(`${BASE}/api/v1/loads/classify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return read<ClassifyResponse>(res);
+}
+
+/** Phase 3: a fully specified load -> structured feasibility verdict. */
+export async function validateLoad(spec: LoadSpec): Promise<ValidateResponse> {
+  const res = await fetch(`${BASE}/api/v1/loads/validate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(spec),
+  });
+  return read<ValidateResponse>(res);
 }

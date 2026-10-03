@@ -6,12 +6,30 @@ import { onAuthStateChanged, signInWithPopup, signOut, type User } from "firebas
 import { addDoc, collection, deleteDoc, doc, getDoc, getDocs } from "firebase/firestore";
 import { getDb, getFirebaseAuth, getGoogleProvider } from "../../lib/firebase";
 import { jevRank, classifyJob, type JobInput, type RankedJob } from "../../lib/prioritize";
-import { getCarbonSignal } from "../../lib/api/client";
-import type { CarbonSignalResponse } from "../../lib/api/types";
+import { getCarbonSignal, classifyLoad } from "../../lib/api/client";
+import type { CarbonSignalResponse, JobType } from "../../lib/api/types";
 import CarbonChart from "./CarbonChart";
 import Onboarding from "./Onboarding";
 
 type Profile = { username?: string; occupation?: string; place?: string; rooms?: number | null; onboarded?: boolean };
+
+/** What the progressive-disclosure form should show for a given class.
+ *  Deliberately narrow: an ordinary user sees energy or duration, never the
+ *  thermal coefficients or a min-chunk setting. */
+function fieldsFor(jobType: JobType | undefined): { energy: boolean; duration: boolean; note: string } {
+  switch (jobType) {
+    case "DEFERRABLE_INTERRUPTIBLE":
+      return { energy: true, duration: false, note: "Pause and resume anywhere before the deadline." };
+    case "DEFERRABLE_ATOMIC":
+      return { energy: false, duration: true, note: "One continuous run once it starts." };
+    case "THERMAL":
+      return { energy: false, duration: false, note: "Stores comfort as heat or cool — configured from its comfort band." };
+    case "FIXED":
+      return { energy: false, duration: false, note: "Always-on: treated as background load, never shifted." };
+    default:
+      return { energy: false, duration: false, note: "" };
+  }
+}
 
 function KindIcon({ kind }: { kind: string }) {
   const cls = "h-5 w-5";
@@ -97,6 +115,13 @@ export default function Dashboard() {
   const [fPower, setFPower] = useState("");
   const [fReady, setFReady] = useState("06:00");
   const [fFlex, setFFlex] = useState(2);
+  const [fEnergy, setFEnergy] = useState("");
+  const [fDuration, setFDuration] = useState("");
+  const [preview, setPreview] = useState<{ forName: string; jobType: JobType; category: string; confidence: number; ambiguous: boolean } | null>(null);
+  // A preview is only usable for the exact name it was computed from, so a
+  // stale one is ignored rather than cleared (clearing would mean a
+  // synchronous setState inside the effect).
+  const activePreview = preview && preview.forName === fName.trim() ? preview : null;
   const [signal, setSignal] = useState<CarbonSignalResponse | null>(null);
   const [signalError, setSignalError] = useState<string | null>(null);
 
@@ -138,25 +163,86 @@ export default function Dashboard() {
       .catch(() => setSignalError("Backend signal unreachable — is it running?"));
   }, []);
 
+  // Progressive disclosure: ask the backend what this name is, debounced, and
+  // reveal only the fields that class actually needs. Local `classifyJob`
+  // still renders instantly so the form stays usable when the backend is down.
+  useEffect(() => {
+    const name = fName.trim();
+    if (name.length < 2) return;
+    let cancelled = false;
+    const t = setTimeout(() => {
+      classifyLoad({ name, deadline_wall: fReady })
+        .then((r) => {
+          if (cancelled) return;
+          setPreview({
+            forName: name,
+            jobType: r.classification.job_type,
+            category: r.classification.category,
+            confidence: r.confidence,
+            ambiguous: r.ambiguous,
+          });
+        })
+        .catch(() => {
+          // Backend classification is an enhancement, not a requirement: the
+          // local heuristic already renders and the form still works.
+          if (!cancelled) setPreview(null);
+        });
+    }, 350);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [fName, fReady]);
+
   async function addJob() {
     if (!user || !fName.trim() || !fReady) return;
     const db = getDb();
     if (!db) return;
     setAdding(true);
     const c = classifyJob(fName);
+    // Backend classification wins when it is available; the local heuristic is
+    // the offline fallback. The stored `kind`/`shiftable` stay for every
+    // document written before Phase 3.
+    const jobType = activePreview?.jobType;
+    const shiftable = jobType ? jobType !== "FIXED" : c.shiftable;
+    const energyKwh = fEnergy ? Number(fEnergy) : undefined;
+    const durationMin = fDuration ? Math.round(Number(fDuration)) : undefined;
     try {
       const ref = await addDoc(collection(db, "users", user.uid, "jobs"), {
         name: fName.trim(),
-        kind: c.category,
-        shiftable: c.shiftable,
+        kind: activePreview?.category ?? c.category,
+        shiftable,
         powerKw: Number(fPower) || 0,
         readyBy: fReady,
         flexHours: fFlex,
+        // Phase 3 fields: written only when known, so a missing value stays
+        // missing instead of becoming a misleading zero.
+        ...(jobType ? { jobType } : {}),
+        ...(energyKwh && !Number.isNaN(energyKwh) ? { energyKwh } : {}),
+        ...(durationMin && !Number.isNaN(durationMin) ? { durationMin } : {}),
+        ...(activePreview ? { confidence: activePreview.confidence } : {}),
         createdAt: new Date().toISOString(),
       });
-      setJobs((js) => [...js, { id: ref.id, name: fName.trim(), kind: c.category, shiftable: c.shiftable, powerKw: Number(fPower) || 0, readyBy: fReady, flexHours: fFlex }]);
+      setJobs((js) => [
+        ...js,
+        {
+          id: ref.id,
+          name: fName.trim(),
+          kind: activePreview?.category ?? c.category,
+          shiftable,
+          powerKw: Number(fPower) || 0,
+          readyBy: fReady,
+          flexHours: fFlex,
+          jobType,
+          energyKwh,
+          durationMin,
+        },
+      ]);
       setRanked(null);
       setFName("");
+      setFEnergy("");
+      setFDuration("");
+      setPreview(null);
     } finally {
       setAdding(false);
     }
@@ -365,6 +451,46 @@ export default function Dashboard() {
                 {adding ? "Adding…" : "Add load"}
               </button>
             </div>
+
+            {/* Progressive disclosure: only the fields this class actually needs. */}
+            {(() => {
+              const f = fieldsFor(activePreview?.jobType);
+              if (!f.energy && !f.duration && !f.note) return null;
+              return (
+                <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-3 border-t border-white/5 pt-4">
+                  {f.energy && (
+                    <label className="flex items-center gap-2 text-[13px] text-zinc-400">
+                      <input
+                        value={fEnergy}
+                        onChange={(e) => setFEnergy(e.target.value.replace(/[^0-9.]/g, ""))}
+                        inputMode="decimal"
+                        placeholder="kWh"
+                        className={`w-20 ${inputCls}`}
+                      />
+                      <span className="font-mono text-[11px] text-zinc-600">energy needed</span>
+                    </label>
+                  )}
+                  {f.duration && (
+                    <label className="flex items-center gap-2 text-[13px] text-zinc-400">
+                      <input
+                        value={fDuration}
+                        onChange={(e) => setFDuration(e.target.value.replace(/[^0-9]/g, ""))}
+                        inputMode="numeric"
+                        placeholder="min"
+                        className={`w-20 ${inputCls}`}
+                      />
+                      <span className="font-mono text-[11px] text-zinc-600">run length</span>
+                    </label>
+                  )}
+                  {f.note && <span className="font-mono text-[11px] text-zinc-600">{f.note}</span>}
+                  {activePreview?.ambiguous && (
+                    <span className="font-mono text-[11px] text-amber-400/80">
+                      could mean something else — {Math.round(activePreview.confidence * 100)}% sure
+                    </span>
+                  )}
+                </div>
+              );
+            })()}
           </div>
         </section>
 

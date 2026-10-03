@@ -52,3 +52,24 @@ def job_payload(**overrides) -> dict:
     }
     base.update(overrides)
     return base
+
+
+def load_spec_payload(**overrides) -> dict:
+    """A Phase 3 `LoadSpec` -- the shape `POST /schedule` actually accepts.
+
+    `job_payload` is the older Phase 1 `Job` shape, kept for the endpoints that
+    still take it. The scheduling endpoints take `LoadSpec` (§4).
+    """
+    base = {
+        "id": "ev-1",
+        "normalized_name": "EV charger",
+        "category": "EV charging",
+        "job_type": "DEFERRABLE_INTERRUPTIBLE",
+        "power_kw": 7.2,
+        "max_power_kw": 7.2,
+        "energy_required_kwh": 18.0,
+        "release_at": "2026-10-05T18:00:00+00:00",
+        "deadline_at": "2026-10-06T07:00:00+00:00",
+    }
+    base.update(overrides)
+    return base

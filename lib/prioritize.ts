@@ -1,6 +1,17 @@
 // Jev-style classification step: free-text name in, category + shiftability out.
 // Only interval loads (power needed for a stretch we can move) are schedulable.
 // Always-on loads are filtered out — there is no window to optimize.
+//
+// ARCHITECTURAL NOTE (Phase 3, §27). This local `classifyJob` is a UI hint only.
+// The three layers below are DIFFERENT things and are kept separate:
+//
+//   1. CLASSIFICATION  what kind of load is this? -> backend /api/v1/loads/classify
+//   2. PRIORITIZATION  which one matters first?  -> jevRank(), below
+//   3. OPTIMIZATION   when should it actually run? -> Phase 4, not built yet
+//
+// jevRank is a heuristic display order, NOT the physical scheduler. It is kept
+// as-is for back-compat. Classification now lives in the backend; the two may
+// disagree, and when they do the backend wins.
 
 export type JobClass = { category: string; shiftable: boolean; why: string };
 
@@ -30,9 +41,12 @@ export function classifyKind(name: string): string {
   return classifyJob(name).category;
 }
 
+import type { JobType } from "./api/types";
+
 // Jev-style decision step: state in, structured decision out.
 // Each job's state (deadline, size, flexibility) returns a Score + band + reason.
 // Mirrors Jev's Choice/Score pattern; runs locally until wired to the model API.
+// This is PRIORITIZATION, not optimization — see the note at the top of the file.
 
 export type JobInput = {
   id: string;
@@ -42,6 +56,15 @@ export type JobInput = {
   readyBy: string; // "HH:MM"
   flexHours: number;
   shiftable?: boolean;
+  // Phase 3 additions. Optional because every document written before Phase 3
+  // lacks them; `normalize_firestore_job` treats absent as UNKNOWN, not zero.
+  // Nothing below reads these — jevRank's behaviour is unchanged.
+  jobType?: JobType;
+  energyKwh?: number;
+  durationMin?: number;
+  maxPowerKw?: number;
+  minChunkMin?: number;
+  confidence?: number;
 };
 
 export type RankedJob = JobInput & {
