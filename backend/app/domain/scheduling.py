@@ -130,6 +130,9 @@ class NormalizedJob(BaseModel):
 
     id: str = Field(min_length=1, max_length=120)
     name: str = Field(min_length=1, max_length=120)
+    #: owner in multi-user runs; "" means unassigned/single-user. Added in
+    #: Phase 6 with a default so every Phase 4/5 input still validates.
+    participant_id: str = Field(default="", max_length=120)
     job_type: LoadType
     power_w: int = Field(ge=0)
     max_power_w: int = Field(ge=0)
@@ -391,6 +394,7 @@ class ReasonCode(str, Enum):
     LOWEST_CARBON = "LOWER_CARBON_WINDOW"
     LOWEST_CARBON_ALLOCATION = "LOWER_CARBON_ALLOCATION"
     CAPACITY_STAGGERED = "CAPACITY_STAGGERED"
+    CONGESTION_SHIFTED = "CONGESTION_SHIFTED"
     THERMAL_PRECONDITIONING = "THERMAL_PRECONDITIONING"
     UNCHANGED = "UNCHANGED"
     SCHEDULED = "SCHEDULED"
