@@ -40,10 +40,15 @@ class SyntheticDuckCurveProvider:
 
     def __init__(self, config: SyntheticConfig | None = None):
         self.config = config or SyntheticConfig()
+        # Phases are drawn ONCE per instance. Rebuilding Random(seed) on every
+        # intensity_at() call returned the same numbers by accident of the seed;
+        # caching makes the stability structural instead of incidental.
+        _rng = random.Random(self.config.seed)
+        self._phase1 = _rng.uniform(0, 2 * math.pi)
+        self._phase2 = _rng.uniform(0, 2 * math.pi)
 
     def _phases(self) -> tuple[float, float]:
-        rng = random.Random(self.config.seed)
-        return rng.uniform(0, 2 * math.pi), rng.uniform(0, 2 * math.pi)
+        return self._phase1, self._phase2
 
     def intensity_at(self, hour: float) -> float:
         c = self.config

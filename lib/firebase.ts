@@ -7,11 +7,20 @@ let auth: Auth | null = null;
 let db: Firestore | null = null;
 
 export function isFirebaseConfigured() {
-  return Boolean(process.env.NEXT_PUBLIC_FIREBASE_API_KEY);
+  return Boolean(
+    process.env.NEXT_PUBLIC_FIREBASE_API_KEY &&
+      process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN &&
+      process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID &&
+      process.env.NEXT_PUBLIC_FIREBASE_APP_ID
+  );
 }
 
 function getFirebaseApp() {
   if (app) return app;
+  // Client components still prerender on the server: never create the app
+  // instance during SSR, or the server build holds an auth object that can
+  // never complete a popup/observer flow.
+  if (typeof window === "undefined") return null;
   if (!isFirebaseConfigured()) return null;
   app =
     getApps()[0] ??

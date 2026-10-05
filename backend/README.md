@@ -20,14 +20,16 @@ All from environment (`app/core/config.py:1`):
 
 | Variable | Default | Notes |
 |---|---|---|
-| `HELIOTROPE_ENV` | `development` | non-production allows loopback CORS ports |
-| `PORT` | `8000` | |
-| `CORS_ALLOW_ORIGINS` | empty | comma-separated; required in production |
+| `HELIOTROPE_ENV` | `development` | `production` disables the loopback dev CORS rule |
+| `PORT` | `8000` | non-integer values fail fast at import |
+| `LOG_LEVEL` | `info` | |
+| `CORS_ALLOW_ORIGINS` | empty | comma-separated, slashes stripped; `"*"` gets credential-less middleware; Vercel hosts auto-trusted |
 | `CARBON_PROVIDER` | `synthetic` | synthetic seed 7 unless overridden |
-| `CARBON_CSV_PATH` | empty | required for csv provider |
+| `CARBON_CSV_PATH` | empty | required for csv provider (regular file, ≤5MB / ≤100k rows, finite values) |
 | `CARBON_MAX_RANGE_DAYS` / `CARBON_CACHE_TTL_S` / `CARBON_SYNTHETIC_SEED` | `7` / `300` / `7` | tuning |
-| `LOAD_INTELLIGENCE_PROVIDER` | `rule_based` | `jev` honored only with a verified contract |
-| `JEV_API_KEY` / `ELECTRICITY_MAPS_API_KEY` | unset | reserved, never sent to the browser |
+| `LOAD_INTELLIGENCE_PROVIDER` | `rule_based` | `jev` honored only with a verified contract; LLM confidence < 0.6 is `ambiguous: True` |
+| `DEFAULT_LOAD_TIMEZONE` | `UTC` | naive datetimes in load normalization map to UTC with a warning |
+| `JEV_API_KEY` / `GEMINI_API_KEY` / `ELECTRICITY_MAPS_API_KEY` / `ELECTRICITY_MAPS_ZONE` | unset / unset / unset / `US-CAL-CISO` | reserved, never sent to the browser; `GEMINI_API_KEY` wins over `JEV_API_KEY` |
 
 ## Endpoints
 
@@ -60,8 +62,11 @@ energy_kwh? (≥0), power_kw? (≥0)}` ingests validated meter readings
 "MEASURED"` in state, others `"SIMULATED"`. No MQTT/OCPP/Modbus driver is
 bundled yet — drivers push through this endpoint.
 
-No auth; CORS only. Invalid bodies return 422 with `code:
-invalid_request` (`app/main.py:39`).
+No auth; CORS only (credentialed loopback regex in dev + explicit origins; `"*"`
+gets credential-less middleware). Invalid bodies return 422 with `code:
+invalid_request` (`app/main.py:56`); all errors carry `{detail, code,
+message}`. Naive datetimes are 422; `resolution_minutes` must be one of
+5/15/30/60; `coverage` is in (0,1).
 
 Time-varying shared capacity: `SharedResource.capacity_profile_kw` (per-slot
 kW, length == horizon slots) overrides the scalar `capacity_kw` per slot; the

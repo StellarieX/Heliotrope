@@ -7,40 +7,122 @@ import type {
   ExecutionState,
   HealthResponse,
   LoadSpec,
-  NotImplementedError,
   ScheduleEventResult,
   ScheduleHistory,
   ScheduleRequest,
   ValidateResponse,
 } from "./types";
 
-const BASE = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
+// NEXT_PUBLIC_BACKEND_URL may carry a trailing slash (e.g. ".../8000/").
+// Without trimming, every URL below becomes "...//api/v1/...".
+const BASE = (process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000").replace(/\/+$/, "");
+
+const TIMEOUT_MS = 30_000;
+
+function timeoutSignal(): AbortSignal | undefined {
+  try {
+    if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+      return AbortSignal.timeout(TIMEOUT_MS);
+    }
+  } catch {
+    /* older runtime — proceed without a timeout */
+  }
+  return undefined;
+}
+
+function summarizeDetail(detail: unknown): string | null {
+  if (typeof detail === "string") return detail || null;
+  if (Array.isArray(detail)) {
+    // FastAPI RequestValidationError shape: [{ loc, msg, ... }].
+    // `detail` is an array here, not a string — join the first few messages
+    // instead of rendering "[object Object]".
+    const parts = detail
+      .slice(0, 3)
+      .map((e) => {
+        if (typeof e === "string") return e;
+        if (e && typeof e === "object") {
+          const rec = e as Record<string, unknown>;
+          const loc = Array.isArray(rec.loc) ? rec.loc.slice(-2).join(".") : null;
+          const msg = typeof rec.msg === "string" ? rec.msg : null;
+          if (loc && msg) return `${loc}: ${msg}`;
+          if (msg) return msg;
+        }
+        return null;
+      })
+      .filter((s): s is string => s !== null && s !== "");
+    if (parts.length > 0) {
+      const extra = detail.length > 3 ? ` (+${detail.length - 3} more)` : "";
+      return parts.join("; ") + extra;
+    }
+    return null;
+  }
+  return null;
+}
+
+async function toHttpError(res: Response): Promise<Error> {
+  let message: string | null = null;
+  // The body may be JSON, plain text (proxy/gateway), or empty — never assume.
+  const text = await res.text().catch(() => "");
+  if (text) {
+    try {
+      const body = JSON.parse(text) as { detail?: unknown; message?: unknown };
+      message =
+        summarizeDetail(body.detail) ??
+        (typeof body.message === "string" && body.message ? body.message : null);
+    } catch {
+      // Non-JSON error page (gateway HTML, connection reset text, ...).
+      message = text.slice(0, 300);
+    }
+  }
+  const err = new Error(message || `Backend error ${res.status}`);
+  (err as { status?: number }).status = res.status;
+  return err;
+}
 
 async function read<T>(res: Response): Promise<T> {
-  if (!res.ok) {
-    const body = (await res.json().catch(() => ({}))) as NotImplementedError;
-    const err = new Error(body.detail || `Backend error ${res.status}`);
-    (err as { status?: number }).status = res.status;
-    throw err;
+  if (!res.ok) throw await toHttpError(res);
+  const text = await res.text().catch(() => "");
+  if (!text) return {} as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(`Backend returned non-JSON success (${res.status})`);
   }
-  return res.json() as Promise<T>;
+}
+
+function requireId(scheduleId: string): string {
+  if (!scheduleId) throw new Error("Missing schedule id.");
+  return encodeURIComponent(scheduleId);
+}
+
+async function postJson<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    cache: "no-store",
+    signal: timeoutSignal(),
+  });
+  return read<T>(res);
+}
+
+async function getJson<T>(path: string): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    cache: "no-store",
+    signal: timeoutSignal(),
+  });
+  return read<T>(res);
 }
 
 export async function getHealth(): Promise<HealthResponse> {
-  const res = await fetch(`${BASE}/api/v1/health`);
-  return read<HealthResponse>(res);
+  return getJson<HealthResponse>("/api/v1/health");
 }
 
 /** Real scheduling: ASAP / GREEDY / CPSAT. Returns the backend
  *  SchedulerResult payload (status FEASIBLE/OPTIMAL or honest INFEASIBLE).
  *  Throws with status 400/422/503 on bad input or unavailable providers. */
 export async function scheduleJobs(body: ScheduleRequest): Promise<Record<string, unknown>> {
-  const res = await fetch(`${BASE}/api/v1/schedule`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  return read<Record<string, unknown>>(res);
+  return postJson<Record<string, unknown>>("/api/v1/schedule", body);
 }
 
 export async function getCarbonSignal(params: {
@@ -55,8 +137,7 @@ export async function getCarbonSignal(params: {
     resolution_minutes: String(params.resolution_minutes ?? 15),
     provider: params.provider ?? "synthetic",
   });
-  const res = await fetch(`${BASE}/api/v1/carbon?${q}`);
-  return read<CarbonSignalResponse>(res);
+  return getJson<CarbonSignalResponse>(`/api/v1/carbon?${q}`);
 }
 
 export type ForecastMode = "ACTUAL" | "EXPECTED" | "ROBUST";
@@ -104,64 +185,42 @@ export interface ForecastRequestParams {
 export async function getCarbonForecast(
   params: ForecastRequestParams
 ): Promise<CarbonForecastResponse> {
-  const res = await fetch(`${BASE}/api/v1/carbon/forecast`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      start: params.start,
-      end: params.end,
-      resolution_minutes: params.resolution_minutes ?? 15,
-      model: params.model ?? "seasonal",
-      lookback_days: params.lookback_days ?? 14,
-      coverage: params.coverage ?? 0.9,
-      history_days: params.history_days ?? 14,
-    }),
+  return postJson<CarbonForecastResponse>("/api/v1/carbon/forecast", {
+    start: params.start,
+    end: params.end,
+    resolution_minutes: params.resolution_minutes ?? 15,
+    model: params.model ?? "seasonal",
+    lookback_days: params.lookback_days ?? 14,
+    coverage: params.coverage ?? 0.9,
+    history_days: params.history_days ?? 14,
   });
-  return read<CarbonForecastResponse>(res);
 }
 
 /** Phase 3: free text -> classification + canonical LoadSpec + feasibility.
  *  Runs against the rules-first backend classifier, so it works offline and
  *  returns the same answer for the same input. */
 export async function classifyLoad(body: ClassifyRequest): Promise<ClassifyResponse> {
-  const res = await fetch(`${BASE}/api/v1/loads/classify`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  return read<ClassifyResponse>(res);
+  return postJson<ClassifyResponse>("/api/v1/loads/classify", body);
 }
 
 /** Phase 3: a fully specified load -> structured feasibility verdict. */
 export async function validateLoad(spec: LoadSpec): Promise<ValidateResponse> {
-  const res = await fetch(`${BASE}/api/v1/loads/validate`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(spec),
-  });
-  return read<ValidateResponse>(res);
+  return postJson<ValidateResponse>("/api/v1/loads/validate", spec);
 }
 
 /** Phase 7: plan a live schedule from LoadSpecs; versions + state follow. */
 export async function planSchedule(body: Record<string, unknown>): Promise<ExecutionState> {
-  const res = await fetch(`${BASE}/api/v1/schedules/plan`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  return read<ExecutionState>(res);
+  return postJson<ExecutionState>("/api/v1/schedules/plan", body);
 }
 
 /** Phase 7: live execution truth for a schedule. */
 export async function getScheduleState(scheduleId: string): Promise<ExecutionState> {
-  const res = await fetch(`${BASE}/api/v1/schedules/${scheduleId}/state`);
-  return read<ExecutionState>(res);
+  return getJson<ExecutionState>(`/api/v1/schedules/${requireId(scheduleId)}/state`);
 }
 
 /** Phase 7: immutable version history with diffs. */
 export async function getScheduleHistory(scheduleId: string): Promise<ScheduleHistory> {
-  const res = await fetch(`${BASE}/api/v1/schedules/${scheduleId}/history`);
-  return read<ScheduleHistory>(res);
+  return getJson<ScheduleHistory>(`/api/v1/schedules/${requireId(scheduleId)}/history`);
 }
 
 /** Phase 7: apply an event; policy may auto-replan. */
@@ -169,12 +228,7 @@ export async function postScheduleEvent(
   scheduleId: string,
   body: Record<string, unknown>
 ): Promise<ScheduleEventResult> {
-  const res = await fetch(`${BASE}/api/v1/schedules/${scheduleId}/events`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  return read<ScheduleEventResult>(res);
+  return postJson<ScheduleEventResult>(`/api/v1/schedules/${requireId(scheduleId)}/events`, body);
 }
 
 /** Phase 7: manual replan over remaining requirements. */
@@ -182,12 +236,7 @@ export async function replanSchedule(
   scheduleId: string,
   body: Record<string, unknown>
 ): Promise<Record<string, unknown>> {
-  const res = await fetch(`${BASE}/api/v1/schedules/${scheduleId}/replan`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  return read<Record<string, unknown>>(res);
+  return postJson<Record<string, unknown>>(`/api/v1/schedules/${requireId(scheduleId)}/replan`, body);
 }
 
 /** Phase 7: deterministic simulated execution. Labeled simulation, never telemetry. */
@@ -195,43 +244,28 @@ export async function advanceSimulation(
   scheduleId: string,
   body: Record<string, unknown>
 ): Promise<Record<string, unknown>> {
-  const res = await fetch(`${BASE}/api/v1/simulation/${scheduleId}/advance`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  return read<Record<string, unknown>>(res);
+  return postJson<Record<string, unknown>>(`/api/v1/simulation/${requireId(scheduleId)}/advance`, body);
 }
 /** Phase 7: advance wall-clock time for a schedule (polling tick). */
 export async function tickSchedule(
   scheduleId: string,
   nowIso: string
 ): Promise<Record<string, unknown>> {
-  const res = await fetch(`${BASE}/api/v1/schedules/${scheduleId}/tick`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ now: nowIso }),
+  return postJson<Record<string, unknown>>(`/api/v1/schedules/${requireId(scheduleId)}/tick`, {
+    now: nowIso,
   });
-  return read<Record<string, unknown>>(res);
 }
 /** Phase 6: multi-user coordination. Thin call; the engine lives server-side. */
 export async function coordinateBuilding(body: Record<string, unknown>): Promise<CoordinationResult> {
-  const res = await fetch(`${BASE}/api/v1/coordination/schedule`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  return read<CoordinationResult>(res);
+  return postJson<CoordinationResult>("/api/v1/coordination/schedule", body);
 }
 
 /** Phase 6: independent vs coordinated on the same input, both real runs. */
 export async function compareCoordination(
   body: Record<string, unknown>
 ): Promise<{ independent: CoordinationResult; coordinated: CoordinationResult }> {
-  const res = await fetch(`${BASE}/api/v1/coordination/compare`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  return read<{ independent: CoordinationResult; coordinated: CoordinationResult }>(res);
+  return postJson<{ independent: CoordinationResult; coordinated: CoordinationResult }>(
+    "/api/v1/coordination/compare",
+    body
+  );
 }

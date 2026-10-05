@@ -181,7 +181,7 @@ class SchedulerNormalizer:
         if uncertainty is not None:
             max_carbon = max(
                 [
-                    int(v + risk_weight * (u - v) + 0.5)
+                    max(0, int(v + risk_weight * (u - v) + 0.5))
                     for v, u in zip(carbon.gco2_per_kwh, uncertainty.upper_gco2_per_kwh)
                 ]
                 + [1]

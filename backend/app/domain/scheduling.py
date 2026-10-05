@@ -318,8 +318,14 @@ class SchedulerInput(BaseModel):
             elif self.forecast_mode is ForecastMode.ROBUST:
                 # risk_weight is applied in float and rounded once, then stored as
                 # an integer so the CP-SAT model keeps its integer coefficients.
+                # Clamped at zero: a degenerate upper bound below the forecast
+                # combined with a large risk weight must not manufacture a
+                # negative carbon intensity.
                 adjusted.append(
-                    int(predicted + self.risk_weight * (upper - predicted) + 0.5)
+                    max(
+                        0,
+                        int(predicted + self.risk_weight * (upper - predicted) + 0.5),
+                    )
                 )
             else:
                 adjusted.append(predicted)

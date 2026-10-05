@@ -104,8 +104,28 @@ def _window(
     """Resolve release/deadline from whichever form the caller supplied."""
     assumptions: list[Assumption] = []
     if request.release_at is not None or request.deadline_at is not None:
+        release_at, deadline_at = request.release_at, request.deadline_at
         for field in ("release_at", "deadline_at"):
-            if getattr(request, field) is not None:
+            value = getattr(request, field)
+            if value is None:
+                continue
+            if value.tzinfo is None:
+                coerced = value.replace(tzinfo=timezone.utc)
+                if field == "release_at":
+                    release_at = coerced
+                else:
+                    deadline_at = coerced
+                assumptions.append(
+                    Assumption(
+                        field=field,
+                        origin=ParameterOrigin.DERIVED,
+                        detail=(
+                            f"supplied as a timezone-naive timestamp {value.isoformat()}; "
+                            "interpreted as UTC rather than the server's local zone"
+                        ),
+                    )
+                )
+            else:
                 assumptions.append(
                     Assumption(
                         field=field,
@@ -113,7 +133,12 @@ def _window(
                         detail="supplied as an absolute timezone-aware timestamp",
                     )
                 )
-        return request.release_at, request.deadline_at, assumptions, None
+        if release_at is not None and deadline_at is not None and release_at > deadline_at:
+            raise ValueError(
+                f"release_at {release_at.isoformat()} is after deadline_at "
+                f"{deadline_at.isoformat()}; the window is empty"
+            )
+        return release_at, deadline_at, assumptions, None
 
     if request.release_wall and request.deadline_wall:
         try:

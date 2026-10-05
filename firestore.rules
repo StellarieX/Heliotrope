@@ -15,11 +15,19 @@ service cloud.firestore {
 
     // Username claim registry: anyone may read (public lookup);
     // claim creation, modification, and deletion are restricted to the owner of the UID.
+    // The `is string` guard on create rejects missing/null/non-string uid
+    // payloads explicitly instead of relying on fail-closed comparison.
     match /usernames/{name} {
       allow read: if true;
-      allow create: if request.auth != null && request.resource.data.uid == request.auth.uid;
+      allow create: if request.auth != null && request.resource.data.uid is string && request.resource.data.uid == request.auth.uid;
       allow update: if request.auth != null && resource.data.uid == request.auth.uid && request.resource.data.uid == request.auth.uid;
       allow delete: if request.auth != null && resource.data.uid == request.auth.uid;
     }
+
+    // NOTE: no recursive-wildcard catch-all is used here on purpose:
+    // test_boundary_no_wildcard_subcollection_leak forbids recursive
+    // wildcards file-wide (they risk leaking /users/{uid} subcollections if
+    // ever reordered). Unmatched collections are already denied by
+    // Firestore's default-deny, so omitting the catch-all loses nothing.
   }
 }

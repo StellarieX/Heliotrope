@@ -52,12 +52,32 @@ class PlacementFailure(RuntimeError):
 
     Carries the reason text so the caller can report WHY, rather than returning
     a partial schedule that pretends to be complete.
+
+    `status` is the result-level status this failure maps to. It defaults to
+    INFEASIBLE (no schedule satisfies the hard constraints) and stays that for
+    every heuristic path. CP-SAT overrides it when the solver stopped WITHOUT
+    proving infeasibility — a timeout with no solution is UNKNOWN ("ran out of
+    time with nothing to show"), not a proof that nothing exists.
     """
 
-    def __init__(self, job_id: str, reason: str) -> None:
+    def __init__(
+        self, job_id: str, reason: str, status: ScheduleStatus = ScheduleStatus.INFEASIBLE
+    ) -> None:
         super().__init__(reason)
         self.job_id = job_id
         self.reason = reason
+        self.status = status
+
+
+#: Result-level failure status back onto solver vocabulary for the except path.
+#: Every entry is a failure the solver layer reports honestly: INFEASIBLE was
+#: proven, UNKNOWN ran out of time, INTERNAL_ERROR broke. Anything else is a
+#: bug in the caller, surfaced as INTERNAL_ERROR rather than mislabelled.
+_SOLVER_STATUS_FOR_RESULT = {
+    ScheduleStatus.INFEASIBLE: SolverStatus.INFEASIBLE,
+    ScheduleStatus.UNKNOWN: SolverStatus.UNKNOWN,
+    ScheduleStatus.INTERNAL_ERROR: SolverStatus.INTERNAL_ERROR,
+}
 
 
 class BaseScheduler(ABC):
@@ -107,11 +127,14 @@ class BaseScheduler(ABC):
             placement = self.build_placement(scheduler_input)
         except PlacementFailure as failure:
             elapsed = int((time.perf_counter() - started) * 1000)
+            solver_status = _SOLVER_STATUS_FOR_RESULT.get(
+                failure.status, SolverStatus.INTERNAL_ERROR
+            )
             return self._result(
                 scheduler_input,
                 Placement(),
-                ScheduleStatus.INFEASIBLE,
-                self.solver_info(SolverStatus.INFEASIBLE, elapsed),
+                failure.status,
+                self.solver_info(solver_status, elapsed),
                 reason=failure.reason,
                 violations=[failure.reason],
             )
@@ -399,9 +422,12 @@ class BaseScheduler(ABC):
         reserve = reserve or {}
         slot_minutes = scheduler_input.horizon.slot_minutes
         needed = job.energy_required_wmin or 0
+        # A zero-energy target is trivially met, but the job must still appear
+        # in the placement so validation sees "nothing to draw", not "missing".
+        placement.power_by_job.setdefault(job.id, {})
         runs = self.usable_runs(scheduler_input, job)
         if not runs:
-            return False
+            return needed <= 0
 
         ordered = sorted(runs) if order == "time" else self.run_order(scheduler_input, runs)
         delivered = 0
@@ -409,6 +435,7 @@ class BaseScheduler(ABC):
         for run_start, run_end in ordered:
             if delivered >= needed:
                 break
+            charged_this_run = False
             for slot in range(run_start, run_end):
                 if delivered >= needed:
                     break
@@ -416,16 +443,66 @@ class BaseScheduler(ABC):
                 if reserve.get(slot):
                     budget = max(0, budget - reserve[slot])
                 if budget <= 0:
+                    if charged_this_run:
+                        # The contiguous prefix of this run ends here. Skipping
+                        # the full slot and continuing would split the block
+                        # into two runs and risk a minimum-chunk violation.
+                        break
                     continue
                 placement.set(job.id, slot, budget)
                 delivered += budget * slot_minutes
                 used.append(slot)
+                charged_this_run = True
 
         if delivered + 1 < needed:
             slots = placement.power_by_job.get(job.id, {})
             for slot in used:
                 slots.pop(slot, None)
             return False
+
+        # Every charged block must satisfy the minimum chunk, including the
+        # final partial prefix (meeting the energy target does not excuse a
+        # 1-slot tail when the chunk is 4) and any prefix cut short by a full
+        # slot. Repair by over-delivering forward inside the same usable run —
+        # the energy target is a lower bound, so extra watts are legal. If a
+        # block cannot be grown to the chunk, roll everything back and admit
+        # defeat honestly instead of handing validation a broken schedule.
+        if job.min_chunk_slots > 1 and used:
+            run_of: dict[int, tuple[int, int]] = {}
+            for run_start, run_end in runs:
+                for s in range(run_start, run_end):
+                    run_of[s] = (run_start, run_end)
+            blocks: list[list[int]] = []
+            for s in sorted(used):
+                if blocks and s == blocks[-1][-1] + 1:
+                    blocks[-1].append(s)
+                else:
+                    blocks.append([s])
+            repaired = True
+            for block in blocks:
+                while len(block) < job.min_chunk_slots:
+                    nxt = block[-1] + 1
+                    span = run_of.get(nxt)
+                    if span is None or nxt < block[0] or nxt >= span[1]:
+                        repaired = False
+                        break
+                    budget = self._available_w(scheduler_input, job, placement, nxt)
+                    if reserve.get(nxt):
+                        budget = max(0, budget - reserve[nxt])
+                    if budget <= 0:
+                        repaired = False
+                        break
+                    placement.set(job.id, nxt, budget)
+                    delivered += budget * slot_minutes
+                    used.append(nxt)
+                    block.append(nxt)
+                if not repaired:
+                    break
+            if not repaired:
+                slots = placement.power_by_job.get(job.id, {})
+                for slot in used:
+                    slots.pop(slot, None)
+                return False
         return True
 
     def place_thermal_control(
@@ -447,12 +524,17 @@ class BaseScheduler(ABC):
         that breaks a comfort constraint (§7).
         """
         asap_slots = self._thermal_asap_slots(scheduler_input, job, placement)
+        # A job that needs no heating is still a placed job: record its (empty)
+        # presence so validation sees "nothing to draw" rather than "missing".
+        placement.power_by_job.setdefault(job.id, {})
         if not prefer_low_carbon:
-            return bool(asap_slots)
+            return True
 
         candidate_slots = self._thermal_candidate_slots(scheduler_input, job, len(asap_slots))
-        trial = Placement()
-        trial_placed = self._simulate_thermal(scheduler_input, job, candidate_slots, trial)
+        trial = Placement(slot_count=scheduler_input.horizon.slot_count)
+        trial_placed = self._simulate_thermal(
+            scheduler_input, job, candidate_slots, trial, source=placement
+        )
         if trial_placed is not None:
             for slot, power_w in trial.power_by_job.get(job.id, {}).items():
                 placement.set(job.id, slot, power_w)
@@ -502,6 +584,7 @@ class BaseScheduler(ABC):
         charging_slots: Optional[list[int]],
         placement: Placement,
         mode: str = "fixed",
+        source: Optional[Placement] = None,
     ) -> Optional[list[int]]:
         """Walk the thermal recurrence forward, choosing power per slot.
 
@@ -510,17 +593,24 @@ class BaseScheduler(ABC):
           * `mode="fixed"`    -> full power on the given slots, zero elsewhere
           * `mode="asap"`     -> the minimum power that keeps the band safe,
                                  escalating toward the target as early as possible
+
+        `source` is the placement capacity is read from; it defaults to
+        `placement` itself. A trial trajectory (greedy low-carbon relocation)
+        passes the live placement as `source` while writing into an empty trial
+        placement, so the trial respects what earlier jobs already committed
+        instead of seeing a fictitious empty connection.
         """
         scale = job.thermal
         if scale is None:
             return None
         chosen = set(charging_slots or [])
+        read = source if source is not None else placement
         temperature_milli = scale.initial_milli
         used: list[int] = []
 
         for slot in job.slots():
             headroom_millikw = to_millikw(
-                self._available_w(scheduler_input, job, placement, slot) / 1000.0
+                self._available_w(scheduler_input, job, read, slot) / 1000.0
             )
             ceiling = min(scale.max_power_millikw, max(0, headroom_millikw))
 
@@ -531,8 +621,11 @@ class BaseScheduler(ABC):
                     scale, temperature_milli, ceiling, job
                 )
 
-            if power <= 0:
-                continue
+            # The state evolves on EVERY slot, including idle ones: a heater
+            # left off still drifts toward ambient. Skipping the recurrence on
+            # idle slots would freeze the temperature and disagree with both
+            # the CP-SAT model and the independent validator, which step every
+            # slot.
             temperature_milli = scale.next_temperature_milli(temperature_milli, power)
             if not (
                 scale.min_milli - 20 <= temperature_milli <= scale.max_milli + 20
@@ -773,7 +866,11 @@ class BaseScheduler(ABC):
                     original_end=start_time if active else end_time,
                     scheduled_start=start_time,
                     scheduled_end=end_time,
-                    deadline_at=horizon.slot_start(min(job.deadline_slot, horizon.slot_count)),
+                    deadline_at=(
+                        horizon.end
+                        if job.deadline_slot >= horizon.slot_count
+                        else horizon.slot_start(job.deadline_slot)
+                    ),
                     shifted_slots=shifted,
                     energy_kwh=stats["energy_kwh"],
                     co2_after_kg=stats["co2_kg"],

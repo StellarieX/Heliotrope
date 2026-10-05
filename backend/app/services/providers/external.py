@@ -8,6 +8,7 @@ low-carbon signal.
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 
 import httpx
@@ -17,6 +18,10 @@ from ...utils.time import generate_slots, to_utc
 
 HISTORY_URL = "https://api.electricitymap.org/v3/carbon-intensity/history"
 REQUEST_TIMEOUT_S = 10.0
+#: One retry on transport-level failures (connect, timeout) for this idempotent
+#: GET. HTTP status errors are NOT retried: a 4xx will fail the same way twice
+#: and a 5xx retry storm helps nobody. Kept at module level so tests can pin it.
+MAX_ATTEMPTS = 2
 
 
 class ProviderNotConfigured(RuntimeError):
@@ -73,19 +78,32 @@ class ExternalProvider:
         if resolution_minutes not in (5, 15, 30, 60):
             raise ValueError("resolution_minutes must be one of 5, 15, 30, 60")
 
-        try:
-            response = httpx.get(
-                HISTORY_URL,
-                params={"zone": self.zone},
-                headers={"auth-token": self._api_key or ""},
-                timeout=REQUEST_TIMEOUT_S,
-            )
-            response.raise_for_status()
-            payload = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
+        last_exc: Exception | None = None
+        payload = None
+        for _ in range(max(1, MAX_ATTEMPTS)):
+            try:
+                response = httpx.get(
+                    HISTORY_URL,
+                    params={"zone": self.zone},
+                    headers={"auth-token": self._api_key or ""},
+                    timeout=REQUEST_TIMEOUT_S,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                last_exc = None
+                break
+            except httpx.TransportError as exc:
+                # Transport-level only: safe to try once more.
+                last_exc = exc
+                continue
+            except (httpx.HTTPError, ValueError) as exc:
+                raise ProviderNotAvailable(
+                    f"electricity-maps request failed for zone {self.zone!r}: {exc}"
+                ) from exc
+        if last_exc is not None or payload is None:
             raise ProviderNotAvailable(
-                f"electricity-maps request failed for zone {self.zone!r}: {exc}"
-            ) from exc
+                f"electricity-maps request failed for zone {self.zone!r}: {last_exc}"
+            ) from last_exc
 
         try:
             records = payload["history"] if isinstance(payload, dict) else None
@@ -150,6 +168,8 @@ class ExternalProvider:
                 intensity = float(value)
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"bad carbonIntensity {value!r}: {exc}") from exc
+            if not math.isfinite(intensity):
+                raise ValueError(f"non-finite carbonIntensity {value!r}")
             if intensity < 0:
                 raise ValueError(f"negative carbonIntensity {value!r}")
             points.append(

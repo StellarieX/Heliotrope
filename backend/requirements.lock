@@ -1,9 +1,10 @@
-# Pinned backend dependencies (tested 2026-10-05, Python 3.11.9).
-# Canonical install remains: python -m pip install -e "./backend[dev]"
+# Pinned backend RUNTIME dependencies (tested 2026-10-05, Python 3.11.9).
+# Installed by backend/Dockerfile. Dev tools (pytest, hypothesis) are
+# intentionally NOT pinned here; install them via the `dev` extra:
+#   python -m pip install -e "./backend[dev]"
+# Every pin satisfies the ranges in backend/pyproject.toml.
 fastapi==0.141.1
 uvicorn==0.53.0
 pydantic==2.13.5
 httpx==0.28.1
 ortools==9.15.6755
-pytest==9.1.1
-hypothesis==6.100.0

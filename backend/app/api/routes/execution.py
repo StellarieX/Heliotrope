@@ -21,7 +21,9 @@ from typing import Optional
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+import math
 
 from ...domain.coordination import CoordinationRequest
 from ...domain.execution import (
@@ -61,10 +63,29 @@ meters = InMemoryMeterProvider()
 # --- helpers --------------------------------------------------------------
 
 
+def _err(detail: str, code: str, status: int) -> JSONResponse:
+    return JSONResponse(
+        status_code=status,
+        content={"detail": detail, "code": code, "message": detail},
+    )
+
+
+def _require_aware_dt(v: Optional[datetime], field: str) -> Optional[datetime]:
+    """Reject naive datetimes at the API boundary (no silent UTC assumption)."""
+    if v is None:
+        return v
+    if v.tzinfo is None:
+        raise ValueError(
+            f"{field} must be timezone-aware; a naive timestamp would be interpreted "
+            "against the server's local zone, which silently shifts execution"
+        )
+    return v
+
+
 def _record_or_404(schedule_id: str):
     record = store.get(schedule_id)
     if record is None:
-        return None, JSONResponse(status_code=404, content={"detail": "unknown schedule_id", "code": "not_found"})
+        return None, _err("unknown schedule_id", "not_found", 404)
     return record, None
 
 
@@ -83,6 +104,8 @@ def _states_maps(record: ScheduleRecord):
 
 
 def _refresh_lifecycle(record: ScheduleRecord, now: datetime) -> None:
+    if now.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
     if record.scheduler_input is None or not record.versions:
         return
     horizon = record.scheduler_input.horizon
@@ -163,13 +186,13 @@ def plan_coordinated(body: CoordinatedPlanRequest) -> JSONResponse:
     try:
         signal = _signal_for(body)
     except (CoordinationError, CarbonBadRequest, ValueError) as exc:
-        return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_request"})
+        return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_request", "message": str(exc)})
     except CarbonUnavailable as exc:
-        return JSONResponse(status_code=503, content={"detail": str(exc), "code": "provider_unavailable"})
+        return JSONResponse(status_code=503, content={"detail": str(exc), "code": "provider_unavailable", "message": str(exc)})
     try:
         result, solved, _placement = coordinator.coordinate_detailed(body, signal)
     except (CoordinationError, NormalizationError) as exc:
-        return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_request"})
+        return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_request", "message": str(exc)})
     if result.status not in ("OPTIMAL", "FEASIBLE") or solved is None:
         return JSONResponse(status_code=200, content=result.model_dump(mode="json"))
     merged = coordinator.build_merged(body, signal)
@@ -234,6 +257,11 @@ class EventBody(BaseModel):
     participant_id: str = ""
     payload: dict = Field(default_factory=dict)
 
+    @field_validator("timestamp")
+    @classmethod
+    def _aware_ts(cls, v: Optional[datetime]) -> Optional[datetime]:
+        return _require_aware_dt(v, "timestamp")
+
 
 def _maybe_auto_replan(record: ScheduleRecord, advised: bool) -> dict:
     policy = ReschedulePolicy(record.context.get("execution", {}).get("policy", "HYBRID"))
@@ -276,6 +304,11 @@ def _periodic_due(record: ScheduleRecord, now: datetime) -> bool:
 class TickBody(BaseModel):
     now: Optional[datetime] = None
 
+    @field_validator("now")
+    @classmethod
+    def _aware_now(cls, v: Optional[datetime]) -> Optional[datetime]:
+        return _require_aware_dt(v, "now")
+
 
 @router.post("/schedules/{schedule_id}/tick")
 def post_tick(schedule_id: str, body: TickBody) -> JSONResponse:
@@ -299,7 +332,7 @@ def post_tick(schedule_id: str, body: TickBody) -> JSONResponse:
     try:
         _advised, notes = apply_event(record, event)
     except ValueError as exc:
-        return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_transition"})
+        return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_transition", "message": str(exc)})
     _refresh_lifecycle(record, now)
     due = _periodic_due(record, now)
     out: dict = {
@@ -366,10 +399,7 @@ def post_event(schedule_id: str, body: EventBody) -> JSONResponse:
                             source="EVENT",
                         )
                 except (ValueError, TypeError) as exc:
-                    return JSONResponse(
-                        status_code=422,
-                        content={"detail": str(exc), "code": "invalid_request"},
-                    )
+                    return _err(str(exc), "invalid_request", 422)
                 if has_energy:
                     state.energy_delivered_kwh = float(
                         body.payload["energy_delivered_kwh"]
@@ -389,7 +419,7 @@ def post_event(schedule_id: str, body: EventBody) -> JSONResponse:
     try:
         advised, notes = apply_event(record, event)
     except ValueError as exc:
-        return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_transition"})
+        return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_transition", "message": str(exc)})
     _refresh_lifecycle(record, event.timestamp)
     out: dict = {"state": _state_payload(record), "replan_advised": advised, "notes": notes}
     auto = _maybe_auto_replan(record, advised)
@@ -406,6 +436,18 @@ class TelemetryBody(BaseModel):
     energy_kwh: Optional[float] = Field(default=None, ge=0)
     power_kw: Optional[float] = Field(default=None, ge=0)
     source: str = "MEASURED"
+
+    @field_validator("timestamp")
+    @classmethod
+    def _aware_ts(cls, v: Optional[datetime]) -> Optional[datetime]:
+        return _require_aware_dt(v, "timestamp")
+
+    @field_validator("energy_kwh", "power_kw")
+    @classmethod
+    def _finite_reading(cls, v: Optional[float], info) -> Optional[float]:
+        if v is not None and not math.isfinite(v):
+            raise ValueError(f"{info.field_name} must be a finite number")
+        return v
 
 
 @router.post("/schedules/{schedule_id}/telemetry")
@@ -425,15 +467,9 @@ def post_telemetry(schedule_id: str, body: TelemetryBody) -> JSONResponse:
     assert record is not None
     state = record.execution.get(body.job_id)
     if state is None:
-        return JSONResponse(
-            status_code=404,
-            content={"detail": f"unknown job {body.job_id}", "code": "not_found"},
-        )
+        return _err(f"unknown job {body.job_id}", "not_found", 404)
     if body.energy_kwh is None and body.power_kw is None:
-        return JSONResponse(
-            status_code=422,
-            content={"detail": "at least one of energy_kwh or power_kw is required", "code": "invalid_request"},
-        )
+        return _err("at least one of energy_kwh or power_kw is required", "invalid_request", 422)
     ts = body.timestamp or utcnow()
     try:
         meters.push_reading(
@@ -441,7 +477,7 @@ def post_telemetry(schedule_id: str, body: TelemetryBody) -> JSONResponse:
             energy_kwh=body.energy_kwh, power_kw=body.power_kw, source="MEASURED",
         )
     except ValueError as exc:
-        return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_request"})
+        return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_request", "message": str(exc)})
     if body.energy_kwh is not None:
         state.energy_delivered_kwh = float(body.energy_kwh)
     state.telemetry_source = "MEASURED"
@@ -486,7 +522,7 @@ def post_telemetry(schedule_id: str, body: TelemetryBody) -> JSONResponse:
             applied.append(ScheduleEventType.JOB_STARTED.value)
             advised, notes = a, notes + n
     except ValueError as exc:
-        return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_transition"})
+        return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_transition", "message": str(exc)})
     _refresh_lifecycle(record, ts)
     store._persist(record)
     out: dict = {
@@ -513,6 +549,32 @@ class ReplanBody(BaseModel):
     capacity_profile_kw: Optional[list[float]] = None
     added_jobs: list[LoadSpec] = Field(default_factory=list)
     removed_job_ids: list[str] = Field(default_factory=list)
+
+    @field_validator("now")
+    @classmethod
+    def _aware_now(cls, v: Optional[datetime]) -> Optional[datetime]:
+        return _require_aware_dt(v, "now")
+
+    @field_validator("capacity_kw")
+    @classmethod
+    def _finite_cap(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and not math.isfinite(v):
+            raise ValueError("capacity_kw must be a finite number")
+        return v
+
+    @field_validator("capacity_profile_kw")
+    @classmethod
+    def _profile_sane(cls, v: Optional[list[float]]) -> Optional[list[float]]:
+        if v is None:
+            return v
+        if not v:
+            raise ValueError("capacity_profile_kw must not be empty when provided")
+        for entry in v:
+            if not math.isfinite(entry):
+                raise ValueError("capacity_profile_kw entries must be finite numbers")
+            if entry < 0:
+                raise ValueError("capacity_profile_kw entries must be >= 0")
+        return v
 
 
 def _signal_from_input(scheduler_input):
@@ -618,18 +680,18 @@ def post_replan(schedule_id: str, body: ReplanBody) -> JSONResponse:
             update["capacity_w"] = to_power_w(body.capacity_kw)
         if body.capacity_profile_kw is not None:
             if len(body.capacity_profile_kw) != n:
-                return JSONResponse(status_code=422, content={
-                    "detail": (
-                        f"capacity profile has {len(body.capacity_profile_kw)} entries "
-                        f"but the horizon has {n} slots"
-                    ),
-                    "code": "invalid_request",
-                })
-            if any(c < 0 for c in body.capacity_profile_kw):
-                return JSONResponse(status_code=422, content={
-                    "detail": "capacity profile entries must be >= 0",
-                    "code": "invalid_request",
-                })
+                return _err(
+                    f"capacity profile has {len(body.capacity_profile_kw)} entries "
+                    f"but the horizon has {n} slots",
+                    "invalid_request",
+                    422,
+                )
+            if any((not math.isfinite(c)) or c < 0 for c in body.capacity_profile_kw):
+                return _err(
+                    "capacity profile entries must be finite numbers >= 0",
+                    "invalid_request",
+                    422,
+                )
             update["capacity_profile_w"] = [to_power_w(c) for c in body.capacity_profile_kw]
         elif body.capacity_kw is not None:
             # A scalar-only replan clears any previous profile so the new
@@ -638,7 +700,7 @@ def post_replan(schedule_id: str, body: ReplanBody) -> JSONResponse:
         try:
             record.scheduler_input = record.scheduler_input.model_copy(update=update)
         except ValueError as exc:
-            return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_request"})
+            return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_request", "message": str(exc)})
     if body.removed_job_ids:
         record.scheduler_input = record.scheduler_input.model_copy(
             update={"jobs": [j for j in record.scheduler_input.jobs if j.id not in body.removed_job_ids]}
@@ -649,15 +711,12 @@ def post_replan(schedule_id: str, body: ReplanBody) -> JSONResponse:
                 try:
                     transition(state, JobStatus.CANCELLED, "removed by replan request")
                 except ValueError as exc:
-                    return JSONResponse(
-                        status_code=422,
-                        content={"detail": str(exc), "code": "invalid_transition"},
-                    )
+                    return _err(str(exc), "invalid_transition", 422)
     if body.added_jobs:
         try:
             added, _ = _normalize_added(record, body.added_jobs)
         except NormalizationError as exc:
-            return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_request"})
+            return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_request", "message": str(exc)})
         record.scheduler_input = record.scheduler_input.model_copy(
             update={"jobs": [*record.scheduler_input.jobs, *added]}
         )
@@ -693,6 +752,18 @@ class OverrideBody(BaseModel):
     new_release_at: Optional[datetime] = None
     new_deadline_at: Optional[datetime] = None
 
+    @field_validator("new_release_at", "new_deadline_at")
+    @classmethod
+    def _aware_window(cls, v: Optional[datetime], info) -> Optional[datetime]:
+        return _require_aware_dt(v, info.field_name)
+
+    @field_validator("job_id")
+    @classmethod
+    def _non_empty_job(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("job_id must be a non-empty string")
+        return v
+
 
 @router.post("/schedules/{schedule_id}/override")
 def post_override(schedule_id: str, body: OverrideBody) -> JSONResponse:
@@ -710,18 +781,18 @@ def post_override(schedule_id: str, body: OverrideBody) -> JSONResponse:
 
     allowed, explanation = check_override(record, body.job_id, body.command, slot, headroom)
     if not allowed:
-        return JSONResponse(status_code=422, content={"detail": explanation, "code": "override_rejected"})
+        return JSONResponse(status_code=422, content={"detail": explanation, "code": "override_rejected", "message": explanation})
     state = record.execution.get(body.job_id)
     if body.command is OverrideCommand.CANCEL and state is not None:
         try:
             transition(state, JobStatus.CANCELLED, "user override")
         except ValueError as exc:
-            return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_transition"})
+            return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_transition", "message": str(exc)})
     if body.command is OverrideCommand.PAUSE and state is not None:
         try:
             transition(state, JobStatus.PAUSED, "user override")
         except ValueError as exc:
-            return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_transition"})
+            return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_transition", "message": str(exc)})
         return JSONResponse(status_code=200, content={"accepted": True, "state": _state_payload(record)})
     if body.command in (OverrideCommand.START_NOW, OverrideCommand.RUN_ASAP) and state is not None:
         try:
@@ -730,7 +801,7 @@ def post_override(schedule_id: str, body: OverrideBody) -> JSONResponse:
             else:
                 transition(state, JobStatus.READY, "user override: start now")
         except ValueError as exc:
-            return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_transition"})
+            return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_transition", "message": str(exc)})
     # MOVE with no window change is a no-op: don't reshape or replan spuriously.
     if body.command is OverrideCommand.MOVE and not body.new_release_at and not body.new_deadline_at:
         store.record_event(
@@ -792,6 +863,13 @@ class AdvanceBody(BaseModel):
     to_time: datetime
     script: list[dict] = Field(default_factory=list)
     carbon_actual: list[dict] = Field(default_factory=list)
+
+    @field_validator("to_time")
+    @classmethod
+    def _aware_to(cls, v: datetime) -> datetime:
+        result = _require_aware_dt(v, "to_time")
+        assert result is not None
+        return result
 
 
 @router.post("/simulation/{schedule_id}/advance")

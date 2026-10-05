@@ -1,5 +1,26 @@
-# Keep server/python bulk out of Vercel frontend deploys
+# Keep non-frontend bulk out of Vercel frontend deploys.
+# The browser bundle talks to the backend over HTTP (see next.config.ts
+# rewrites); backend source is deployed separately via backend/Dockerfile
+# and is never imported by `npm run build`.
+backend/
+tests/
+docs/
+.github/
+
+# Python artifacts (in case ignores above are ever narrowed)
 backend/.venv
 backend/__pycache__
 *.pyc
+__pycache__/
+
+# Local env and stores (secrets must come from the Vercel dashboard)
 .env.local
+.env*.local
+*.db
+*.sqlite
+*.sqlite3
+
+# Next.js build output / local Vercel state
+.next/
+out/
+.vercel/

@@ -19,7 +19,9 @@ from typing import Optional
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+import math
 
 from ...domain.forecasting import ForecastConfig, ForecastMode
 from ...domain.horizon import SchedulingHorizon
@@ -41,6 +43,30 @@ from ...services.schedulers import SchedulerName
 router = APIRouter()
 service = SchedulerService()
 forecast_service = ForecastService()
+
+
+def _err(detail: str, code: str, status: int) -> JSONResponse:
+    return JSONResponse(
+        status_code=status,
+        content={"detail": detail, "code": code, "message": detail},
+    )
+
+
+def _parse_aware_iso(value: str, field: str) -> datetime:
+    """Parse an ISO-8601 timestamp, rejecting naive values (no silent UTC shift)."""
+    v = value.strip()
+    if v.endswith("Z"):
+        v = v[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(v)
+    except ValueError as exc:
+        raise ValueError(f"{field} is not an ISO-8601 timestamp: {value!r}") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(
+            f"{field} must be timezone-aware; a naive timestamp would be interpreted "
+            "against the server's local zone, which silently shifts a schedule"
+        )
+    return parsed
 
 
 class CarbonForecastOptions(BaseModel):
@@ -72,6 +98,15 @@ class CarbonForecastOptions(BaseModel):
     #: signal it came from.
     actual_signal: Optional[dict] = None
 
+    @field_validator("mode")
+    @classmethod
+    def _known_mode(cls, v: str) -> str:
+        if v.upper() not in ("FORECAST", "ACTUAL"):
+            raise ValueError(
+                f"unknown carbon mode {v!r}; expected 'FORECAST' or 'ACTUAL'"
+            )
+        return v
+
 
 class ScheduleRequest(BaseModel):
     jobs: list[LoadSpec] = Field(min_length=1)
@@ -96,6 +131,41 @@ class ScheduleRequest(BaseModel):
     #: skip the per-job counterfactual explanations when they are not wanted
     explain: bool = True
 
+    @field_validator("capacity_kw")
+    @classmethod
+    def _finite_capacity(cls, v: float) -> float:
+        if not math.isfinite(v):
+            raise ValueError("capacity_kw must be a finite number")
+        return v
+
+    @field_validator("capacity_profile_kw")
+    @classmethod
+    def _profile_entries(cls, v: Optional[list[float]]) -> Optional[list[float]]:
+        if v is None:
+            return v
+        if not v:
+            raise ValueError("capacity_profile_kw must not be empty when provided")
+        for entry in v:
+            if not math.isfinite(entry):
+                raise ValueError("capacity_profile_kw entries must be finite numbers")
+            if entry < 0:
+                raise ValueError("capacity_profile_kw entries must be >= 0")
+        return v
+
+    @field_validator("carbon_resolution_minutes")
+    @classmethod
+    def _allowed_resolution(cls, v: int) -> int:
+        if v not in (5, 15, 30, 60):
+            raise ValueError("carbon_resolution_minutes must be one of 5, 15, 30, 60")
+        return v
+
+    @field_validator("scheduler")
+    @classmethod
+    def _non_empty_scheduler(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("scheduler must be a non-empty name")
+        return v
+
 
 class CompareRequest(ScheduleRequest):
     """Same input shape; runs several engines over it unchanged (§42)."""
@@ -111,11 +181,11 @@ def _load_signal(request: ScheduleRequest):
     slots being scheduled and the normalizer never has to reject it for missing
     a point.
     """
+    if (request.carbon_start is None) != (request.carbon_end is None):
+        raise NormalizationError("supply both carbon_start and carbon_end, or neither")
     if request.carbon_start and request.carbon_end:
-        from datetime import datetime
-
-        start = datetime.fromisoformat(request.carbon_start)
-        end = datetime.fromisoformat(request.carbon_end)
+        start = _parse_aware_iso(request.carbon_start, "carbon_start")
+        end = _parse_aware_iso(request.carbon_end, "carbon_end")
     elif request.horizon is not None:
         start, end = request.horizon.start, request.horizon.end
     else:
@@ -147,10 +217,8 @@ def _prepare(request: ScheduleRequest):
     try:
         name = resolve_scheduler(request.scheduler)
     except KeyError as exc:
-        return None, JSONResponse(
-            status_code=400,
-            content={"detail": str(exc.args[0]), "code": "invalid_scheduler"},
-        )
+        detail = str(exc.args[0])
+        return None, _err(detail, "invalid_scheduler", 400)
 
     forecast = None
     uncertainty_upper = None
@@ -177,24 +245,20 @@ def _prepare(request: ScheduleRequest):
                 resolution_minutes=grid_horizon.slot_minutes,
             )
         except (ForecastServiceError, ForecastError, ValueError) as exc:
-            return None, JSONResponse(
-                status_code=422, content={"detail": str(exc), "code": "invalid_request"}
-            )
+            detail = str(exc)
+            return None, _err(detail, "invalid_request", 422)
     else:
         try:
             signal = _load_signal(request)
         except CarbonBadRequest as exc:
-            return None, JSONResponse(
-                status_code=422, content={"detail": str(exc), "code": "invalid_request"}
-            )
+            detail = str(exc)
+            return None, _err(detail, "invalid_request", 422)
         except CarbonUnavailable as exc:
-            return None, JSONResponse(
-                status_code=503, content={"detail": str(exc), "code": "provider_unavailable"}
-            )
+            detail = str(exc)
+            return None, _err(detail, "provider_unavailable", 503)
         except ValueError as exc:
-            return None, JSONResponse(
-                status_code=422, content={"detail": str(exc), "code": "invalid_request"}
-            )
+            detail = str(exc)
+            return None, _err(detail, "invalid_request", 422)
 
     try:
         forecast_config = ForecastConfig(
@@ -211,9 +275,8 @@ def _prepare(request: ScheduleRequest):
     except ValueError as exc:
         # A config the model rejects (a partial-slot deadline buffer, an
         # out-of-range risk weight) is a malformed REQUEST, not a server fault.
-        return None, JSONResponse(
-            status_code=422, content={"detail": str(exc), "code": "invalid_request"}
-        )
+        detail = str(exc)
+        return None, _err(detail, "invalid_request", 422)
 
     try:
         scheduler_input, warnings = service.build_input(
@@ -231,9 +294,8 @@ def _prepare(request: ScheduleRequest):
             capacity_profile_kw=request.capacity_profile_kw,
         )
     except NormalizationError as exc:
-        return None, JSONResponse(
-            status_code=422, content={"detail": str(exc), "code": "invalid_request"}
-        )
+        detail = str(exc)
+        return None, _err(detail, "invalid_request", 422)
 
     return (name, scheduler_input, warnings, forecast_config, forecast), None
 
@@ -323,22 +385,40 @@ def _actual_signal(payload: dict):
     points = payload.get("points") if isinstance(payload, dict) else None
     if not points:
         return None
-    return CarbonSignal(
-        start=datetime.fromisoformat(payload["start"]),
-        end=datetime.fromisoformat(payload["end"]),
-        resolution_minutes=int(payload.get("resolution_minutes", 15)),
-        source=payload.get("source", "actual"),
-        points=[
+    try:
+        start = _parse_aware_iso(str(payload["start"]), "actual_signal.start")
+        end = _parse_aware_iso(str(payload["end"]), "actual_signal.end")
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise ValueError(f"actual_signal window is malformed: {exc}") from exc
+    parsed_points = []
+    for p in points:
+        try:
+            ts = _parse_aware_iso(str(p["timestamp"]), "actual_signal.points.timestamp")
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ValueError(f"actual_signal point is malformed: {exc}") from exc
+        try:
+            gco2 = float(p.get("gco2_per_kwh", p.get("carbon_intensity_gco2_per_kwh", 0)))
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"actual_signal point carbon value is malformed: {exc}") from exc
+        if gco2 < 0:
+            raise ValueError("actual_signal carbon values must be >= 0")
+        parsed_points.append(
             CarbonPoint(
-                time=datetime.fromisoformat(p["timestamp"]),
-                gco2_per_kwh=float(
-                    p.get("gco2_per_kwh", p.get("carbon_intensity_gco2_per_kwh", 0))
-                ),
+                time=ts,
+                gco2_per_kwh=gco2,
                 source=payload.get("source", "actual"),
             )
-            for p in points
-        ],
-    )
+        )
+    try:
+        return CarbonSignal(
+            start=start,
+            end=end,
+            resolution_minutes=int(payload.get("resolution_minutes", 15)),
+            source=payload.get("source", "actual"),
+            points=parsed_points,
+        )
+    except Exception as exc:
+        raise ValueError(f"actual_signal is malformed: {exc}") from exc
 
 
 def _realized(request: ScheduleRequest, result: SchedulerResult, forecast):
@@ -408,10 +488,8 @@ def compare_schedules(request: CompareRequest) -> JSONResponse:
         try:
             names = [resolve_scheduler(s) for s in request.schedulers]
         except KeyError as exc:
-            return JSONResponse(
-                status_code=400,
-                content={"detail": str(exc.args[0]), "code": "invalid_scheduler"},
-            )
+            detail = str(exc.args[0])
+            return _err(detail, "invalid_scheduler", 400)
 
     comparison = service.compare(
         scheduler_input, schedulers=names, config=request.solver_config

@@ -579,17 +579,20 @@ def validate_load(spec: LoadSpec, now=None) -> FeasibilityReport:
     report.merge(is_energy_feasible(spec))
     report.merge(is_thermal_profile_feasible(spec))
 
-    if now is not None and spec.deadline_at is not None and spec.deadline_at < now:
-        report.with_issue(
-            Issue(
-                code=IssueCode.DEADLINE_IN_PAST,
-                field="deadline_at",
-                message=(
-                    f"The deadline {spec.deadline_at.isoformat()} is already in the past."
-                ),
-                detail={"deadline_at": spec.deadline_at.isoformat(), "now": now.isoformat()},
+    if now is not None and spec.deadline_at is not None:
+        if now.tzinfo is None:
+            raise ValueError("now must be timezone-aware (got naive datetime)")
+        if spec.deadline_at < now:
+            report.with_issue(
+                Issue(
+                    code=IssueCode.DEADLINE_IN_PAST,
+                    field="deadline_at",
+                    message=(
+                        f"The deadline {spec.deadline_at.isoformat()} is already in the past."
+                    ),
+                    detail={"deadline_at": spec.deadline_at.isoformat(), "now": now.isoformat()},
+                )
             )
-        )
 
     missing = spec.missing_required_fields()
     if missing:

@@ -11,10 +11,11 @@ is ``MEASURED`` end to end.
 
 from __future__ import annotations
 
-from datetime import datetime
+import threading
+from datetime import datetime, timezone
 from typing import Optional, Protocol
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class MeterReading(BaseModel):
@@ -26,6 +27,15 @@ class MeterReading(BaseModel):
     energy_kwh: Optional[float] = Field(default=None, ge=0)
     power_kw: Optional[float] = Field(default=None, ge=0)
     source: str = "MEASURED"
+
+    @field_validator("timestamp")
+    @classmethod
+    def _utc(cls, v: datetime) -> datetime:
+        # Naive hardware clocks are read as UTC, explicitly, so a reading can
+        # never silently land in the server's local zone.
+        if v.tzinfo is None:
+            return v.replace(tzinfo=timezone.utc)
+        return v
 
 
 class MeterProvider(Protocol):
@@ -54,6 +64,7 @@ class InMemoryMeterProvider:
 
     def __init__(self) -> None:
         self._readings: dict[tuple[str, str], list[MeterReading]] = {}
+        self._lock = threading.Lock()
 
     def push_reading(
         self,
@@ -86,8 +97,10 @@ class InMemoryMeterProvider:
             power_kw=power_kw,
             source=source or "MEASURED",
         )
-        self._readings.setdefault((schedule_id, job_id), []).append(reading)
+        with self._lock:
+            self._readings.setdefault((schedule_id, job_id), []).append(reading)
         return reading
 
     def readings_for(self, schedule_id: str, job_id: str) -> list[MeterReading]:
-        return list(self._readings.get((schedule_id, job_id), []))
+        with self._lock:
+            return list(self._readings.get((schedule_id, job_id), []))

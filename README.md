@@ -65,12 +65,16 @@ Full environment table and troubleshooting: `docs/SETUP.md`.
 
 | Variable | Where | Purpose |
 |---|---|---|
-| `NEXT_PUBLIC_FIREBASE_API_KEY` (+ `_AUTH_DOMAIN`, `_PROJECT_ID`, `_APP_ID`) | Frontend (`.env.local`) | Firebase web config; app degrades gracefully without it |
-| `NEXT_PUBLIC_BACKEND_URL` | Frontend | Backend base URL (defaults to `http://localhost:8000`) |
+| `NEXT_PUBLIC_FIREBASE_API_KEY` (+ `_AUTH_DOMAIN`, `_PROJECT_ID`, `_APP_ID`) | Frontend (`.env.local`) | Firebase web config; all four required or the app runs unconfigured |
+| `NEXT_PUBLIC_BACKEND_URL` | Frontend | Backend base URL (`http://localhost:8000` in dev); empty string in Vercel production for same-origin mode |
+| `BACKEND_URL` | Frontend server-only (Vercel dashboard) | Rewrite target proxying `/api/v1/*` to the FastAPI backend |
 | `ELECTRICITY_MAPS_API_KEY` / `ELECTRICITY_MAPS_ZONE` | Backend env | Live carbon signal (default zone `US-CAL-CISO`); synthetic when unset |
 | `GEMINI_API_KEY` (legacy alias `JEV_API_KEY`) | Backend env | Live load classification; rule-based when unset |
-| `CORS_ALLOW_ORIGINS` | Backend env | Allowed browser origins in production |
+| `CORS_ALLOW_ORIGINS` | Backend env | Allowed browser origins for direct cross-origin mode; unneeded in same-origin mode |
+| `LOG_LEVEL` / `CARBON_*` / `LOAD_INTELLIGENCE_PROVIDER` / `DEFAULT_LOAD_TIMEZONE` | Backend env | `info` / `synthetic`, `7/300/7` tuning / `rule_based` / `UTC` |
 | `HELIOTROPE_EXECUTION_DB` | Backend env | SQLite path override (default `backend/data/heliotrope_execution.db`) |
+
+Deploy recipe (Vercel frontend + Docker backend): `docs/DEPLOYMENT.md`.
 
 ## API overview
 
@@ -79,9 +83,9 @@ Full environment table and troubleshooting: `docs/SETUP.md`.
 ## Testing
 
 ```bash
-npm run lint && npx tsc --noEmit && npm run build
-python -m pytest backend/tests -q     # unit + property (~4694)
-python tests/e2e/runner.py            # 120 tiered + 10 Tier-5 hardening tests
+npm run lint && npx tsc --noEmit && npm run build   # build passes (5 routes)
+python -m pytest backend/tests -q     # unit + property (~4693)
+python tests/e2e/runner.py            # 162 e2e tests (tiers + hardening + live-gated)
 ```
 
 Infra details and isolation limits: `docs/TEST_INFRA.md`. Latest verification: `docs/TEST_READY.md`.
@@ -100,10 +104,13 @@ firestore.rules       public reads, owner-only writes
 
 ## Limitations
 
-- Backend has no auth; anyone with the URL can call it. CORS is the only browser-side gate.
+- Backend has no auth; anyone with the URL can call it. CORS is the only browser-side gate. Do not expose publicly without auth (see `SECURITY.md`).
+- Naive datetimes are rejected with 422; callers must send tz-aware ISO-8601.
+- Error `detail` may be a string or an array (FastAPI 422 lists); clients must handle both.
 - No live device control — execution is tracked via events, meter readings, and simulation.
 - The UI plans with a scalar capacity default; per-slot `capacity_profile_kw` is API-level.
-- Backend is not hosted; Vercel serves the frontend only.
+- Single SQLite file: multiple backend instances must share one DB file.
+- Unconfigured providers refuse or fall back instead of inventing output; CSV inputs are capped (5MB / 100k rows).
 
 ## Contributing & license
 

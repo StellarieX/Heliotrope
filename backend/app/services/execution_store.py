@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -53,19 +54,30 @@ def utcnow() -> datetime:
 class ExecutionStore:
     def __init__(self, db_path: str | None = None) -> None:
         self._records: dict[str, ScheduleRecord] = {}
+        # Serializes read-modify-write cycles (version increments, event
+        # appends) within this process. Without it, two threads can compute
+        # the same next version number or interleave event appends so the
+        # last writer silently drops the other's events.
+        self._lock = threading.Lock()
         self._db_path = (
             db_path or os.environ.get(ENV_DB_PATH) or str(DEFAULT_DB_PATH)
         )
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self._db_path) as conn:
+        with self._connect() as conn:
             conn.execute(_SCHEMA)
+            conn.execute("PRAGMA journal_mode=WAL")
         log.info("execution_store_opened db_path=%s", self._db_path)
+
+    def _connect(self) -> sqlite3.Connection:
+        """One connection per operation: each worker thread gets its own, and
+        a busy timeout lets writers wait on the file lock instead of failing."""
+        return sqlite3.connect(self._db_path, timeout=30.0)
 
     # --- persistence ---------------------------------------------------------
 
     def _persist(self, record: ScheduleRecord) -> None:
         """Upsert the full serialized record into SQLite."""
-        with sqlite3.connect(self._db_path) as conn:
+        with self._connect() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO schedules "
                 "(schedule_id, lifecycle, data, updated_at) VALUES (?, ?, ?, ?)",
@@ -79,14 +91,15 @@ class ExecutionStore:
 
     def _load(self, schedule_id: str) -> ScheduleRecord | None:
         """Read one record back from SQLite into the cache, if present."""
-        with sqlite3.connect(self._db_path) as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 "SELECT data FROM schedules WHERE schedule_id = ?", (schedule_id,)
             ).fetchone()
         if row is None:
             return None
         record = ScheduleRecord.model_validate_json(row[0])
-        self._records[schedule_id] = record
+        with self._lock:
+            self._records[schedule_id] = record
         return record
 
     # --- records -------------------------------------------------------------
@@ -127,13 +140,15 @@ class ExecutionStore:
         by_id = {j.id: j.participant_id for j in scheduler_input.jobs}
         for state in record.execution.values():
             state.participant_id = by_id.get(state.job_id, "")
-        self._records[schedule_id] = record
-        self._persist(record)
+        with self._lock:
+            self._records[schedule_id] = record
+            self._persist(record)
         log.info("schedule_created schedule_id=%s reason=%s", schedule_id, reason.value)
         return record
 
     def get(self, schedule_id: str) -> ScheduleRecord | None:
-        record = self._records.get(schedule_id)
+        with self._lock:
+            record = self._records.get(schedule_id)
         if record is not None:
             return record
         return self._load(schedule_id)
@@ -146,43 +161,45 @@ class ExecutionStore:
         changes,
         notes: list[str],
     ) -> ScheduleVersion:
-        version = ScheduleVersion(
-            version=record.current_version_number() + 1,
-            created_at=utcnow(),
-            reason=reason,
-            result=result,
-            changed_jobs=changes,
-            carbon_estimate_kg=result.metrics.total_co2_kg,
-            peak_kw=result.metrics.peak_kw,
-            solver_status=result.solver.status.value,
-        )
-        record.versions.append(version)
-        # Refresh scheduled windows for jobs present in the new version.
-        for scheduled in result.schedule:
-            state = record.execution.get(scheduled.job_id)
-            if state is not None and state.status not in (
-                JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED,
-            ):
-                state.scheduled_start = scheduled.start_time
-                state.scheduled_end = scheduled.end_time
-                state.expected_energy_kwh = scheduled.energy_kwh
-                state.last_updated = utcnow()
-        for note in notes:
-            log.info("schedule_replanned schedule_id=%s v=%d note=%s", record.schedule_id, version.version, note)
-        log.info(
-            "schedule_replanned schedule_id=%s v=%d reason=%s changed=%d",
-            record.schedule_id, version.version, reason.value, len(changes),
-        )
-        self._persist(record)
-        return version
+        with self._lock:
+            version = ScheduleVersion(
+                version=record.current_version_number() + 1,
+                created_at=utcnow(),
+                reason=reason,
+                result=result,
+                changed_jobs=changes,
+                carbon_estimate_kg=result.metrics.total_co2_kg,
+                peak_kw=result.metrics.peak_kw,
+                solver_status=result.solver.status.value,
+            )
+            record.versions.append(version)
+            # Refresh scheduled windows for jobs present in the new version.
+            for scheduled in result.schedule:
+                state = record.execution.get(scheduled.job_id)
+                if state is not None and state.status not in (
+                    JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED,
+                ):
+                    state.scheduled_start = scheduled.start_time
+                    state.scheduled_end = scheduled.end_time
+                    state.expected_energy_kwh = scheduled.energy_kwh
+                    state.last_updated = utcnow()
+            for note in notes:
+                log.info("schedule_replanned schedule_id=%s v=%d note=%s", record.schedule_id, version.version, note)
+            log.info(
+                "schedule_replanned schedule_id=%s v=%d reason=%s changed=%d",
+                record.schedule_id, version.version, reason.value, len(changes),
+            )
+            self._persist(record)
+            return version
 
     def record_event(self, record: ScheduleRecord, event: ScheduleEvent) -> ScheduleEvent:
-        if not event.event_id:
-            event.event_id = uuid.uuid4().hex[:8]
-        record.events.append(event)
-        log.info(
-            "schedule_event schedule_id=%s type=%s job=%s",
-            record.schedule_id, event.event_type.value, event.job_id,
-        )
-        self._persist(record)
-        return event
+        with self._lock:
+            if not event.event_id:
+                event.event_id = uuid.uuid4().hex[:8]
+            record.events.append(event)
+            log.info(
+                "schedule_event schedule_id=%s type=%s job=%s",
+                record.schedule_id, event.event_type.value, event.job_id,
+            )
+            self._persist(record)
+            return event

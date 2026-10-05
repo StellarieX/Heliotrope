@@ -55,6 +55,24 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
 
   async function finish() {
     setErr("");
+    // Step gating can be bypassed via Back/Continue edits — re-validate
+    // everything before writing.
+    if (!name.trim()) {
+      setErr("Enter a display name first.");
+      return;
+    }
+    if (!validUsername(username.trim().toLowerCase())) {
+      setErr("Pick a valid username first (3–20 chars: lowercase, numbers, underscore).");
+      return;
+    }
+    if (!occupation || !place) {
+      setErr("Pick an occupation and a place first.");
+      return;
+    }
+    if (jobs.length === 0) {
+      setErr("Add at least one load first.");
+      return;
+    }
     const db = getDb();
     if (!db) {
       setErr("Database not configured.");
@@ -71,7 +89,7 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
       } catch {
         /* profile unreadable — claim without releasing a prev name */
       }
-      const claimed = await claimUsername(db, user.uid, username, prev, {
+      await claimUsername(db, user.uid, username, prev, {
         displayName: vName,
         email: user.email ?? null,
         photoURL: user.photoURL ?? null,
@@ -92,7 +110,6 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
           createdAt: new Date().toISOString(),
         });
       }
-      void claimed;
       onDone();
     } catch (e) {
       const msg = e instanceof Error ? e.message : "";

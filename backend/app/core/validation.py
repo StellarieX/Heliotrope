@@ -7,13 +7,19 @@ never decide feasibility.
 
 from ..domain.jobs import Job
 
+import math
+
 
 def check_non_negative(value: float, field: str) -> None:
+    if not math.isfinite(value):
+        raise ValueError(f"{field} must be a finite number")
     if value < 0:
         raise ValueError(f"{field} must be >= 0")
 
 
 def check_positive(value: float, field: str) -> None:
+    if not math.isfinite(value):
+        raise ValueError(f"{field} must be a finite number")
     if value <= 0:
         raise ValueError(f"{field} must be > 0")
 

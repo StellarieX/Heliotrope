@@ -4,33 +4,44 @@ import { use, useEffect, useState } from "react";
 import Link from "next/link";
 import { doc, getDoc } from "firebase/firestore";
 import { getDb } from "../../lib/firebase";
+import { validUsername } from "../../lib/username";
 
 type Profile = { username: string; displayName: string | null; photoURL: string | null };
 
 export default function PublicProfile({ params }: { params: Promise<{ username: string }> }) {
   const { username } = use(params);
   const name = username.toLowerCase();
+  const nameValid = validUsername(name);
   const [db] = useState(() => getDb());
   const [profile, setProfile] = useState<Profile | null>(null);
-  const [missing, setMissing] = useState(() => getDb() === null);
+  const [missing, setMissing] = useState(() => getDb() === null || !validUsername(username.toLowerCase()));
 
   useEffect(() => {
-    if (!db) return;
+    if (!db || !nameValid) return;
+    let cancelled = false;
     (async () => {
-      const claim = await getDoc(doc(db, "usernames", name));
-      if (!claim.exists()) {
-        setMissing(true);
-        return;
+      try {
+        const claim = await getDoc(doc(db, "usernames", name));
+        if (!claim.exists()) {
+          if (!cancelled) setMissing(true);
+          return;
+        }
+        const snap = await getDoc(doc(db, "users", claim.data().uid as string));
+        if (!snap.exists()) {
+          if (!cancelled) setMissing(true);
+          return;
+        }
+        if (cancelled) return;
+        const d = snap.data();
+        setProfile({ username: name, displayName: (d.displayName as string | null) ?? null, photoURL: (d.photoURL as string | null) ?? null });
+      } catch {
+        if (!cancelled) setMissing(true);
       }
-      const snap = await getDoc(doc(db, "users", claim.data().uid as string));
-      if (!snap.exists()) {
-        setMissing(true);
-        return;
-      }
-      const d = snap.data();
-      setProfile({ username: name, displayName: (d.displayName as string | null) ?? null, photoURL: (d.photoURL as string | null) ?? null });
-    })().catch(() => setMissing(true));
-  }, [db, name]);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [db, name, nameValid]);
 
   return (
     <main className="grid min-h-screen place-items-center bg-black px-6 text-center text-zinc-100">

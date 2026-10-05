@@ -29,11 +29,23 @@ Three planes:
 | `app/account/page.tsx` (`/account`) | Profile edit (`Profile{username,occupation,place,rooms,onboarded}`). |
 | `app/[username]/page.tsx` (`/[username]`) | Public profile: `usernames/{name}` -> `users/{uid}` -> public fields + jobs summary. |
 
-`lib/api/client.ts` is the single fetch boundary. `lib/api/types.ts` mirrors `backend/app/domain` (`LoadSpec`, `Classification`, `FeasibilityReport`, `ExecutionState`, `CoordinationResult`, carbon types). `null` in `LoadSpec` means UNKNOWN, never zero.
+`lib/api/client.ts` is the single fetch boundary: `BASE` trims trailing slashes on
+`NEXT_PUBLIC_BACKEND_URL`; all calls use `cache: "no-store"` with a 30s
+`AbortSignal.timeout`. Schedule-id paths go through an empty-id guard +
+`encodeURIComponent`. `toHttpError` handles FastAPI 422 JSON-array `detail`,
+plain-text/HTML bodies, and empty bodies; non-JSON success bodies throw.
+`lib/firebase.ts` requires all four `NEXT_PUBLIC_FIREBASE_*` vars and guards
+`window` for SSR. `lib/username.ts` holds `RESERVED_USERNAMES` and the shared
+`validUsername` used by both `app/[username]` and `app/account`. Dashboard:
+hoisted coordination default, optimistic `removeJob` with restore on failure,
+unmount-cancelled effects, `aria-label`s, Onboarding re-validation.
+`lib/api/types.ts` mirrors `backend/app/domain` (`LoadSpec`, `Classification`,
+`FeasibilityReport`, `ExecutionState`, `CoordinationResult`, carbon types).
+`null` in `LoadSpec` means UNKNOWN, never zero.
 
 ## Backend
 
-`backend/app/main.py` mounts 7 routers under `/api/v1`: `health`, `schedule`, `carbon`, `forecast`, `loads`, `coordination`, `execution`. CORS allows localhost + configured origins. `RequestValidationError` is normalized to `{detail, code: "invalid_request", message}` with HTTP 422.
+`backend/app/main.py` mounts 7 routers under `/api/v1`: `health`, `schedule`, `carbon`, `forecast`, `loads`, `coordination`, `execution`. CORS: credentialed loopback regex in non-production plus explicit origins; a configured `"*"` gets a separate credential-less middleware (credentials + wildcard is rejected by browsers). Handlers: `RequestValidationError` -> 422 `{detail, code: "invalid_request", message}`; `ResponseValidationError` -> 500 `internal_error`; `StarletteHTTPException` -> same status with `not_found` for 404; generic `Exception` -> 500 `internal_error`. All route errors include `message`.
 
 Layering:
 
@@ -51,7 +63,9 @@ routes/ -> services/ -> domain/
 
 Domain (`backend/app/domain/`): `jobs`, `loads` (`LoadSpec`, `None` = unknown), `horizon`, `carbon`, `forecasting` (`ForecastMode` ACTUAL/EXPECTED/ROBUST), `scheduling`, `coordination`, `execution` (lifecycle), `thermal`, `scaling`.
 
-Services: `carbon_service`, `providers/synthetic` (CSV) + `external` (stub), `carbon_accounting` (single scoring path), `scheduler_normalizer`, `scheduler_service`, `schedulers` (ASAP/GREEDY/CPSAT), `validator`, `forecast*`, `classification`, `load_normalizer`, `load_intelligence` (rule-based, live), `firestore_normalizer` (only Firestore touchpoint, pure function), `coordinator`, `coordinated_cpsat`, `execution_store` (SQLite + dict cache), `execution_events` (forward-only), `receding` (rolling horizon), `simulator` (deterministic, labeled simulation).
+Services: `carbon_service`, `providers/synthetic` (CSV) + `external` (stub), `carbon_accounting` (single scoring path; `co2_cost` may be `None`), `scheduler_normalizer`, `scheduler_service`, `schedulers` (ASAP/GREEDY/CPSAT), `validator`, `forecast*`, `classification`, `load_normalizer` (naive datetimes -> UTC with warning; inverted windows raise), `load_intelligence` (rule-based, live; LLM results below 0.6 confidence are `ambiguous: True`), `firestore_normalizer` (only Firestore touchpoint, pure function; warns on naive datetimes, sanitizes non-numeric energy), `coordinator`, `coordinated_cpsat`, `execution_store` (SQLite + dict cache, `Lock` + WAL + 30s timeout), `execution_events` (forward-only, validated energy), `receding` (rolling horizon), `simulator` (deterministic, labeled simulation; pause/resume keeps energy correct), `carbon_service` (provenance pruned, 512-entry cap, locked), `meter_provider` (locked, naive timestamps -> UTC).
+
+Provider hardening: CSV rejects non-finite values, caps files at 5MB / 100k rows, and requires a regular file; external rejects NaN and retries once on `TransportError`; synthetic builds phases in `__init__`; backtest reuses signal provenance.
 
 ## Data flows
 
@@ -76,6 +90,10 @@ Services: `carbon_service`, `providers/synthetic` (CSV) + `external` (stub), `ca
 | `CPSAT` | Constraint-programming optimum under `ObjectiveWeights` (+ optional `TimeOfUseTariff`, `ForecastConfig`). |
 
 Unknown name -> 400 `invalid_scheduler`, never substituted. `POST /schedule/compare` runs ASAP/GREEDY/CPSAT (or a requested subset) over unchanged input.
+
+Scheduler internals: base `_simulate_thermal` steps idle slots; `place_thermal_control` is contention-aware; `allocate_interruptible` takes a contiguous prefix with min-chunk repair; CP-SAT uses a non-negative delay term, forbids tail-start, and maps timeout to `UNKNOWN`/`INTERNAL_ERROR` with `_last_solver` reset; deadline-at-horizon-end is handled; robust carbon is clamped `>= 0`.
+
+Timezone rule: naive datetimes are rejected with 422. Schedule `carbon_start`/`carbon_end` must be both-or-neither; a `Z` suffix is coerced to an offset. Finite checks (`math.isfinite`) apply to capacity, `resolution_minutes` (allowed set `5|15|30|60`), `LoadSpec`/`Job`/`PlacedJob` numerics, and `PlacedJob` requires `end >= start`.
 
 ## Forecast modes (`ForecastMode`, `carbon` block on `POST /schedule`)
 

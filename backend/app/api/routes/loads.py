@@ -19,7 +19,9 @@ from typing import Optional
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+import math
 
 from ...core.feasibility import FeasibilityReport, is_thermal_profile_feasible, validate_load
 from ...domain.loads import Assumption, LoadSemantics, LoadSpec
@@ -28,6 +30,13 @@ from ...services.load_intelligence import IntelligenceUnavailable, get_load_inte
 from ...services.load_normalizer import LoadRequest
 
 router = APIRouter()
+
+
+def _err(detail: str, code: str, status: int) -> JSONResponse:
+    return JSONResponse(
+        status_code=status,
+        content={"detail": detail, "code": code, "message": detail},
+    )
 
 
 class ClassifyResponse(BaseModel):
@@ -46,6 +55,20 @@ class ValidateRequest(LoadSpec):
     # Optional concrete power profile; when present the thermal check simulates
     # it instead of asking whether the target is reachable at all.
     power_profile: Optional[list[float]] = None
+
+    @field_validator("power_profile")
+    @classmethod
+    def _profile_sane(cls, v: Optional[list[float]]) -> Optional[list[float]]:
+        if v is None:
+            return v
+        if not v:
+            raise ValueError("power_profile must not be empty when provided")
+        for entry in v:
+            if not math.isfinite(entry):
+                raise ValueError("power_profile entries must be finite numbers")
+            if entry < 0:
+                raise ValueError("power_profile entries must be >= 0")
+        return v
 
 
 class ValidateResponse(BaseModel):
@@ -66,9 +89,8 @@ def classify_load(body: LoadRequest) -> JSONResponse:
         classification = provider.classify(body.name)
         spec = provider.normalize(body)
     except IntelligenceUnavailable as exc:
-        return JSONResponse(
-            status_code=503, content={"detail": str(exc), "code": "provider_unavailable"}
-        )
+        detail = str(exc)
+        return _err(detail, "provider_unavailable", 503)
 
     report = validate_load(spec)
     response = ClassifyResponse(
@@ -103,4 +125,10 @@ def validate(body: ValidateRequest) -> JSONResponse:
         summary=report.explain(),
         metric_inputs=body.metric_inputs(),
     )
-    return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+    payload = response.model_dump(mode="json")
+    # lib/api/types.ts names this field `load_type`; the domain calls it
+    # `job_type`. Emit both so the TS contract and existing consumers agree.
+    sem = payload.get("semantics")
+    if isinstance(sem, dict) and "job_type" in sem and "load_type" not in sem:
+        sem["load_type"] = sem["job_type"]
+    return JSONResponse(status_code=200, content=payload)

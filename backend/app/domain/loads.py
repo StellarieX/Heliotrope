@@ -126,6 +126,16 @@ class LoadSemantics(BaseModel):
     constraints: list[str] = Field(default_factory=list)
     notes: str = ""
 
+    @property
+    def load_type(self) -> LoadType:
+        """Alias matching lib/api/types.ts ValidateResponse semantics.
+
+        The frontend contract names this field `load_type`; the domain
+        historically calls it `job_type`. The route merges both names
+        into the wire shape so neither side has to special-case.
+        """
+        return self.job_type
+
 
 def semantics_for(job_type: LoadType) -> LoadSemantics:
     """The single source of truth for §13 semantics."""
@@ -322,8 +332,15 @@ class LoadSpec(BaseModel):
 
     @field_validator("release_at", "deadline_at")
     @classmethod
-    def _aware(cls, v: Optional[datetime]) -> Optional[datetime]:
-        return None if v is None else _require_aware(v, "datetime")
+    def _aware(cls, v: Optional[datetime], info) -> Optional[datetime]:
+        return None if v is None else _require_aware(v, info.field_name)
+
+    @field_validator("power_kw", "max_power_kw", "energy_required_kwh", "confidence")
+    @classmethod
+    def _finite_float(cls, v: Optional[float], info) -> Optional[float]:
+        if v is not None and not math.isfinite(v):
+            raise ValueError(f"{info.field_name} must be a finite number")
+        return v
 
     @field_validator("duration_minutes", "min_chunk_minutes")
     @classmethod

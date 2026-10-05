@@ -236,9 +236,12 @@ class SchedulerService:
             explanation.co2_after_kg = after["co2_kg"]
             explanation.co2_saved_kg = before["co2_kg"] - after["co2_kg"]
             explanation.energy_kwh = after["energy_kwh"]
-            explanation.deadline_preserved = explanation.scheduled_end <= (
-                horizon.slot_start(min(job.deadline_slot, horizon.slot_count))
+            deadline_time = (
+                horizon.end
+                if job.deadline_slot >= horizon.slot_count
+                else horizon.slot_start(job.deadline_slot)
             )
+            explanation.deadline_preserved = explanation.scheduled_end <= deadline_time
             code, reason = self._reason_for(
                 scheduler_input, job, result, before, after, explanation
             )

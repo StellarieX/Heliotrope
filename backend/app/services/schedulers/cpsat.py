@@ -166,6 +166,15 @@ class CPSATScheduler(BaseScheduler):
                 ),
             )
         if status in (SolverStatus.UNKNOWN, SolverStatus.INTERNAL_ERROR):
+            # A timeout (or an invalid model) with no solution is NOT proof of
+            # infeasibility: the schedule might exist and the solver simply did
+            # not find it in time. Report UNKNOWN/INTERNAL_ERROR so the caller
+            # does not read "infeasible" as "impossible".
+            result_status = (
+                ScheduleStatus.UNKNOWN
+                if status is SolverStatus.UNKNOWN
+                else ScheduleStatus.INTERNAL_ERROR
+            )
             raise PlacementFailure(
                 job_id="",
                 reason=(
@@ -173,6 +182,7 @@ class CPSATScheduler(BaseScheduler):
                     f"finding a feasible solution within {self.config.time_limit_seconds}s. "
                     "No schedule was produced."
                 ),
+                status=result_status,
             )
 
         self._status = status
@@ -305,11 +315,18 @@ class CPSATScheduler(BaseScheduler):
                 else:
                     model.Add(on[t] <= sum(justification))
 
-            # the actual minimum-chunk guarantee: a start buys `n` on-slots
+            # the actual minimum-chunk guarantee: a start buys `n` on-slots.
+            # A start with fewer than `n` slots left in the window cannot buy a
+            # full chunk, so it is forbidden outright: accepting it would leave
+            # a short tail run that the independent validator (rightly) rejects
+            # as a minimum-chunk violation.
             window_set = set(window)
             for t in window:
                 chunk = [on[k] for k in range(t, t + n) if k in window_set]
-                model.Add(sum(chunk) >= len(chunk) * starts[t])
+                if len(chunk) < n:
+                    model.Add(starts[t] == 0)
+                else:
+                    model.Add(sum(chunk) >= len(chunk) * starts[t])
 
     def _model_thermal(self, model, job, pw_thermal, temp_thermal) -> None:
         """§13: power variables plus thermal-state variables.
@@ -478,7 +495,16 @@ class CPSATScheduler(BaseScheduler):
     def _delay_term(
         self, scheduler_input, run_atomic, start_atomic, pw_interruptible, on_interruptible, pw_thermal, slot_minutes
     ):
-        """Charge each slot of shift as if the job simply ran one slot longer."""
+        """Charge each slot of lateness as if the job simply ran longer.
+
+        Delay is power-weighted lateness: every watt drawn `d` slots after
+        release costs what that watt-slot would at mean carbon. The sum is
+        always non-negative and grows monotonically the later power is drawn,
+        so the optimizer can never reduce its "delay" penalty by extending a
+        run or by shifting power later. (A difference-of-consecutive-slots
+        formulation telescopes and can go negative, rewarding longer runs —
+        exactly backwards.)
+        """
         reference = int(round(scheduler_input.carbon.mean()))
         total = []
         for job in scheduler_input.jobs:
@@ -486,30 +512,11 @@ class CPSATScheduler(BaseScheduler):
                 for s, var in start_atomic.get(job.id, {}).items():
                     total.append((s - job.release_slot) * reference * slot_minutes * job.power_w * var)
             elif job.job_type is LoadType.DEFERRABLE_INTERRUPTIBLE:
-                on = on_interruptible.get(job.id, {})
-                for t, on_var in on.items():
-                    if t == job.release_slot:
-                        continue
-                    previous = on.get(t - 1)
-                    # t is a start slot when on[t] and not on[t-1]
-                    if previous is None:
-                        total.append((t - job.release_slot) * reference * slot_minutes * job.max_power_w * on_var)
-                    else:
-                        # (on[t] - on[t-1]) is the exact start indicator
-                        total.append(
-                            (t - job.release_slot) * reference * slot_minutes * job.max_power_w
-                            * (on_var - previous)
-                        )
+                for t, var in pw_interruptible.get(job.id, {}).items():
+                    total.append((t - job.release_slot) * reference * slot_minutes * var)
             elif job.job_type is LoadType.THERMAL:
                 for t, var in pw_thermal.get(job.id, {}).items():
-                    previous = pw_thermal.get(job.id, {}).get(t - 1)
-                    if previous is None:
-                        total.append((t - job.release_slot) * reference * slot_minutes * scale_max(job) * var)
-                    else:
-                        total.append(
-                            (t - job.release_slot) * reference * slot_minutes * scale_max(job)
-                            * (var - previous)
-                        )
+                    total.append((t - job.release_slot) * reference * slot_minutes * var)
         return sum(total) if total else 0
 
     def _cost_term(self, scheduler_input, run_atomic, pw_interruptible, pw_thermal, slot_minutes):
@@ -563,6 +570,13 @@ class CPSATScheduler(BaseScheduler):
         """CP-SAT needs the raw solver status and objective, so it overrides the
         shared template's bookkeeping while reusing all of its validation."""
         self._status = SolverStatus.UNKNOWN
+        # The engines are process-wide singletons: a previous run's solver and
+        # model must not leak into this one. Without the reset, a preflight
+        # failure (which returns before solving) would still find a stale
+        # `_last_solver` below and overwrite the honest INFEASIBLE report with
+        # leftover objective numbers from an unrelated run.
+        self._last_solver = None
+        self._last_model = None
         result = super().schedule(scheduler_input)
         solver = getattr(self, "_last_solver", None)
         if solver is not None:

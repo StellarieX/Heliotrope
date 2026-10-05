@@ -29,20 +29,36 @@ def get_carbon(
     # 422 from the service. The query object below validates only the window;
     # it never decides which provider serves, so there is exactly one place
     # where provider names are accepted or rejected.
+    def _err(detail: str, code: str, status: int) -> JSONResponse:
+        return JSONResponse(
+            status_code=status,
+            content={"detail": detail, "code": code, "message": detail},
+        )
+
+    def _coerce(value: str) -> str:
+        # Accept a trailing "Z" (UTC) which fromisoformat does not parse.
+        v = value.strip()
+        if v.endswith("Z"):
+            v = v[:-1] + "+00:00"
+        return v
+
     try:
         query = CarbonQuery(
-            start=datetime.fromisoformat(start),
-            end=datetime.fromisoformat(end),
+            start=datetime.fromisoformat(_coerce(start)),
+            end=datetime.fromisoformat(_coerce(end)),
             resolution_minutes=resolution_minutes,
             provider="synthetic",
         )
     except ValueError as exc:
-        return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_request"})
+        detail = str(exc)
+        return _err(detail, "invalid_request", 422)
     try:
         service = CarbonService.default() if provider is None else CarbonService(provider_name=provider)
         response = service.get_signal(query.start, query.end, query.resolution_minutes)
     except CarbonBadRequest as exc:
-        return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_request"})
+        detail = str(exc)
+        return _err(detail, "invalid_request", 422)
     except CarbonUnavailable as exc:
-        return JSONResponse(status_code=503, content={"detail": str(exc), "code": "provider_unavailable"})
+        detail = str(exc)
+        return _err(detail, "provider_unavailable", 503)
     return JSONResponse(status_code=200, content=response.model_dump(mode="json"))

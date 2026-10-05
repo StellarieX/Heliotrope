@@ -6,6 +6,7 @@ never silent: unconfigured external never falls back to synthetic.
 """
 
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -45,6 +46,11 @@ class CarbonService:
     max_range_days: int = 7
     cache_ttl_s: int = 300
     _cache: dict = field(default_factory=dict, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+
+    #: Upper bound on cached responses. Expired entries are pruned on every
+    #: access, so without this the dict only grows for distinct queries.
+    MAX_CACHE_ENTRIES = 512
 
     def __post_init__(self) -> None:
         self.provider_name = (self.provider_name or config.CARBON_PROVIDER or "synthetic").lower()
@@ -78,10 +84,15 @@ class CarbonService:
             raise CarbonBadRequest("resolution_minutes must be one of 5, 15, 30, 60")
 
         key = (self.provider_name, to_utc(start).isoformat(), to_utc(end).isoformat(), resolution_minutes, self.csv_path)
-        cached = self._cache.get(key)
-        if cached and cached.expires_at > time.time():
-            log.info("carbon cache hit provider=%s resolution=%s", self.provider_name, resolution_minutes)
-            return cached.response
+        now = time.time()
+        with self._lock:
+            expired = [k for k, entry in self._cache.items() if entry.expires_at <= now]
+            for k in expired:
+                del self._cache[k]
+            cached = self._cache.get(key)
+            if cached and cached.expires_at > now:
+                log.info("carbon cache hit provider=%s resolution=%s", self.provider_name, resolution_minutes)
+                return cached.response
 
         provider = self._provider()
         try:
@@ -122,7 +133,10 @@ class CarbonService:
                 is_forecast=any(p.is_forecast for p in points),
             ),
         )
-        self._cache[key] = _CacheEntry(response, time.time() + self.cache_ttl_s)
+        with self._lock:
+            self._cache[key] = _CacheEntry(response, time.time() + self.cache_ttl_s)
+            while len(self._cache) > self.MAX_CACHE_ENTRIES:
+                self._cache.pop(next(iter(self._cache)))
         ms = (time.perf_counter() - t0) * 1000
         log.info(
             "carbon served provider=%s points=%d missing=%d interpolated=%d latency_ms=%.1f",

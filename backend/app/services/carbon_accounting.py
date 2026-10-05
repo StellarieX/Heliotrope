@@ -18,9 +18,10 @@ BASELINE IS ALWAYS INCLUDED. A fixed fridge emits whether or not anything was
 scheduled around it. Savings are therefore measured against the full ASAP
 baseline, not against a fictional zero-load world.
 
-CARBON AND COST ARE SEPARATE (§27). `co2_cost` and `energy_cost` are computed
-independently from their own signals. A cheap hour that happens to be dirty is
-still charged for its carbon.
+CARBON AND COST ARE SEPARATE (§27). `energy_cost` is computed from the energy
+tariff. `co2_cost` is None until a real carbon price exists: pricing kilograms
+of CO2 with an energy price (currency per kWh) is a unit error, not a cost, so
+no number is reported rather than a wrong one.
 """
 
 from __future__ import annotations
@@ -191,14 +192,15 @@ class CarbonAccountingService:
     def _co2_cost(
         self, scheduler_input: SchedulerInput, slot_co2_kg: list[float]
     ) -> Optional[float]:
-        tariff = scheduler_input.tariff
-        if tariff is None:
-            return None
-        total = 0.0
-        for s in range(len(slot_co2_kg)):
-            price_micro = tariff.price_micro_per_kwh[s] if s < len(tariff.price_micro_per_kwh) else 0
-            total += slot_co2_kg[s] * (price_micro / 1_000_000.0)
-        return total
+        """No carbon price signal exists, so no carbon cost can be computed.
+
+        The tariff carries an ENERGY price (currency per kWh). Multiplying
+        kilograms of CO2 by that price yields currency*kg/kWh, which is not a
+        cost in any currency. Returning that number as `co2_cost` would present
+        a unit error as a price, so this returns None (unknown, not zero)
+        until a real carbon price is introduced.
+        """
+        return None
 
     # --- per-job attribution (§31, §51, §52) -------------------------------
 

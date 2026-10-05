@@ -11,6 +11,7 @@ whether to actually replan based on the configured ReschedulePolicy.
 from __future__ import annotations
 
 import logging
+import math
 
 from ..domain.execution import (
     JobExecutionState,
@@ -57,6 +58,31 @@ def transition(state: JobExecutionState, to: JobStatus, note: str = "") -> None:
         state.note = note
 
 
+def _validated_energy(payload: dict, fallback: float) -> float:
+    """Energy actuals from an event payload, validated like meter readings.
+
+    The route layer validates before calling, but `apply_event` is also called
+    directly (telemetry path, simulator, tests). A NaN, negative or absurd
+    value here would otherwise be stored as execution truth. Bounds mirror
+    `InMemoryMeterProvider` so both ingestion paths agree.
+    """
+    from .meter_provider import InMemoryMeterProvider
+
+    raw = payload.get("energy_delivered_kwh", fallback)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"energy_delivered_kwh {raw!r} is not a number") from exc
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"energy_delivered_kwh {raw!r} must be a finite value >= 0")
+    if value > InMemoryMeterProvider.MAX_ENERGY_KWH:
+        raise ValueError(
+            f"energy_delivered_kwh {value} exceeds plausible maximum "
+            f"{InMemoryMeterProvider.MAX_ENERGY_KWH}"
+        )
+    return value
+
+
 def apply_event(record: ScheduleRecord, event: ScheduleEvent) -> tuple[bool, list[str]]:
     """Apply one event to execution truth. Returns (replan_advised, notes)."""
     notes: list[str] = []
@@ -67,7 +93,7 @@ def apply_event(record: ScheduleRecord, event: ScheduleEvent) -> tuple[bool, lis
         state.actual_start = state.actual_start or event.timestamp
         state.last_updated = event.timestamp
     elif event.event_type is ScheduleEventType.JOB_COMPLETED and state:
-        state.energy_delivered_kwh = float(event.payload.get("energy_delivered_kwh", state.expected_energy_kwh))
+        state.energy_delivered_kwh = _validated_energy(event.payload, state.expected_energy_kwh)
         state.actual_end = event.timestamp
         transition(state, JobStatus.COMPLETED, "completed")
         state.last_updated = event.timestamp

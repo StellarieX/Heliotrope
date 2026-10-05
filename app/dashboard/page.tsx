@@ -149,6 +149,102 @@ const inputCls =
 /** localStorage key for the live schedule id, so a reload can rehydrate it. */
 const ACTIVE_SCHEDULE_KEY = "heliotrope:active_schedule_id";
 
+function getDefaultCoordinationData() {
+  const slotMs = 15 * 60 * 1000;
+  const now = new Date(Math.floor(Date.now() / slotMs) * slotMs);
+  const dl = new Date(now.getTime() + 10 * 3600 * 1000);
+  const participants = [
+    { id: "unit-101", name: "Apt 101" },
+    { id: "unit-102", name: "Apt 102" },
+    { id: "unit-201", name: "Apt 201" },
+  ];
+  const coordJobs: LoadSpec[] = [
+    {
+      id: "bldg-ev-1",
+      participant_id: "unit-101",
+      user_input: "EV 1",
+      normalized_name: "EV Charger 101",
+      category: "EV charging",
+      job_type: "DEFERRABLE_INTERRUPTIBLE",
+      confidence: 1.0,
+      ambiguous: false,
+      power_kw: 7.2,
+      max_power_kw: 7.2,
+      energy_required_kwh: 14.4,
+      min_chunk_minutes: 15,
+      duration_minutes: null,
+      release_at: now.toISOString(),
+      deadline_at: dl.toISOString(),
+      timezone: "UTC",
+      thermal: null,
+      explanation: "",
+      assumptions: [],
+      warnings: [],
+      required_fields: [],
+      alternatives: [],
+    },
+    {
+      id: "bldg-wh-2",
+      participant_id: "unit-102",
+      user_input: "Geyser 102",
+      normalized_name: "Geyser 102",
+      category: "Water heating",
+      job_type: "THERMAL",
+      confidence: 1.0,
+      ambiguous: false,
+      power_kw: 2.0,
+      max_power_kw: 2.0,
+      energy_required_kwh: null,
+      duration_minutes: null,
+      min_chunk_minutes: null,
+      release_at: now.toISOString(),
+      deadline_at: dl.toISOString(),
+      timezone: "UTC",
+      thermal: {
+        a: 0.9,
+        b: 2.75,
+        c: 2.0,
+        max_power_kw: 2.0,
+        resolution_minutes: 15,
+        temperature_initial_c: 45.0,
+        temperature_min_c: 40.0,
+        temperature_max_c: 65.0,
+        temperature_target_c: 55.0,
+      },
+      explanation: "",
+      assumptions: [],
+      warnings: [],
+      required_fields: [],
+      alternatives: [],
+    },
+    {
+      id: "bldg-wash-3",
+      participant_id: "unit-201",
+      user_input: "Washer 201",
+      normalized_name: "Laundry 201",
+      category: "Laundry",
+      job_type: "DEFERRABLE_ATOMIC",
+      confidence: 1.0,
+      ambiguous: false,
+      power_kw: 2.5,
+      max_power_kw: 2.5,
+      duration_minutes: 60,
+      energy_required_kwh: null,
+      min_chunk_minutes: null,
+      release_at: now.toISOString(),
+      deadline_at: dl.toISOString(),
+      timezone: "UTC",
+      thermal: null,
+      explanation: "",
+      assumptions: [],
+      warnings: [],
+      required_fields: [],
+      alternatives: [],
+    },
+  ];
+  return { participants, coordJobs };
+}
+
 export default function Dashboard() {
   const [auth] = useState(() => getFirebaseAuth());
   const [user, setUser] = useState<User | null>(null);
@@ -553,102 +649,6 @@ export default function Dashboard() {
     }
   }
 
-function getDefaultCoordinationData() {
-  const slotMs = 15 * 60 * 1000;
-  const now = new Date(Math.floor(Date.now() / slotMs) * slotMs);
-  const dl = new Date(now.getTime() + 10 * 3600 * 1000);
-  const participants = [
-    { id: "unit-101", name: "Apt 101" },
-    { id: "unit-102", name: "Apt 102" },
-    { id: "unit-201", name: "Apt 201" },
-  ];
-  const coordJobs: LoadSpec[] = [
-    {
-      id: "bldg-ev-1",
-      participant_id: "unit-101",
-      user_input: "EV 1",
-      normalized_name: "EV Charger 101",
-      category: "EV charging",
-      job_type: "DEFERRABLE_INTERRUPTIBLE",
-      confidence: 1.0,
-      ambiguous: false,
-      power_kw: 7.2,
-      max_power_kw: 7.2,
-      energy_required_kwh: 14.4,
-      min_chunk_minutes: 15,
-      duration_minutes: null,
-      release_at: now.toISOString(),
-      deadline_at: dl.toISOString(),
-      timezone: "UTC",
-      thermal: null,
-      explanation: "",
-      assumptions: [],
-      warnings: [],
-      required_fields: [],
-      alternatives: [],
-    },
-    {
-      id: "bldg-wh-2",
-      participant_id: "unit-102",
-      user_input: "Geyser 102",
-      normalized_name: "Geyser 102",
-      category: "Water heating",
-      job_type: "THERMAL",
-      confidence: 1.0,
-      ambiguous: false,
-      power_kw: 2.0,
-      max_power_kw: 2.0,
-      energy_required_kwh: null,
-      duration_minutes: null,
-      min_chunk_minutes: null,
-      release_at: now.toISOString(),
-      deadline_at: dl.toISOString(),
-      timezone: "UTC",
-      thermal: {
-        a: 0.9,
-        b: 2.75,
-        c: 2.0,
-        max_power_kw: 2.0,
-        resolution_minutes: 15,
-        temperature_initial_c: 45.0,
-        temperature_min_c: 40.0,
-        temperature_max_c: 65.0,
-        temperature_target_c: 55.0,
-      },
-      explanation: "",
-      assumptions: [],
-      warnings: [],
-      required_fields: [],
-      alternatives: [],
-    },
-    {
-      id: "bldg-wash-3",
-      participant_id: "unit-201",
-      user_input: "Washer 201",
-      normalized_name: "Laundry 201",
-      category: "Laundry",
-      job_type: "DEFERRABLE_ATOMIC",
-      confidence: 1.0,
-      ambiguous: false,
-      power_kw: 2.5,
-      max_power_kw: 2.5,
-      duration_minutes: 60,
-      energy_required_kwh: null,
-      min_chunk_minutes: null,
-      release_at: now.toISOString(),
-      deadline_at: dl.toISOString(),
-      timezone: "UTC",
-      thermal: null,
-      explanation: "",
-      assumptions: [],
-      warnings: [],
-      required_fields: [],
-      alternatives: [],
-    },
-  ];
-  return { participants, coordJobs };
-}
-
   const runCoordination = useCallback(
     async (capKw?: number) => {
       setCoordBusy(true);
@@ -699,23 +699,33 @@ function getDefaultCoordinationData() {
   );
 
   useEffect(() => {
+    let cancelled = false;
     const end = new Date();
     const start = new Date(end.getTime() - 24 * 3600 * 1000);
     getCarbonSignal({ start: start.toISOString(), end: end.toISOString() })
-      .then(setSignal)
-      .catch(() => setSignalError("Backend signal unreachable — is it running?"));
+      .then((s) => {
+        if (!cancelled) setSignal(s);
+      })
+      .catch(() => {
+        if (!cancelled) setSignalError("Backend signal unreachable — is it running?");
+      });
 
     const fStart = new Date();
     const fEnd = new Date(fStart.getTime() + 24 * 3600 * 1000);
     getCarbonForecast({ start: fStart.toISOString(), end: fEnd.toISOString() })
       .then((f) => {
+        if (cancelled) return;
         setForecast(f);
         setForecastError(null);
       })
       .catch(() => {
+        if (cancelled) return;
         setForecast(null);
         setForecastError("Forecast unavailable — showing actual signal only.");
       });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Demo coordination runs only when the user has no loads: the empty state
@@ -944,9 +954,16 @@ function getDefaultCoordinationData() {
     if (!user) return;
     const db = getDb();
     if (!db) return;
-    await deleteDoc(doc(db, "users", user.uid, "jobs", id));
+    const prev = jobs;
     setJobs((js) => js.filter((j) => j.id !== id));
     setRanked(null);
+    try {
+      await deleteDoc(doc(db, "users", user.uid, "jobs", id));
+    } catch {
+      // Restore the row: the delete never landed (rules/offline), so the
+      // list must still show it.
+      setJobs(prev);
+    }
   }
 
   if (!ready) {
@@ -1143,7 +1160,7 @@ function getDefaultCoordinationData() {
               </label>
               <label className="flex items-center gap-2 text-[13px] text-zinc-400">
                 <span className="font-mono text-[11px] text-zinc-600">+{fFlex}h flex</span>
-                <input type="range" min={0} max={6} value={fFlex} onChange={(e) => setFFlex(Number(e.target.value))} className="w-28 cursor-pointer accent-lime-300" />
+                <input type="range" min={0} max={6} value={fFlex} aria-label="Flexibility in hours" onChange={(e) => setFFlex(Number(e.target.value))} className="w-28 cursor-pointer accent-lime-300" />
               </label>
               <button
                 onClick={() => void addJob()}
@@ -1266,7 +1283,7 @@ function getDefaultCoordinationData() {
               <div className="flex items-start gap-2">
                 <label className="flex flex-col gap-1 text-[13px] text-zinc-400">
                   <span className="flex items-center gap-2">
-                    <input value={liveCapacity} onChange={(e) => setLiveCapacity(e.target.value.replace(/[^0-9.]/g, ""))} inputMode="decimal" className={`w-20 ${inputCls}`} />
+                    <input value={liveCapacity} aria-label="Live schedule capacity in kilowatts" onChange={(e) => setLiveCapacity(e.target.value.replace(/[^0-9.]/g, ""))} inputMode="decimal" className={`w-20 ${inputCls}`} />
                     <span className="font-mono text-[11px] text-zinc-600">kW</span>
                   </span>
                   {liveCapacityError && (
@@ -1322,6 +1339,7 @@ function getDefaultCoordinationData() {
                 <span className="flex items-center gap-2">
                   <input
                     value={coordCapacity}
+                    aria-label="Building capacity limit in kilowatts"
                     onChange={(e) => setCoordCapacity(e.target.value.replace(/[^0-9.]/g, ""))}
                     inputMode="decimal"
                     placeholder="30"

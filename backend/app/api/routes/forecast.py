@@ -33,7 +33,11 @@ service = ForecastService()
 
 
 def _error(exc: Exception, status: int, code: str) -> JSONResponse:
-    return JSONResponse(status_code=status, content={"detail": str(exc), "code": code})
+    detail = str(exc)
+    return JSONResponse(
+        status_code=status,
+        content={"detail": detail, "code": code, "message": detail},
+    )
 
 
 def _parsed(value: str, field: str) -> datetime:

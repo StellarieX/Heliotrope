@@ -6,12 +6,9 @@ import { useRouter } from "next/navigation";
 import { deleteUser, onAuthStateChanged, reauthenticateWithPopup, signOut, updateProfile, type User } from "firebase/auth";
 import { deleteDoc, doc, getDoc, getDocs, collection, runTransaction, serverTimestamp, setDoc } from "firebase/firestore";
 import { getDb, getFirebaseAuth, getGoogleProvider } from "../../lib/firebase";
+import { validUsername } from "../../lib/username";
 
 type Status = { kind: "idle" | "ok" | "err"; text: string };
-
-function validUsername(v: string) {
-  return /^[a-z0-9_]{3,20}$/.test(v);
-}
 
 export default function Account() {
   const router = useRouter();

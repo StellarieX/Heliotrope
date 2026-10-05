@@ -223,6 +223,7 @@ class ForecastBacktester:
         all_rows: list[tuple[datetime, float, float, float, float]] = []
         windows: list[dict] = []
         training_sizes: list[int] = []
+        merged_provenance = None
 
         for origin in origins:
             # §25: the slice is taken by the BACKTESTER, independently of the
@@ -250,6 +251,8 @@ class ForecastBacktester:
                 continue
 
             training_sizes.append(len(usable))
+            if merged_provenance is None:
+                merged_provenance = forecast.provenance
             scored = 0
             for point in forecast.points:
                 actual = actual_map.get(point.timestamp)
@@ -276,20 +279,12 @@ class ForecastBacktester:
                 }
             )
 
-        if not all_rows:
+        if merged_provenance is None:
             raise BacktestError("no forecast point could be scored against an actual")
-
         merged = CarbonForecast(
             points=[],
             resolution_minutes=config.resolution_minutes,
-            provenance=forecaster.forecast(
-                history.before(origins[-1]),
-                origins[-1],
-                origins[-1] + horizon,
-                resolution_minutes=config.resolution_minutes,
-                coverage=config.coverage,
-                lookback_days=config.lookback_days,
-            ).provenance,
+            provenance=merged_provenance,
         )
         from ..domain.forecasting import CarbonForecastPoint
 

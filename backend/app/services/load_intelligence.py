@@ -216,9 +216,15 @@ def _gemini_classification(
         category=category,
         job_type=job_type,
         shiftable=sem.shiftable,
-        confidence=0.75,
-        ambiguous=False,
-        reason="Gemini structured classification of the load description.",
+        # Unverified LLM output stays below the rule-based low-confidence
+        # threshold (0.70) and is flagged ambiguous: a valid enum is not
+        # evidence the label is right, and 0.75 would claim otherwise.
+        confidence=0.6,
+        ambiguous=True,
+        reason=(
+            "Gemini structured classification of the load description. "
+            "Unverified model output — confirm the category before relying on it."
+        ),
         matched_rule="gemini",
         alternatives=[],
         required_fields=list(required_fields_for(job_type)),

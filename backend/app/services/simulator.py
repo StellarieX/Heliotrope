@@ -119,6 +119,16 @@ class ExecutionSimulator:
                 apply_event(record, event)
                 if action == "start":
                     self._draw_from_plan(record, item["job"], at)
+                elif action == "resume":
+                    # Drawing restarts where the plan still has power: slots
+                    # already delivered stay delivered, future plan refills.
+                    self._draw_from_plan(record, item["job"], at)
+                elif action in ("pause", "fail"):
+                    # The device stops drawing at `at`. Draws the plan had
+                    # scheduled for slots ending after the event never happen;
+                    # without trimming, a later replan would see phantom energy
+                    # and under-schedule the remainder.
+                    self._trim_future_draws(record, item["job"], at)
                 applied.append(f"{item['job']} {action}")
             # Every scripted moment also advances the clock (miss detection).
             clock = ScheduleEvent(event_type=ScheduleEventType.CLOCK_ADVANCED, timestamp=at)
@@ -183,12 +193,47 @@ class ExecutionSimulator:
                     break
             if plan:
                 break
-        drawn = 0
         for slot in sorted(plan):
             if horizon.slot_start(slot) >= since and plan[slot] > 0:
                 state.delivered_slots[slot] = plan[slot]
-                drawn += plan[slot]
-        if drawn:
-            state.energy_delivered_kwh = round(drawn * self.slot_minutes / 60_000, 4)
+        self._refresh_energy(record, state)
         state.last_updated = since
         log.info("simulated draw job=%s from=%s", job_id, since.isoformat())
+
+    def _trim_future_draws(
+        self, record: ScheduleRecord, job_id: str, at: datetime
+    ) -> None:
+        """Drop recorded draws for slots ending after `at`.
+
+        Slots fully completed before the event keep their draws (that energy
+        really flowed); anything still in progress or in the future did not
+        happen once the device paused or failed.
+        """
+        if record.scheduler_input is None:
+            return
+        horizon = record.scheduler_input.horizon
+        state = record.execution.get(job_id)
+        if state is None:
+            return
+        kept = {
+            slot: power
+            for slot, power in state.delivered_slots.items()
+            if horizon.slot_end(slot) <= at
+        }
+        if len(kept) != len(state.delivered_slots):
+            state.delivered_slots.clear()
+            state.delivered_slots.update(kept)
+            self._refresh_energy(record, state)
+        state.last_updated = at
+        log.info("simulated trim job=%s at=%s", job_id, at.isoformat())
+
+    def _refresh_energy(self, record: ScheduleRecord, state) -> None:
+        """Recompute delivered energy from every recorded draw.
+
+        Always derived from the full `delivered_slots` mapping — never
+        overwritten from just the latest draw — so a start followed by a
+        resume cannot lose the energy drawn before the pause.
+        """
+        slot_minutes = record.scheduler_input.horizon.slot_minutes
+        total_w = sum(p for p in state.delivered_slots.values() if p > 0)
+        state.energy_delivered_kwh = round(total_w * slot_minutes / 60_000, 4)

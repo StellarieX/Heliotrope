@@ -28,9 +28,30 @@ from app.domain.coordination import CoordinationRequest, Participant, SharedReso
 from app.services.execution_store import ExecutionStore
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers",
+        "live: hits a deployed frontend/backend over HTTP; skipped unless the "
+        "matching LIVE env var is set (see tests/e2e/test_live_deploy.py)",
+    )
+
+
 @pytest.fixture(scope="session")
-def client() -> TestClient:
-    """FastAPI TestClient instance connected to Heliotrope application."""
+def client():
+    """HTTP client for the Heliotrope API.
+
+    Default: in-process FastAPI TestClient (no network, no ports).
+    Live mode: set HELIOTROPE_E2E_BASE_URL to a deployed backend origin
+    (e.g. https://api.example.com or http://localhost:8000 for a Docker-run
+    backend) and this fixture returns an httpx.Client with the same
+    get/post interface the tier tests use, so the whole suite can run
+    against a real deployment: HELIOTROPE_E2E_BASE_URL=... pytest tests/e2e
+    """
+    live_base = os.environ.get("HELIOTROPE_E2E_BASE_URL", "").strip().rstrip("/")
+    if live_base:
+        import httpx
+
+        return httpx.Client(base_url=live_base, timeout=30.0)
     return TestClient(app)
 
 

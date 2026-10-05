@@ -20,12 +20,19 @@ cp .env.example .env.local   # fill Firebase keys + backend URL
 | `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN` | frontend | for auth/DB | Firebase web config |
 | `NEXT_PUBLIC_FIREBASE_PROJECT_ID` | frontend | for auth/DB | Firebase web config |
 | `NEXT_PUBLIC_FIREBASE_APP_ID` | frontend | for auth/DB | Firebase web config |
-| `NEXT_PUBLIC_BACKEND_URL` | frontend | no | defaults to `http://localhost:8000` (`lib/api/client.ts:17`) |
-| `HELIOTROPE_ENV` | backend | no | default `development`; controls dev CORS (`backend/app/core/config.py:11`) |
-| `PORT` | backend | no | default `8000` |
-| `CORS_ALLOW_ORIGINS` | backend | prod only | comma-separated; dev allows loopback ports automatically |
+| `NEXT_PUBLIC_BACKEND_URL` | frontend | no | `http://localhost:8000` in dev (`lib/api/client.ts:18`); empty string in Vercel production for same-origin mode (see `docs/DEPLOYMENT.md`) |
+| `BACKEND_URL` | frontend server-only (Vercel dashboard, never `NEXT_PUBLIC_`) | prod same-origin only | rewrite target for `/api/v1/:path*` (`next.config.ts:17`); falls back to `NEXT_PUBLIC_BACKEND_URL`, then localhost |
+| `HELIOTROPE_ENV` | backend | no | default `development`; controls dev CORS (`backend/app/core/config.py:58`) |
+| `PORT` | backend | no | default `8000`; non-integer values fail fast at import |
+| `LOG_LEVEL` | backend | no | default `info` |
+| `CORS_ALLOW_ORIGINS` | backend | prod direct-mode only | comma-separated, slashes stripped; `"*"` gets credential-less middleware; Vercel hosts auto-trusted |
 | `CARBON_PROVIDER` | backend | no | default `synthetic` |
-| `CARBON_CSV_PATH` | backend | for csv provider | path to carbon CSV |
+| `CARBON_CSV_PATH` | backend | for csv provider | path to carbon CSV (regular file, ≤5MB / ≤100k rows, finite values only) |
+| `CARBON_MAX_RANGE_DAYS` | backend | no | default `7` |
+| `CARBON_CACHE_TTL_S` | backend | no | default `300` |
+| `CARBON_SYNTHETIC_SEED` | backend | no | default `7` |
+| `LOAD_INTELLIGENCE_PROVIDER` | backend | no | default `rule_based` |
+| `DEFAULT_LOAD_TIMEZONE` | backend | no | default `UTC` |
 | `JEV_API_KEY` | backend | no | legacy alias for `GEMINI_API_KEY`; `GEMINI_API_KEY` wins when both are set (`backend/app/core/config.py:33`) |
 | `GEMINI_API_KEY` | backend | no | live Gemini classifier adapter via `httpx`; falls back to local rules when unset or on error |
 | `ELECTRICITY_MAPS_API_KEY` | backend | no | live Electricity Maps adapter via `httpx` (zone `ELECTRICITY_MAPS_ZONE`, default `US-CAL-CISO`); falls back to synthetic signal when unset or on error |
@@ -69,9 +76,10 @@ On macOS/Linux replace `backend/.venv/Scripts/python` with
 ```bash
 npm run lint && npm run build
 npx tsc --noEmit
-backend/.venv/Scripts/python -m pytest backend/tests -q   # backend unit/property (38 files)
-backend/.venv/Scripts/python -m pytest tests/e2e -v       # e2e tiers
-python tests/e2e/runner.py                                # structured 4-tier summary (120 tests)
+backend/.venv/Scripts/python -m pytest backend/tests -q   # backend unit/property
+backend/.venv/Scripts/python -m pytest tests/e2e -v       # e2e tiers (162 tests)
+python tests/e2e/runner.py                                # structured tier summary
+HELIOTROPE_E2E_BASE_URL=https://<deploy> python -m pytest tests/e2e -m live  # live deploy check
 ```
 
 E2E tiers (`tests/e2e/runner.py`): T1 features (50), T2 boundaries (50),

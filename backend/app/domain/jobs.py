@@ -15,6 +15,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+import math
+
 
 class JobType(str, Enum):
     FIXED = "FIXED"
@@ -26,6 +28,12 @@ class JobType(str, Enum):
 def _require_aware(v: datetime, field: str) -> datetime:
     if v.tzinfo is None:
         raise ValueError(f"{field} must be timezone-aware (got naive datetime)")
+    return v
+
+
+def _require_finite_optional(v: Optional[float], field: str) -> Optional[float]:
+    if v is not None and not math.isfinite(v):
+        raise ValueError(f"{field} must be a finite number")
     return v
 
 
@@ -54,8 +62,13 @@ class Job(BaseModel):
 
     @field_validator("release_time", "deadline")
     @classmethod
-    def _aware(cls, v: datetime) -> datetime:
-        return _require_aware(v, "datetime")
+    def _aware(cls, v: datetime, info) -> datetime:
+        return _require_aware(v, info.field_name)
+
+    @field_validator("power_kw", "energy_kwh", "flexibility_hours", "max_power_kw")
+    @classmethod
+    def _finite(cls, v: Optional[float], info) -> Optional[float]:
+        return _require_finite_optional(v, info.field_name)
 
     @model_validator(mode="after")
     def _coherent(self) -> "Job":

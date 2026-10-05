@@ -12,6 +12,12 @@ reported on its own TIER5 line; the 4-tier TOTAL line is unchanged.
 
 Usage:
     python tests/e2e/runner.py
+
+Live deployment (Docker backend / Vercel frontend) instead of in-process:
+    HELIOTROPE_E2E_BASE_URL=http://localhost:8000 python tests/e2e/runner.py
+    HELIOTROPE_E2E_BASE_URL=https://<backend> python -m pytest tests/e2e -q -m live
+Hermetic only (skip anything marked live):
+    python -m pytest tests/e2e -q -k "not live"
 """
 
 from __future__ import annotations

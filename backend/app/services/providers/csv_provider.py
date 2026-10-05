@@ -13,6 +13,7 @@ are reported, never silently smoothed over.
 """
 
 import csv
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +39,14 @@ class CSVConfig:
     max_gap_minutes: int = 60
 
 
+#: Refuse to read CSV files larger than this: an unbounded read of a
+#: caller-influenced path is a memory-exhaustion vector.
+MAX_CSV_BYTES = 5_000_000
+#: Refuse files with more rows than this for the same reason. 60 days at
+#: 5-minute resolution is ~17k rows; 100k leaves wide headroom.
+MAX_CSV_ROWS = 100_000
+
+
 class CSVProvider:
     name = "csv"
 
@@ -48,11 +57,29 @@ class CSVProvider:
         self.source = f"csv:{Path(config.path).name}"
 
     def _load(self) -> dict[datetime, float]:
+        resolved = Path(self.config.path).expanduser().resolve()
+        if not resolved.is_file():
+            raise ProviderDataInvalid(
+                f"cannot read CSV at {self.config.path}: not a regular file"
+            )
         try:
-            text = Path(self.config.path).read_text(encoding="utf-8")
+            size = resolved.stat().st_size
+        except OSError as exc:
+            raise ProviderDataInvalid(f"cannot read CSV at {self.config.path}: {exc}") from exc
+        if size > MAX_CSV_BYTES:
+            raise ProviderDataInvalid(
+                f"CSV at {self.config.path} is {size} bytes, above the "
+                f"{MAX_CSV_BYTES}-byte limit — refusing to load it wholesale"
+            )
+        try:
+            text = resolved.read_text(encoding="utf-8")
         except OSError as exc:
             raise ProviderDataInvalid(f"cannot read CSV at {self.config.path}: {exc}") from exc
         rows = list(csv.DictReader(text.splitlines()))
+        if len(rows) > MAX_CSV_ROWS:
+            raise ProviderDataInvalid(
+                f"CSV has {len(rows)} data rows, above the {MAX_CSV_ROWS}-row limit"
+            )
         if not rows or "timestamp" not in (rows[0] or {}) or "carbon_intensity_gco2_per_kwh" not in (rows[0] or {}):
             raise ProviderDataInvalid("CSV must have header: timestamp,carbon_intensity_gco2_per_kwh")
         values: dict[datetime, float] = {}
@@ -67,6 +94,8 @@ class CSVProvider:
                 v = float(raw_v)
             except ValueError:
                 raise ProviderDataInvalid(f"row {i}: invalid number {raw_v!r}") from None
+            if not math.isfinite(v):
+                raise ProviderDataInvalid(f"row {i}: non-finite intensity {raw_v!r}")
             if v < 0:
                 raise ProviderDataInvalid(f"row {i}: negative intensity {v}")
             if ts in values:

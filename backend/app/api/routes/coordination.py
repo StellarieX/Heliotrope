@@ -18,12 +18,41 @@ router = APIRouter()
 coordinator = MultiUserCoordinator()
 
 
-def _signal_for(request: CoordinationRequest):
-    from datetime import datetime, timedelta
+def _err(detail: str, code: str, status: int) -> JSONResponse:
+    return JSONResponse(
+        status_code=status,
+        content={"detail": detail, "code": code, "message": detail},
+    )
 
+
+def _parse_aware_iso(value: str, field: str):
+    from datetime import datetime
+
+    v = value.strip()
+    if v.endswith("Z"):
+        v = v[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(v)
+    except ValueError as exc:
+        raise ValueError(f"{field} is not an ISO-8601 timestamp: {value!r}") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(
+            f"{field} must be timezone-aware; a naive timestamp would be interpreted "
+            "against the server's local zone, which silently shifts a schedule"
+        )
+    return parsed
+
+
+def _signal_for(request: CoordinationRequest):
+    from datetime import timedelta
+
+    if (request.carbon_start is None) != (request.carbon_end is None):
+        from ...services.coordinator import CoordinationError as _CE
+
+        raise _CE("supply both carbon_start and carbon_end, or neither")
     if request.carbon_start and request.carbon_end:
-        start = datetime.fromisoformat(request.carbon_start)
-        end = datetime.fromisoformat(request.carbon_end)
+        start = _parse_aware_iso(request.carbon_start, "carbon_start")
+        end = _parse_aware_iso(request.carbon_end, "carbon_end")
     else:
         moments = [
             m
@@ -48,21 +77,21 @@ def coordinate(request: CoordinationRequest) -> JSONResponse:
     try:
         signal = _signal_for(request)
     except CoordinationError as exc:
-        return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_request"})
+        return _err(str(exc), "invalid_request", 422)
     except CarbonBadRequest as exc:
-        return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_request"})
+        return _err(str(exc), "invalid_request", 422)
     except CarbonUnavailable as exc:
-        return JSONResponse(status_code=503, content={"detail": str(exc), "code": "provider_unavailable"})
+        return _err(str(exc), "provider_unavailable", 503)
     except ValueError as exc:
-        return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_request"})
+        return _err(str(exc), "invalid_request", 422)
 
     try:
         result = coordinator.coordinate(request, signal)
         payload = result.model_dump(mode="json")
     except CoordinationError as exc:
-        return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_request"})
+        return _err(str(exc), "invalid_request", 422)
     except NormalizationError as exc:
-        return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_request"})
+        return _err(str(exc), "invalid_request", 422)
     return JSONResponse(status_code=200, content=payload)
 
 
@@ -72,17 +101,17 @@ def compare(request: CoordinationRequest) -> JSONResponse:
     try:
         signal = _signal_for(request)
     except CoordinationError as exc:
-        return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_request"})
+        return _err(str(exc), "invalid_request", 422)
     except CarbonBadRequest as exc:
-        return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_request"})
+        return _err(str(exc), "invalid_request", 422)
     except CarbonUnavailable as exc:
-        return JSONResponse(status_code=503, content={"detail": str(exc), "code": "provider_unavailable"})
+        return _err(str(exc), "provider_unavailable", 503)
     except ValueError as exc:
-        return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_request"})
+        return _err(str(exc), "invalid_request", 422)
     try:
         comparison = coordinator.compare(request, signal)
     except CoordinationError as exc:
-        return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_request"})
+        return _err(str(exc), "invalid_request", 422)
     except NormalizationError as exc:
-        return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_request"})
+        return _err(str(exc), "invalid_request", 422)
     return JSONResponse(status_code=200, content=comparison.model_dump(mode="json"))

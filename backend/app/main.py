@@ -5,10 +5,11 @@ and feasibility are pure physical reasoning and are live.
 """
 
 from fastapi import FastAPI, Request
-from fastapi.exceptions import RequestValidationError
+from fastapi.exceptions import RequestValidationError, ResponseValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .api.routes import carbon, coordination, execution, forecast, health, loads, schedule
 from .core import config
@@ -18,22 +19,38 @@ app = FastAPI(title="Heliotrope Backend", version="0.1.0")
 # The frontend runs on a different origin (Next.js on :3000, this API on :8000).
 # Without CORS every browser fetch() fails while curl keeps working, which makes
 # the UI report "backend unreachable" for a backend that is perfectly healthy.
-_cors_kwargs = {
-    "allow_credentials": True,
-    "allow_methods": ["*"],
-    "allow_headers": ["*"],
-}
+#
+# Credentials + wildcard is an invalid combination: browsers reject
+# `Access-Control-Allow-Origin: *` on credentialed requests, and Starlette
+# documents that `allow_origins=["*"]` must not be paired with
+# `allow_credentials=True`. Explicit origins echo a single origin and work
+# with credentials; a configured "*" therefore gets a credential-less
+# middleware so production explicit origins keep working.
+_explicit_origins = [o for o in config.CORS_ALLOW_ORIGINS if o != "*"]
+_wildcard_requested = "*" in config.CORS_ALLOW_ORIGINS
 if config.CORS_ALLOW_LOCALHOST_IN_DEVELOPMENT:
     app.add_middleware(
         CORSMiddleware,
         allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?",
-        **_cors_kwargs,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
-if config.CORS_ALLOW_ORIGINS:
+if _wildcard_requested:
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=config.CORS_ALLOW_ORIGINS,
-        **_cors_kwargs,
+        allow_origins=["*"],
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+if _explicit_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_explicit_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
 
 @app.exception_handler(RequestValidationError)
@@ -57,6 +74,38 @@ async def _validation_error(request: Request, exc: RequestValidationError):
             "code": "invalid_request",
             "message": "the request body did not validate",
         },
+    )
+
+
+@app.exception_handler(ResponseValidationError)
+async def _response_validation_error(request: Request, exc: ResponseValidationError):
+    """A response that fails its own schema is a server bug, not a client one."""
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": jsonable_encoder(exc.errors()),
+            "code": "internal_error",
+            "message": "the server produced an invalid response",
+        },
+    )
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _http_error(request: Request, exc: StarletteHTTPException):
+    """Give framework HTTP errors (404, 405, ...) the same {detail, code, message} shape."""
+    code = "not_found" if exc.status_code == 404 else "http_error"
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": str(exc.detail), "code": code, "message": str(exc.detail)},
+    )
+
+
+@app.exception_handler(Exception)
+async def _unhandled_error(request: Request, exc: Exception):
+    """Last-resort guard: never leak a bare 500 without code/message."""
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "internal server error", "code": "internal_error", "message": "internal server error"},
     )
 
 
