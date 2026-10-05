@@ -38,7 +38,7 @@ See `README.md` for full stack setup (Next.js 16 / React 19 / TypeScript strict 
 Run:
 
 - `pytest backend/tests/` — backend unit tests
-- `pytest tests/ -x -q` — full E2E tiers (needs backend importable; `clean_execution_store` in `tests/e2e/conftest.py` builds a default `ExecutionStore()` on the shared default SQLite path — per-test isolated DB files are NOT wired, see `TEST_INFRA.md` correction)
+- `pytest tests/ -x -q` — full E2E tiers (needs backend importable; `clean_execution_store` in `tests/e2e/conftest.py` builds a default `ExecutionStore()` on the shared default SQLite path — per-test isolated DB files are NOT wired, see `docs/TEST_INFRA.md` correction)
 - `pytest tests/test_firestore_rules_challenge.py tests/e2e/test_m1_adversarial_challenger.py` — security suites
 - Property tests (`backend/tests/test_properties.py`) need `pip install "hypothesis>=6.100"`; `.hypothesis/` cache dir is gitignored.
 
@@ -50,4 +50,4 @@ Run:
 - [ ] `pytest backend/tests/ tests/` passes (or note which tier was run and why)
 - [ ] Honesty policy followed (no unlabeled synthetic data, no `0`-for-unknown)
 - [ ] Firestore rule changes include challenge-test updates
-- [ ] Docs updated (`README.md` / `DEPLOYMENT.md` / `CHANGELOG.md` if behavior changed)
+- [ ] Docs updated (`README.md` / `docs/DEPLOYMENT.md` / `CHANGELOG.md` if behavior changed)

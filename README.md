@@ -22,8 +22,8 @@ A load's journey: describe it in plain words → `/loads/classify` turns it into
 
 ## Architecture in brief
 
-- **Solvers:** ASAP (carbon-blind baseline), greedy (cheapest-first heuristic), CP-SAT (exact OR-Tools model, integer-scaled, independently validated). `INFEASIBLE` is a 200 response, never a silent guess. See `ARCHITECTURE.md`.
-- **Carbon:** synthetic duck-curve by default, CSV upload, or live Electricity Maps. Forecasts come in EXPECTED or ROBUST (`predicted + λ·(upper − predicted)`) modes. See `API.md`.
+- **Solvers:** ASAP (carbon-blind baseline), greedy (cheapest-first heuristic), CP-SAT (exact OR-Tools model, integer-scaled, independently validated). `INFEASIBLE` is a 200 response, never a silent guess. See `docs/ARCHITECTURE.md`.
+- **Carbon:** synthetic duck-curve by default, CSV upload, or live Electricity Maps. Forecasts come in EXPECTED or ROBUST (`predicted + λ·(upper − predicted)`) modes. See `docs/API.md`.
 - **Execution:** versioned schedules in SQLite, rolling-horizon replans with frozen past, event/override guardrails, client-driven tick for periodic replan, meter telemetry (`MEASURED`) alongside deterministic simulation (`SIMULATED`).
 - **Honesty policy:** synthetic or simulated data is always labeled; unknown values stay `null`, never zero; unconfigured providers refuse instead of inventing output.
 
@@ -41,7 +41,7 @@ backend/.venv/Scripts/python -m pip install -e "./backend[dev]"
 backend/.venv/Scripts/python -m uvicorn app.main:app --app-dir backend --port 8000
 ```
 
-Full environment table: `SETUP.md`. API reference: `API.md`. Deployment: `DEPLOYMENT.md`.
+Full environment table: `docs/SETUP.md`. API reference: `docs/API.md`. Deployment: `docs/DEPLOYMENT.md`.
 
 ## Verify it
 

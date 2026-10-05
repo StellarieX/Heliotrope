@@ -97,8 +97,8 @@ Reserved for M5 Phase 2 / PROJECT.md F12. Planned coverage (not yet implemented 
 ## Directory & File Layout
 ```
 Heliotrope-main/
-├── TEST_INFRA.md                   # This infrastructure specification
-├── TEST_READY.md                   # Test suite readiness & execution report
+├── docs/TEST_INFRA.md              # This infrastructure specification
+├── docs/TEST_READY.md              # Test suite readiness & execution report
 ├── tests/
 │   └── e2e/
 │       ├── __init__.py
