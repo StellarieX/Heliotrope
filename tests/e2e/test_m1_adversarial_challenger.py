@@ -1,8 +1,7 @@
-"""Empirical Adversarial Test Suite for Milestone 1 (R1: Security & Identity Guardrails).
+"""Empirical adversarial test suite for Milestone 1 (R1: security & identity guardrails).
 
-Author: Challenger 2 (teamwork_preview_challenger_m1_2)
 Target: firestore.rules
-Authoritative Specs: ORIGINAL_REQUEST.md (R1) & PROJECT.md (Features 1 & 2)
+Scope: requirements R1, project spec features 1 & 2.
 
 Tests attack vectors and boundary cases against firestore.rules:
 1. Attack vectors on /usernames/{name}:

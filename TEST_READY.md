@@ -2,8 +2,8 @@
 
 **Status**: READY — 100% PASS (120/120 Tests Passing)  
 **Date**: 2026-10-05T11:58:00Z  
-**Author**: E2E Test Writer (`teamwork_preview_test_writer_e2e`)  
-**Scope Reference**: `.agents/teamwork/PROJECT.md` and `.agents/teamwork/ORIGINAL_REQUEST.md` (E2E scope: Features 1–10, Tiers 1–4; F11 Hypothesis zero-regression and F12 Tier 5 out of scope for this run)
+**Author**: Heliotrope contributors
+**Scope Reference**: the project spec (E2E scope: Features 1–10, Tiers 1–4; F11 Hypothesis zero-regression and F12 Tier 5 out of scope for this run)
 
 ---
 
@@ -127,7 +127,7 @@ python -m pytest backend/tests/test_e2e_requirements.py -v
 
 - **Scope:** docs-sync verification of M3/M4 code truth — tick (`POST /schedules/{id}/tick`), telemetry (`POST /schedules/{id}/telemetry`, `MEASURED` vs `SIMULATED` source), `capacity_profile_kw` on `/schedule` + coordination + replan, Electricity Maps + Gemini live adapters with honest fallback, dashboard `localStorage` rehydration + tick polling.
 - **Frontend:** `npm run lint` exit 0 and `npx tsc --noEmit` exit 0, verified 2026-10-05.
-- **Full backend suite + Tier 5:** PROVEN 2026-10-05 — `test_properties.py` 11/11 passed (hypothesis installed); FULL `pytest backend/tests` (no ignores, incl. Tier 5 bridge): **4693 passed, 0 failed** in 271.65s. E2E runner: Tiers 1-4 120/120 + TIER5 10/10, exit 0.
+- **Full backend suite + Tier 5:** PROVEN 2026-10-05 — `test_properties.py` 11/11 passed (hypothesis installed); FULL `pytest backend/tests` (no ignores, incl. Tier 5 bridge): **4694 passed, 0 failed** (verified re-run with JUnit: 4694 tests, 0 failures/errors/skips). E2E runner: Tiers 1-4 120/120 + TIER5 10/10, exit 0.
 
 ---
 

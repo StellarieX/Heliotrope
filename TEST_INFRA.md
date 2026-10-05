@@ -1,7 +1,7 @@
 # TEST_INFRA — Heliotrope E2E Test Infrastructure
 
 ## Overview
-This document defines the End-to-End (E2E) testing infrastructure for the Heliotrope platform overhaul. It establishes the testing methodology, tier architecture, directory layout, execution commands, and verification criteria across the 10 core E2E features defined in `.agents/teamwork/PROJECT.md` (Features 1 through 10) and `.agents/teamwork/ORIGINAL_REQUEST.md` (R1–R4).
+This document defines the End-to-End (E2E) testing infrastructure for the Heliotrope platform. It establishes the testing methodology, tier architecture, directory layout, execution commands, and verification criteria across the 10 core E2E features (Features 1 through 10, requirements R1–R4).
 
 > Scope note (2026-10-05): `PROJECT.md` lists 12 features total. F11 (Hypothesis zero-regression, M4) and F12 (E2E verification incl. Tier 5, M5) are out of scope for Tiers 1–4 and tracked separately. See Tier 5 placeholder below.
 
@@ -10,8 +10,8 @@ This document defines the End-to-End (E2E) testing infrastructure for the Heliot
 ## Testing Principles & Integrity Guardrails
 1. **Opaque-Box Verification**: Tests validate observable contracts, API payloads, status codes, schemas, and persistence behavior from the caller's perspective rather than asserting internal implementation details.
 2. **Authoritative Specification Sources**:
-   - Requirements: `.agents/teamwork/ORIGINAL_REQUEST.md` (R1 Security & Identity, R2 UI & Form Integrity, R3 Persistence & Session Durability, R4 Live External Adapters).
-   - Technical Specifications & Interface Contracts: `.agents/teamwork/PROJECT.md` (Features 1 through 10 in E2E scope; F11 Hypothesis zero-regression and F12 E2E/Tier 5 tracked separately).
+   - Requirements (R1 Security & Identity, R2 UI & Form Integrity, R3 Persistence & Session Durability, R4 Live External Adapters).
+   - Technical specifications & interface contracts (Features 1 through 10 in E2E scope; F11 Hypothesis zero-regression and F12 E2E/Tier 5 tracked separately).
 3. **No Facade Tests**: Every test exercises real logic, real domain models, real schedulers (or solver pipelines), real HTTP routes, real security rules logic, and real serialization/persistence mechanics.
 4. **Progressive Testability & Hermetic Isolation**: Tests set up their own temporary test data and clean environment overrides. Isolation limits (verified 2026-10-05 in `tests/e2e/conftest.py`): `client` fixture is session-scoped `TestClient` (shared app instance); `clean_execution_store` is function-scoped `ExecutionStore()` but defaults to the shared `backend/data/heliotrope_execution.db` path unless overridden — full per-test SQLite isolation is NOT yet wired. E2E persistence assertions run against the real store code path but do not prove cross-restart durability on an isolated DB file.
 

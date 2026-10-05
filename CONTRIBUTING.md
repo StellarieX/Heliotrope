@@ -7,7 +7,7 @@ See `README.md` for full stack setup (Next.js 16 / React 19 / TypeScript strict 
 - Frontend: `npm install && npm run dev`
 - Backend: from `backend/`, `pip install -e ".[dev]"` then `uvicorn app.main:app --port 8000`
 - E2E runner + bridge: `tests/e2e/runner.py`, `backend/tests/test_e2e_requirements.py`
-- Teamwork context: `.agents/teamwork/PROJECT.md` (12 features, M1–M5, contracts), `ORIGINAL_REQUEST.md`, plus ~20 unindexed subdirs — read `PROJECT.md` first.
+- Spec: 12 features across milestones M1–M5 with interface contracts — see `CHANGELOG.md` for shipped status.
 
 ## Code style
 

@@ -57,10 +57,8 @@ backend/data/
 AGENTS.md
 CLAUDE.md
 
-# internal agent run-logs (only PROJECT.md + ORIGINAL_REQUEST.md are tracked specs)
-.agents/teamwork/*
-!.agents/teamwork/PROJECT.md
-!.agents/teamwork/ORIGINAL_REQUEST.md
+# internal notes (never tracked)
+.agents/
 
 # typescript
 *.tsbuildinfo
