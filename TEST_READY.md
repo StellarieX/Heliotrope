@@ -127,7 +127,7 @@ python -m pytest backend/tests/test_e2e_requirements.py -v
 
 - **Scope:** docs-sync verification of M3/M4 code truth — tick (`POST /schedules/{id}/tick`), telemetry (`POST /schedules/{id}/telemetry`, `MEASURED` vs `SIMULATED` source), `capacity_profile_kw` on `/schedule` + coordination + replan, Electricity Maps + Gemini live adapters with honest fallback, dashboard `localStorage` rehydration + tick polling.
 - **Frontend:** `npm run lint` exit 0 and `npx tsc --noEmit` exit 0, verified 2026-10-05.
-- **Full backend suite + Tier 5:** pending proof-agent results — see proof log.
+- **Full backend suite + Tier 5:** PROVEN 2026-10-05 — `test_properties.py` 11/11 passed (hypothesis installed); FULL `pytest backend/tests` (no ignores, incl. Tier 5 bridge): **4693 passed, 0 failed** in 271.65s. E2E runner: Tiers 1-4 120/120 + TIER5 10/10, exit 0.
 
 ---
 
