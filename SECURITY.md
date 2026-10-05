@@ -7,17 +7,17 @@
 - Profile operations use `updateProfile` / `deleteUser`. No email/password, no custom tokens.
 - Firestore is the only layer that verifies identity (`request.auth.uid`). The FastAPI backend does **not** verify Firebase ID tokens.
 
-## Firestore rules matrix (`firestore.rules`, 25 lines)
+## Firestore rules matrix (`firestore.rules`)
 
 | Collection | Read | Write | Condition |
 |---|---|---|---|
-| `users/{uid}` | public (`true`) | owner only | `request.auth != null && request.auth.uid == uid` |
+| `users/{uid}` | public (`true`) | owner only, and the document may only contain `username`, `displayName`, `photoURL`, `occupation`, `place`, `rooms`, `onboarded`, `updatedAt` | `request.auth != null && request.auth.uid == uid && validProfile(...)` |
 | `users/{uid}/jobs/{jobId}` | owner only | owner only | `request.auth != null && request.auth.uid == uid` |
-| `usernames/{name}` | public (`true`) | create: caller claims own UID | `request.resource.data.uid == request.auth.uid` |
+| `usernames/{name}` | public (`true`) | create: caller claims own UID; name must match `^[a-z0-9_]{3,20}$` and not be a reserved route | `request.resource.data.uid == request.auth.uid && validName(name)` |
 | `usernames/{name}` | public (`true`) | update: old and new UID both match caller | `resource.data.uid == auth.uid && request.resource.data.uid == auth.uid` |
 | `usernames/{name}` | public (`true`) | delete: caller owns claim | `resource.data.uid == request.auth.uid` |
 
-Public `users` reads are intentional so `/[username]` pages resolve without login. Do not store secrets, tokens, or exact addresses in `users/{uid}` documents.
+Public `users` reads are intentional so `/[username]` pages resolve without login. Because of that, `users/{uid}` never holds an email, token or address: the rules reject any field outside the allow-list above, and profiles written by older versions are stripped of their `email` automatically when the owner next opens the app. Rules are exercised against the real Firestore emulator in `tests/rules/rules.test.mjs`.
 
 ## Backend: no-auth warning
 

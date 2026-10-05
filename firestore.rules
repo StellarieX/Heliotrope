@@ -1,11 +1,45 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+
+    // Reserved route names and format. Mirrors lib/username.ts, but enforced
+    // here too: the client check alone is bypassed by writing to Firestore
+    // directly. (Kept in functions, not inline, because the regex quantifier
+    // braces would break the brace-matching in tests/e2e's rules parser.)
+    function validName(n) {
+      return n is string
+        && n.matches('^[a-z0-9_]{3,20}$')
+        && !(n in ['dashboard', 'account', 'api', 'admin', 'login', 'signin',
+                   'signout', 'settings', 'help', 'about', 'null', 'undefined']);
+    }
+
+    // Public profile document. World-readable (the /[username] page needs it),
+    // so it may only ever hold non-sensitive fields: NO email. Anything outside
+    // this allow-list is rejected, which also stops arbitrary data hosting.
+    function validProfile(d) {
+      return d.keys().hasOnly(['username', 'displayName', 'photoURL', 'occupation',
+                               'place', 'rooms', 'onboarded', 'updatedAt'])
+        && (!('username' in d) || validName(d.username))
+        && (!('displayName' in d) || d.displayName == null
+            || (d.displayName is string && d.displayName.size() <= 80))
+        && (!('photoURL' in d) || d.photoURL == null
+            || (d.photoURL is string && d.photoURL.size() <= 2048
+                && d.photoURL.matches('^https://.*')))
+        && (!('occupation' in d) || d.occupation == null
+            || (d.occupation is string && d.occupation.size() <= 40))
+        && (!('place' in d) || d.place == null
+            || (d.place is string && d.place.size() <= 40))
+        && (!('rooms' in d) || d.rooms == null
+            || (d.rooms is number && d.rooms >= 0 && d.rooms <= 100000))
+        && (!('onboarded' in d) || d.onboarded is bool);
+    }
+
     // User profile documents: public read so /[username] pages resolve;
     // only the account owner may write their own profile document.
+    // `request.resource == null` is a delete, which has no payload to validate.
     match /users/{uid} {
       allow read: if true;
-      allow write: if request.auth != null && request.auth.uid == uid;
+      allow write: if request.auth != null && request.auth.uid == uid && (request.resource == null || validProfile(request.resource.data));
 
       // Private per-user jobs: only the owner may read or write.
       match /jobs/{jobId} {
@@ -19,8 +53,8 @@ service cloud.firestore {
     // payloads explicitly instead of relying on fail-closed comparison.
     match /usernames/{name} {
       allow read: if true;
-      allow create: if request.auth != null && request.resource.data.uid is string && request.resource.data.uid == request.auth.uid;
-      allow update: if request.auth != null && resource.data.uid == request.auth.uid && request.resource.data.uid == request.auth.uid;
+      allow create: if request.auth != null && request.resource.data.uid is string && request.resource.data.uid == request.auth.uid && validName(name) && request.resource.data.keys().hasOnly(['uid', 'updatedAt']);
+      allow update: if request.auth != null && resource.data.uid == request.auth.uid && request.resource.data.uid == request.auth.uid && request.resource.data.keys().hasOnly(['uid', 'updatedAt']);
       allow delete: if request.auth != null && resource.data.uid == request.auth.uid;
     }
 

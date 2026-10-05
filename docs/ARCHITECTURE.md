@@ -115,7 +115,7 @@ Forecast affects only which feasible schedule is preferred, never feasibility. `
 
 | Path | Access | Shape |
 |---|---|---|
-| `users/{uid}` | public read, owner write | `Profile{username, occupation, place, rooms, onboarded}` |
+| `users/{uid}` | public read, owner write | `Profile{username, displayName, photoURL, occupation, place, rooms, onboarded}` (no email; allow-listed by the rules) |
 | `users/{uid}/jobs/{jobId}` | owner-only | `DashboardJob{+jobType, energyKwh, durationMin, tempMinC, tempMaxC, confidence}` |
 | `usernames/{name}` | public read, owner-uid-gated write | `{uid}` pointer for `/[username]` resolution |
 
