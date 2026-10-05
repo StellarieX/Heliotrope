@@ -4,6 +4,16 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      # react and react-dom must move together: react-dom@19.3 peer-requires
+      # react@^19.3, so bumping one alone fails `npm install` (this is what
+      # broke an earlier Dependabot deploy).
+      react:
+        patterns:
+          - "react"
+          - "react-dom"
+          - "@types/react"
+          - "@types/react-dom"
   - package-ecosystem: pip
     directory: /backend
     schedule:

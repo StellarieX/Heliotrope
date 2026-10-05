@@ -71,6 +71,19 @@ On macOS/Linux replace `backend/.venv/Scripts/python` with
 4. Register a web app; copy the four `NEXT_PUBLIC_FIREBASE_*` values into
    `.env.local`.
 
+### Run everything locally without a Firebase project
+
+Uses the Auth and Firestore emulators (Java 21+), with `firestore.rules` loaded:
+
+```bash
+npx firebase emulators:start --only auth,firestore --project demo-heliotrope
+```
+
+In `.env.local` set `NEXT_PUBLIC_USE_FIREBASE_EMULATOR=1`, any non-empty values for the
+four `NEXT_PUBLIC_FIREBASE_*` keys (project id `demo-heliotrope`), and
+`NEXT_PUBLIC_BACKEND_URL=http://localhost:8000`. "Sign in with Google" then opens the
+emulator's fake account picker.
+
 ## 5. Tests
 
 ```bash

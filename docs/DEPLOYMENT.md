@@ -28,6 +28,17 @@ so an unset backend never proxies to localhost in production. `vercel.json`:
 3. Local dev: leave `NEXT_PUBLIC_BACKEND_URL=http://localhost:8000` in `.env.local`;
    the bundle calls the backend directly and no rewrite is needed.
 
+## Backend on Render (demo hosting)
+
+`render.yaml` at the repo root is a Render Blueprint for the Docker image
+below: Render dashboard → New → Blueprint → this repo. Then, in Vercel,
+set `BACKEND_URL=https://<service>.onrender.com` and
+`NEXT_PUBLIC_BACKEND_URL=` (empty), and redeploy. Free-plan caveats: the
+service sleeps after ~15 min idle (first request takes ~50s, longer than the
+client's 30s timeout), so open `/api/v1/health` before a demo. There is no disk,
+so execution records reset on restart; the dashboard drops a lost schedule and
+asks you to plan again.
+
 ## Backend (Docker)
 
 Build from the **repo root** (paths in `backend/Dockerfile` are root-relative):
@@ -78,8 +89,13 @@ one DB file. A lost DB file surfaces as 404 `not_found` on known schedule IDs.
 - Source of truth: root `firestore.rules` (includes a `uid is string` guard on
   claim creation). No recursive-wildcard catch-all by design; unmatched
   collections are default-deny.
-- Deploy: `firebase deploy --only firestore:rules` (Firebase CLI + `firebase.json`
-  / project selection). Then re-run the rules suites:
+- Deploy: `firebase deploy --only firestore:rules` (root `firebase.json` already
+  points at `firestore.rules`; pick the project with `firebase use <id>`). **Deploy
+  the rules before the new frontend**: the new onboarding no longer stores emails, and
+  the stricter rules reject any profile write that still contains one. Existing profiles
+  are cleaned automatically when their owner next opens the app.
+- Test against the real rules engine (needs Java 21+), then the Python models:
+  - `npx firebase emulators:exec --only firestore --project demo-heliotrope "node tests/rules/rules.test.mjs"` (see the file header)
   - `pytest tests/test_firestore_rules_challenge.py`
   - `pytest tests/e2e/test_m1_adversarial_challenger.py`
 

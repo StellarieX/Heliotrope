@@ -1,5 +1,14 @@
 # Changelog
 
+## Demo hardening: privacy, rules, onboarding and dashboard UX
+
+- **Privacy:** profile documents are world-readable, so they no longer store the user's email. Existing profiles are cleaned automatically the next time the owner opens the dashboard or account page (`lib/profile.ts`).
+- **Firestore rules:** profile writes are validated against a field allow-list (name, photo, username, occupation, place, rooms, onboarded). Usernames must match `^[a-z0-9_]{3,20}$` and cannot be a reserved route name, enforced server-side instead of only in the browser. Verified in the real Firestore emulator (`tests/rules/rules.test.mjs`, 33 cases), not just the Python rule models.
+- **Onboarding:** live username availability check; power rating required for every load; quick-add presets; Enter submits; loads and the `onboarded` flag are saved in one atomic batch (a failed save can no longer duplicate loads); labelled, keyboard-friendly dialog.
+- **Dashboard:** step tracker (add loads → plan → track); backend status pill and cold-start warm-up (`waitForBackend`); "Re-plan from my loads" (previously impossible once a plan existed); stale-plan warning that survives reloads; backend-computed "impact vs running everything now" card (`/schedule/compare`) with each load's run windows; load names instead of database IDs in the tracker; profile/load read failures no longer re-trigger onboarding; time-of-day greeting; honest data-source cards replace placeholder tiles.
+- **Account:** deletion re-authenticates before removing data; username claim reuses `lib/username.ts`.
+- **Ops:** `render.yaml` (backend on Render), `firebase.json` (rules + emulators), `NEXT_PUBLIC_USE_FIREBASE_EMULATOR` for fully local runs, react/react-dom bumped together to 19.3.0 and grouped in Dependabot (a lone react-dom bump broke installs). Removed `backend/make_commits.sh` and the unused Next.js starter images.
+
 ## M1 / M2 — completed
 
 - Firestore rules (`firestore.rules`): public read on `users/{uid}` and `usernames/{name}`, owner-only writes, owner-only `jobs` subcollection; covered by 22 rules-challenge tests + 32 adversarial challenger tests.

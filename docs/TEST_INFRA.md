@@ -98,7 +98,6 @@ Reserved for M5 Phase 2 / PROJECT.md F12. Planned coverage (not yet implemented 
 ```
 Heliotrope-main/
 ├── docs/TEST_INFRA.md              # This infrastructure specification
-├── docs/TEST_READY.md              # Test suite readiness & execution report
 ├── tests/
 │   └── e2e/
 │       ├── __init__.py
@@ -138,7 +137,7 @@ python -m pytest backend/tests/test_e2e_requirements.py -v
 ---
 
 ## Quality & Exit Criteria
-- **100% Pass Rate**: All 120 tests in Tiers 1–4 execute and pass.
+- **100% Pass Rate**: every test in Tiers 1–4 executes and passes (the runner prints the live count).
 - **Zero Flakiness**: Deterministic execution without timing races or hardcoded wall-clock sleeps.
 - **Zero Side Effects**: All SQLite test databases and mock environments clean up completely upon test completion.
 

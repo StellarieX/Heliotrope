@@ -1,0 +1,25 @@
+# Render Blueprint: Heliotrope FastAPI backend (Docker).
+# Render dashboard > New > Blueprint > pick this repo. Then set the Vercel
+# project's BACKEND_URL to the service URL and NEXT_PUBLIC_BACKEND_URL to ""
+# (same-origin mode, see docs/DEPLOYMENT.md).
+#
+# Free plan: the service sleeps after ~15 min idle and cold-starts in ~50s.
+# Hit /api/v1/health a minute before a demo. There is no disk on the free
+# plan, so the SQLite execution store resets on every restart/redeploy.
+services:
+  - type: web
+    name: heliotrope-backend
+    runtime: docker
+    plan: free
+    # Closest Render region to the Vercel function region (iad1).
+    region: virginia
+    dockerContext: .
+    dockerfilePath: ./backend/Dockerfile
+    healthCheckPath: /api/v1/health
+    autoDeploy: true
+    envVars:
+      - key: HELIOTROPE_ENV
+        value: production
+      # Optional live classifier; rule-based fallback when unset.
+      - key: GEMINI_API_KEY
+        sync: false

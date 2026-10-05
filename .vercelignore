@@ -24,3 +24,8 @@ __pycache__/
 .next/
 out/
 .vercel/
+
+# Not part of the frontend build
+render.yaml
+firebase.json
+firestore.rules

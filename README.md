@@ -74,7 +74,7 @@ Full environment table and troubleshooting: `docs/SETUP.md`.
 | `LOG_LEVEL` / `CARBON_*` / `LOAD_INTELLIGENCE_PROVIDER` / `DEFAULT_LOAD_TIMEZONE` | Backend env | `info` / `synthetic`, `7/300/7` tuning / `rule_based` / `UTC` |
 | `HELIOTROPE_EXECUTION_DB` | Backend env | SQLite path override (default `backend/data/heliotrope_execution.db`) |
 
-Deploy recipe (Vercel frontend + Docker backend): `docs/DEPLOYMENT.md`.
+Deploy recipe (Vercel frontend + Docker backend on Render): `docs/DEPLOYMENT.md`. To run everything locally with no Firebase project, see the emulator section in `docs/SETUP.md`.
 
 ## API overview
 
@@ -84,11 +84,12 @@ Deploy recipe (Vercel frontend + Docker backend): `docs/DEPLOYMENT.md`.
 
 ```bash
 npm run lint && npx tsc --noEmit && npm run build   # build passes (5 routes)
-python -m pytest backend/tests -q     # unit + property (~4693)
+python -m pytest backend/tests -q     # unit + property (4694)
 python tests/e2e/runner.py            # 162 e2e tests (tiers + hardening + live-gated)
+# real rules tests in the Firestore emulator (Java 21+): see tests/rules/rules.test.mjs
 ```
 
-Infra details and isolation limits: `docs/TEST_INFRA.md`. Latest verification: `docs/TEST_READY.md`.
+Infra details and isolation limits: `docs/TEST_INFRA.md`.
 
 ## Project structure
 
@@ -99,7 +100,9 @@ backend/app/          FastAPI: api/routes, domain models, services (schedulers, 
 backend/tests/        38 pytest files incl. property tests
 tests/e2e/            4-tier runner + Tier-5 hardening + rules challengers
 docs/                 architecture, API, setup, deployment, test reports
-firestore.rules       public reads, owner-only writes
+firestore.rules       public reads, owner-only writes, validated profile fields
+firebase.json         rules + local emulator config
+render.yaml           backend blueprint (Render, Docker)
 ```
 
 ## Limitations
