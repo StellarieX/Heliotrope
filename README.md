@@ -1,8 +1,17 @@
 # Heliotrope
 
-Heliotrope shifts deferrable electricity loads into low-carbon windows — always ready on time. Deadlines, energy needs, thermal comfort, and shared capacity are hard constraints; carbon is the objective. Forecasts may change *which* schedule is preferred, never whether one is feasible.
+Shift deferrable electricity loads into low-carbon windows — always ready on time.
 
-Named for the flower that turns to face the sun.
+Heliotrope is a carbon-aware scheduler. You describe your loads (EV charging, water heating, laundry, cooling), give each a deadline, and Heliotrope places them where grid carbon is lowest while guaranteeing every deadline, energy requirement, thermal comfort band, and shared capacity limit. Deadlines and physics are hard constraints; carbon is the objective. Forecasts may change *which* schedule is preferred, never whether one is feasible.
+
+## Features
+
+- **Plain-words load intake** — `/loads/classify` turns "geyser at night" into a typed `LoadSpec` (FIXED, ATOMIC, INTERRUPTIBLE, THERMAL) with confidence, ambiguity flags, and recorded assumptions.
+- **Three solvers** — ASAP (carbon-blind baseline), greedy (cheapest-first heuristic), and exact OR-Tools CP-SAT. Integer-scaled arithmetic with overflow guards and an independent post-solve validator; `INFEASIBLE` is an explicit 200 response, never a silent guess.
+- **Carbon-aware planning** — synthetic duck-curve by default, CSV upload, or live Electricity Maps. Forecasts in EXPECTED or ROBUST (`predicted + λ·(upper − predicted)`) modes, with planned-vs-realized CO₂ scoring.
+- **Multi-tenant coordination** — joint scheduling under one shared capacity with congestion pricing and AVG/MAX fairness, plus independent-vs-coordinated comparison.
+- **Live execution tracking** — versioned schedules in SQLite, rolling-horizon replans with frozen past, event/override guardrails, client-driven tick for periodic replan, and meter telemetry (`MEASURED`) alongside deterministic simulation (`SIMULATED`).
+- **Honesty by design** — synthetic or simulated data is always labeled; unknown values stay `null`, never zero; unconfigured providers refuse instead of inventing output.
 
 ## How it works
 
@@ -14,20 +23,28 @@ Next.js app  --Firestore SDK-->  Firestore (auth, loads, usernames)
      +--HTTPS, no token-->  FastAPI backend (pure compute)
 ```
 
-- **Frontend** (`app/`, `lib/`) owns identity, load CRUD, and visualization. It talks to Firestore directly (`lib/firebase.ts`) and to the backend only through `lib/api/client.ts`.
-- **Backend** (`backend/app/`) is stateless compute: carbon signals, forecasting, load classification, scheduling, multi-user coordination, execution tracking. The only durable state is SQLite-backed execution records.
-- **Firestore** (`firestore.rules`) stores `users/{uid}`, `users/{uid}/jobs/{id}`, and the public `usernames/{name}` registry behind Google sign-in.
+A load's journey:
 
-A load's journey: describe it in plain words → `/loads/classify` turns it into a typed `LoadSpec` (FIXED, ATOMIC, INTERRUPTIBLE, THERMAL) → `/schedules/plan` solves it with CP-SAT against the carbon signal → track it through events, replans, and overrides → compare planned vs realized CO₂. Multiple tenants coordinate under one shared capacity via `/coordination/schedule`.
+1. Describe it in the dashboard → saved to `users/{uid}/jobs/{id}` in Firestore.
+2. `/loads/classify` returns its type, category, and the exact fields still needed.
+3. `/schedules/plan` solves it with CP-SAT against the carbon signal → version 1.
+4. Track it: `JOB_STARTED` / `COMPLETED` / `FAILED` events, manual or periodic replans (`tick`), guarded overrides (`START_NOW`, `PAUSE`, `CANCEL`, `MOVE`, `RUN_ASAP`).
+5. Compare planned vs realized CO₂; coordinate whole buildings under one capacity cap.
 
-## Architecture in brief
+The frontend (`app/`, `lib/`) owns identity, load CRUD, and charts. It reaches Firestore directly (`lib/firebase.ts`) and touches the backend only through `lib/api/client.ts`. The backend (`backend/app/`) is stateless compute — the only durable state is SQLite execution records. See `docs/ARCHITECTURE.md`.
 
-- **Solvers:** ASAP (carbon-blind baseline), greedy (cheapest-first heuristic), CP-SAT (exact OR-Tools model, integer-scaled, independently validated). `INFEASIBLE` is a 200 response, never a silent guess. See `docs/ARCHITECTURE.md`.
-- **Carbon:** synthetic duck-curve by default, CSV upload, or live Electricity Maps. Forecasts come in EXPECTED or ROBUST (`predicted + λ·(upper − predicted)`) modes. See `docs/API.md`.
-- **Execution:** versioned schedules in SQLite, rolling-horizon replans with frozen past, event/override guardrails, client-driven tick for periodic replan, meter telemetry (`MEASURED`) alongside deterministic simulation (`SIMULATED`).
-- **Honesty policy:** synthetic or simulated data is always labeled; unknown values stay `null`, never zero; unconfigured providers refuse instead of inventing output.
+## Tech stack
 
-## Run it
+| Layer | Choices |
+|---|---|
+| Frontend | Next.js 16, React 19, Tailwind CSS v4, TypeScript, Firebase Auth (Google) + Firestore, Vercel hosting |
+| Backend | Python 3.11, FastAPI + Pydantic, OR-Tools CP-SAT, SQLite execution store, pytest + hypothesis |
+| Carbon | Synthetic provider (default), CSV provider, Electricity Maps adapter (live, key-gated) |
+| Intelligence | Rule-based classifier (live), Gemini adapter (live, key-gated, rule-based fallback) |
+
+## Quickstart
+
+Prerequisites: Node 20+, Python 3.11+, a Firebase project with Google sign-in enabled.
 
 ```bash
 npm install
@@ -39,25 +56,55 @@ npm run dev                  # http://localhost:3000
 python -m venv backend/.venv
 backend/.venv/Scripts/python -m pip install -e "./backend[dev]"
 backend/.venv/Scripts/python -m uvicorn app.main:app --app-dir backend --port 8000
+# API docs: http://localhost:8000/docs
 ```
 
-Full environment table: `docs/SETUP.md`. API reference: `docs/API.md`. Deployment: `docs/DEPLOYMENT.md`.
+Full environment table and troubleshooting: `docs/SETUP.md`.
 
-## Verify it
+## Configuration
+
+| Variable | Where | Purpose |
+|---|---|---|
+| `NEXT_PUBLIC_FIREBASE_API_KEY` (+ `_AUTH_DOMAIN`, `_PROJECT_ID`, `_APP_ID`) | Frontend (`.env.local`) | Firebase web config; app degrades gracefully without it |
+| `NEXT_PUBLIC_BACKEND_URL` | Frontend | Backend base URL (defaults to `http://localhost:8000`) |
+| `ELECTRICITY_MAPS_API_KEY` / `ELECTRICITY_MAPS_ZONE` | Backend env | Live carbon signal (default zone `US-CAL-CISO`); synthetic when unset |
+| `GEMINI_API_KEY` (legacy alias `JEV_API_KEY`) | Backend env | Live load classification; rule-based when unset |
+| `CORS_ALLOW_ORIGINS` | Backend env | Allowed browser origins in production |
+| `HELIOTROPE_EXECUTION_DB` | Backend env | SQLite path override (default `backend/data/heliotrope_execution.db`) |
+
+## API overview
+
+21 endpoints under `/api/v1` (plus `GET /`): health, carbon signal, carbon forecast/evaluate/backtest, load classify/validate, schedule/compare, coordination schedule/compare, schedule plan/state/history/events/replan/override/tick/telemetry, simulation advance. Full contracts with examples: `docs/API.md`.
+
+## Testing
 
 ```bash
 npm run lint && npx tsc --noEmit && npm run build
-python -m pytest backend/tests -q     # incl. hypothesis property tests
+python -m pytest backend/tests -q     # unit + property (~4694)
 python tests/e2e/runner.py            # 120 tiered + 10 Tier-5 hardening tests
+```
+
+Infra details and isolation limits: `docs/TEST_INFRA.md`. Latest verification: `docs/TEST_READY.md`.
+
+## Project structure
+
+```
+app/                  Next.js routes: / (landing), /dashboard, /account, /{username}
+lib/                  firebase singleton, api client (sole backend boundary), ranking, username claims
+backend/app/          FastAPI: api/routes, domain models, services (schedulers, carbon, forecast, execution)
+backend/tests/        38 pytest files incl. property tests
+tests/e2e/            4-tier runner + Tier-5 hardening + rules challengers
+docs/                 architecture, API, setup, deployment, test reports
+firestore.rules       public reads, owner-only writes
 ```
 
 ## Limitations
 
 - Backend has no auth; anyone with the URL can call it. CORS is the only browser-side gate.
 - No live device control — execution is tracked via events, meter readings, and simulation.
-- Time-varying capacity is supported per-slot via `capacity_profile_kw`; the UI plans with a scalar default.
-- Backend is not hosted; Vercel serves the frontend only (`NEXT_PUBLIC_BACKEND_URL` must point at a backend).
+- The UI plans with a scalar capacity default; per-slot `capacity_profile_kw` is API-level.
+- Backend is not hosted; Vercel serves the frontend only.
 
-## License
+## Contributing & license
 
-MIT — see `LICENSE`. Security model: `SECURITY.md`. Contributing: `CONTRIBUTING.md`.
+PR checklist and honesty policy: `CONTRIBUTING.md`. Security model: `SECURITY.md`. MIT — see `LICENSE`.
