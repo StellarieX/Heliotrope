@@ -175,8 +175,9 @@ export async function getCarbonSignal(params: {
     start: params.start,
     end: params.end,
     resolution_minutes: String(params.resolution_minutes ?? 15),
-    provider: params.provider ?? "synthetic",
   });
+  // Only an explicit choice is sent; otherwise the backend's configured source is used.
+  if (params.provider) q.set("provider", params.provider);
   return getJson<CarbonSignalResponse>(`/api/v1/carbon?${q}`);
 }
 
@@ -318,13 +319,6 @@ export async function replanSchedule(
   return postJson<Record<string, unknown>>(`/api/v1/schedules/${requireId(scheduleId)}/replan`, body);
 }
 
-/** Phase 7: deterministic simulated execution. Labeled simulation, never telemetry. */
-export async function advanceSimulation(
-  scheduleId: string,
-  body: Record<string, unknown>
-): Promise<Record<string, unknown>> {
-  return postJson<Record<string, unknown>>(`/api/v1/simulation/${requireId(scheduleId)}/advance`, body);
-}
 /** Phase 7: advance wall-clock time for a schedule (polling tick). */
 export async function tickSchedule(
   scheduleId: string,

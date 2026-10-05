@@ -6,25 +6,202 @@ import { collection, doc, getDoc, writeBatch } from "firebase/firestore";
 import { getDb, getFirebaseAuth } from "../../lib/firebase";
 import { claimUsername, validUsername } from "../../lib/username";
 import { jevRank, classifyJob, type JobInput } from "../../lib/prioritize";
+import { detailNeeded, kindOf, type StoredJob } from "../../lib/loads/specs";
+import { useClassification } from "../../lib/loads/useClassification";
+import type { JobType } from "../../lib/api/types";
 
-type Draft = { name: string; powerKw: string; readyBy: string; flexHours: number };
+type Draft = {
+  name: string;
+  powerKw: string;
+  readyBy: string;
+  flexHours: number;
+  energyKwh: string;
+  durationMin: string;
+  // Filled in from the backend classification of `name` (AI or rules).
+  jobType?: JobType;
+  category?: string;
+  confidence?: number;
+};
 type Availability = "free" | "mine" | "taken" | "unknown";
 
 const OCCUPATIONS = ["Student", "Hostel staff", "Homeowner", "Facility manager", "Researcher", "Other"];
 const PLACES = ["Hostel block", "Home", "Campus", "Other"];
 
+const BLANK: Draft = { name: "", powerKw: "", readyBy: "06:00", flexHours: 2, energyKwh: "", durationMin: "" };
+
 // One-click starting points so a first load takes seconds, not a form.
-const PRESETS: Array<Omit<Draft, "flexHours"> & { flexHours: number; label: string }> = [
-  { label: "EV charger", name: "EV charger", powerKw: "7.4", readyBy: "07:00", flexHours: 3 },
-  { label: "Water heater", name: "Water heater", powerKw: "2", readyBy: "06:00", flexHours: 2 },
-  { label: "Washing machine", name: "Washing machine", powerKw: "2", readyBy: "18:00", flexHours: 4 },
-  { label: "Borewell pump", name: "Borewell pump", powerKw: "1.5", readyBy: "08:00", flexHours: 3 },
+const PRESETS: Array<Draft & { label: string }> = [
+  { label: "EV charger", name: "EV charger", powerKw: "7.4", readyBy: "07:00", flexHours: 3, energyKwh: "20", durationMin: "" },
+  { label: "Water heater", name: "Water heater", powerKw: "2", readyBy: "06:00", flexHours: 2, energyKwh: "", durationMin: "" },
+  { label: "Washing machine", name: "Washing machine", powerKw: "2", readyBy: "18:00", flexHours: 4, energyKwh: "", durationMin: "60" },
+  { label: "Borewell pump", name: "Borewell pump", powerKw: "1.5", readyBy: "08:00", flexHours: 3, energyKwh: "4", durationMin: "" },
 ];
 
 const MAX_POWER_KW = 1000;
 
 const inputCls =
   "w-full rounded-xl border border-white/10 bg-black px-4 py-2.5 text-sm text-white placeholder:text-zinc-700 focus:border-white/30 focus:outline-none";
+
+const TYPE_NOTE: Record<string, string> = {
+  DEFERRABLE_INTERRUPTIBLE: "can pause and resume",
+  DEFERRABLE_ATOMIC: "one continuous run",
+  THERMAL: "holds a comfort band",
+  FIXED: "always-on, never shifted",
+};
+
+function toStored(d: Draft, id: string): StoredJob {
+  const c = classifyJob(d.name);
+  const energy = Number(d.energyKwh);
+  const dur = Number(d.durationMin);
+  return {
+    id,
+    name: d.name.trim(),
+    kind: d.category ?? c.category,
+    shiftable: d.jobType ? d.jobType !== "FIXED" : c.shiftable,
+    powerKw: Number(d.powerKw) || 0,
+    readyBy: d.readyBy,
+    flexHours: d.flexHours,
+    jobType: d.jobType,
+    energyKwh: energy > 0 ? energy : undefined,
+    durationMin: dur > 0 ? Math.round(dur) : undefined,
+    confidence: d.confidence,
+  };
+}
+
+/** One load being described. Owns the live classification of its name. */
+function DraftCard({
+  d,
+  i,
+  onChange,
+  onRemove,
+}: {
+  d: Draft;
+  i: number;
+  onChange: (patch: Partial<Draft>) => void;
+  onRemove?: () => void;
+}) {
+  const cls = useClassification(d.name, d.readyBy);
+  const clsType = cls?.jobType;
+  const clsCategory = cls?.category;
+  const clsConfidence = cls?.confidence;
+
+  // Keep the draft's type in step with what the classifier says about the current name.
+  useEffect(() => {
+    if (clsType && clsType !== d.jobType) {
+      onChange({ jobType: clsType, category: clsCategory, confidence: clsConfidence });
+    }
+    // onChange identity changes every render of the parent; only the result matters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clsType, clsCategory, clsConfidence, d.jobType]);
+
+  const stored = toStored(d, `draft-${i}`);
+  const need = d.name.trim() ? detailNeeded(stored) : null;
+  const kw = Number(d.powerKw);
+  const powerBad = Boolean(d.name.trim()) && !(kw > 0 && kw <= MAX_POWER_KW);
+  const local = classifyJob(d.name.trim() || "…");
+  const type = kindOf(stored);
+
+  return (
+    <div className="rounded-2xl border border-white/10 p-4">
+      <div className="flex items-center justify-between">
+        <span className="font-mono text-[11px] text-zinc-600">LOAD {i + 1}</span>
+        {onRemove && (
+          <button type="button" onClick={onRemove} className="-mr-2 min-h-10 cursor-pointer px-3 font-mono text-[12px] text-zinc-500 transition hover:text-red-300">
+            remove
+          </button>
+        )}
+      </div>
+      <input
+        aria-label={`Load ${i + 1} name`}
+        value={d.name}
+        onChange={(e) => onChange({ name: e.target.value, jobType: undefined, category: undefined, confidence: undefined })}
+        placeholder="Name anything — e.g. hostel borewell pump"
+        maxLength={40}
+        className={`mt-3 ${inputCls}`}
+      />
+      {d.name.trim() && (
+        <p className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[11px]">
+          <span className={`h-1.5 w-1.5 rounded-full ${type === "FIXED" ? "bg-zinc-600" : "bg-lime-300"}`} />
+          <span className={type === "FIXED" ? "text-zinc-500" : "text-zinc-400"}>
+            {(cls?.category ?? local.category)} · {TYPE_NOTE[type]}
+            {type === "FIXED" ? " — filtered out of Optimize" : ""}
+          </span>
+          {cls && (
+            <span
+              title={cls.provider === "jev" ? "Classified by the Jev AI model" : "Classified by the built-in rules"}
+              className={`rounded-full px-2 py-0.5 text-[10px] uppercase tracking-wider ${cls.provider === "jev" ? "bg-violet-400/15 text-violet-300" : "bg-white/5 text-zinc-500"}`}
+            >
+              {cls.provider === "jev" ? "AI" : "rules"}
+            </span>
+          )}
+        </p>
+      )}
+      <div className="mt-2 grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
+        <label className={`rounded-xl border bg-black px-3 py-2 focus-within:border-white/30 ${powerBad ? "border-orange-300/50" : "border-white/10"}`}>
+          <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-600">power (kW)</span>
+          <input
+            value={d.powerKw}
+            onChange={(e) => onChange({ powerKw: e.target.value.replace(/[^0-9.]/g, "") })}
+            inputMode="decimal"
+            placeholder="e.g. 2"
+            className="w-full bg-transparent py-1 text-sm text-white placeholder:text-zinc-700 focus:outline-none"
+          />
+        </label>
+        <label className="rounded-xl border border-white/10 bg-black px-3 py-2">
+          <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-600">ready by</span>
+          <input
+            type="time"
+            value={d.readyBy}
+            onChange={(e) => onChange({ readyBy: e.target.value })}
+            className="w-full cursor-pointer bg-transparent py-1 text-sm text-white focus:outline-none [color-scheme:dark]"
+          />
+        </label>
+        {(type === "DEFERRABLE_INTERRUPTIBLE" || type === "DEFERRABLE_ATOMIC") && (
+          <label className={`rounded-xl border bg-black px-3 py-2 focus-within:border-white/30 ${need ? "border-amber-400/50" : "border-white/10"}`}>
+            <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-600">
+              {type === "DEFERRABLE_INTERRUPTIBLE" ? "energy needed (kWh)" : "one run takes (min)"}
+            </span>
+            <input
+              value={type === "DEFERRABLE_INTERRUPTIBLE" ? d.energyKwh : d.durationMin}
+              onChange={(e) =>
+                onChange(
+                  type === "DEFERRABLE_INTERRUPTIBLE"
+                    ? { energyKwh: e.target.value.replace(/[^0-9.]/g, "") }
+                    : { durationMin: e.target.value.replace(/[^0-9]/g, "") }
+                )
+              }
+              inputMode="decimal"
+              placeholder={type === "DEFERRABLE_INTERRUPTIBLE" ? "e.g. 20" : "e.g. 60"}
+              className="w-full bg-transparent py-1 text-sm text-white placeholder:text-zinc-700 focus:outline-none"
+            />
+          </label>
+        )}
+        <label className="rounded-xl border border-white/10 bg-black px-3 py-2">
+          <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-600">may finish up to +{d.flexHours}h later</span>
+          <input
+            type="range"
+            min={0}
+            max={6}
+            value={d.flexHours}
+            onChange={(e) => onChange({ flexHours: Number(e.target.value) })}
+            className="mt-1 h-6 w-full cursor-pointer accent-lime-300"
+          />
+        </label>
+      </div>
+      {(powerBad || need) && (
+        <p className="mt-2 font-mono text-[11px] text-orange-300">
+          {powerBad
+            ? kw > MAX_POWER_KW
+              ? `Keep it at or under ${MAX_POWER_KW} kW.`
+              : "Add the power rating in kW (check the appliance label)."
+            : type === "DEFERRABLE_INTERRUPTIBLE"
+              ? "How much energy does it need in total, in kWh? Roughly its kW rating × the hours it runs."
+              : "How long does one run take, in minutes?"}
+        </p>
+      )}
+    </div>
+  );
+}
 
 export default function Onboarding({ user, onDone }: { user: User; onDone: () => void }) {
   const [step, setStep] = useState(0);
@@ -33,7 +210,7 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
   const [occupation, setOccupation] = useState("");
   const [place, setPlace] = useState("");
   const [rooms, setRooms] = useState("");
-  const [drafts, setDrafts] = useState<Draft[]>([{ name: "", powerKw: "", readyBy: "06:00", flexHours: 2 }]);
+  const [drafts, setDrafts] = useState<Draft[]>([{ ...BLANK }]);
   const [err, setErr] = useState("");
   const [working, setWorking] = useState(false);
   // Availability is only trusted for the exact name it was checked for, so a
@@ -73,30 +250,19 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
     };
   }, [uname, unameValid, user.uid]);
 
-  const jobs: JobInput[] = drafts
-    .filter((d) => d.name.trim() && d.readyBy)
-    .map((d, i) => {
-      const c = classifyJob(d.name);
-      return {
-        id: `draft-${i}`,
-        name: d.name.trim(),
-        kind: c.category,
-        shiftable: c.shiftable,
-        powerKw: Number(d.powerKw) || 0,
-        readyBy: d.readyBy,
-        flexHours: d.flexHours,
-      };
-    });
+  const stored: StoredJob[] = drafts.filter((d) => d.name.trim() && d.readyBy).map((d, i) => toStored(d, `draft-${i}`));
+  const jobs: JobInput[] = stored;
   const ranked = jevRank(jobs);
-  const powerOk = (kw: number) => kw > 0 && kw <= MAX_POWER_KW;
-  const loadsValid = jobs.length > 0 && jobs.every((j) => powerOk(j.powerKw));
+  const loadsValid =
+    stored.length > 0 && stored.every((j) => j.powerKw > 0 && j.powerKw <= MAX_POWER_KW && detailNeeded(j) === null);
 
-  function setDraft(i: number, patch: Partial<Draft>) {
+  function patchDraft(i: number, patch: Partial<Draft>) {
     setDrafts((ds) => ds.map((d, j) => (j === i ? { ...d, ...patch } : d)));
   }
 
   function addPreset(p: (typeof PRESETS)[number]) {
-    const next: Draft = { name: p.name, powerKw: p.powerKw, readyBy: p.readyBy, flexHours: p.flexHours };
+    const { label: _label, ...next } = p;
+    void _label;
     setDrafts((ds) => {
       // Reuse the untouched blank row instead of leaving an empty card behind.
       const blank = ds.findIndex((d) => !d.name.trim() && !d.powerKw);
@@ -142,7 +308,7 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
       return;
     }
     if (!loadsValid) {
-      setErr("Add at least one load, each with a power rating above 0 kW.");
+      setErr("Add at least one load, each with its power rating and the detail it asks for.");
       return;
     }
     const db = getDb();
@@ -173,7 +339,7 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
       //    the user "onboarded" with an empty list.
       const batch = writeBatch(db);
       const jobsCol = collection(db, "users", user.uid, "jobs");
-      for (const j of jobs) {
+      for (const j of stored) {
         batch.set(doc(jobsCol), {
           name: j.name,
           kind: j.kind,
@@ -181,6 +347,11 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
           powerKw: j.powerKw,
           readyBy: j.readyBy,
           flexHours: j.flexHours,
+          // Optional fields are written only when known, so a missing value stays missing.
+          ...(j.jobType ? { jobType: j.jobType } : {}),
+          ...(j.energyKwh ? { energyKwh: j.energyKwh } : {}),
+          ...(j.durationMin ? { durationMin: j.durationMin } : {}),
+          ...(j.confidence !== undefined ? { confidence: j.confidence } : {}),
           createdAt: new Date().toISOString(),
         });
       }
@@ -207,13 +378,13 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
   }
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-black/80 p-4 backdrop-blur-sm">
+    <div className="fixed inset-0 z-50 grid place-items-start overflow-y-auto bg-black/80 p-3 backdrop-blur-sm sm:place-items-center sm:p-4">
       <form
         onSubmit={onSubmit}
         role="dialog"
         aria-modal="true"
         aria-labelledby="onboarding-title"
-        className="w-full max-w-xl rounded-3xl border border-white/10 bg-[#0a0a0a] p-7 sm:p-9"
+        className="my-auto w-full max-w-xl rounded-3xl border border-white/10 bg-[#0a0a0a] p-5 sm:p-9"
       >
         <div className="flex items-center gap-2" aria-hidden="true">
           {[0, 1, 2, 3].map((i) => (
@@ -274,7 +445,7 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
                   role="radio"
                   aria-checked={occupation === o}
                   onClick={() => setOccupation(o)}
-                  className={`cursor-pointer rounded-full border px-4 py-2 text-[13px] transition active:scale-[0.96] ${
+                  className={`min-h-11 cursor-pointer rounded-full border px-4 py-2 text-[13px] transition active:scale-[0.96] ${
                     occupation === o ? "border-lime-300 bg-lime-300 text-black font-medium" : "border-white/15 text-zinc-400 hover:border-white/40 hover:text-white"
                   }`}
                 >
@@ -291,7 +462,7 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
                   role="radio"
                   aria-checked={place === p}
                   onClick={() => setPlace(p)}
-                  className={`cursor-pointer rounded-full border px-4 py-2 text-[13px] transition active:scale-[0.96] ${
+                  className={`min-h-11 cursor-pointer rounded-full border px-4 py-2 text-[13px] transition active:scale-[0.96] ${
                     place === p ? "border-lime-300 bg-lime-300 text-black font-medium" : "border-white/15 text-zinc-400 hover:border-white/40 hover:text-white"
                   }`}
                 >
@@ -307,7 +478,9 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
         {step === 2 && (
           <div>
             <h2 id="onboarding-title" className="mt-3 text-2xl font-semibold tracking-tight">Which loads should we optimize?</h2>
-            <p className="mt-2 text-sm leading-6 text-zinc-500">Add what you have. You can add more any time from the dashboard.</p>
+            <p className="mt-2 text-sm leading-6 text-zinc-500">
+              Add what you have. We work out what kind of load each one is and ask only for the numbers that kind needs.
+            </p>
             <div className="mt-5 flex flex-wrap items-center gap-2">
               <span className="font-mono text-[11px] text-zinc-600">quick add</span>
               {PRESETS.map((p) => (
@@ -315,65 +488,27 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
                   key={p.label}
                   type="button"
                   onClick={() => addPreset(p)}
-                  className="cursor-pointer rounded-full border border-white/15 px-3 py-1.5 text-[12px] text-zinc-300 transition hover:border-lime-300/60 hover:text-white active:scale-[0.96]"
+                  className="min-h-10 cursor-pointer rounded-full border border-white/15 px-3.5 py-2 text-[12px] text-zinc-300 transition hover:border-lime-300/60 hover:text-white active:scale-[0.96]"
                 >
                   + {p.label}
                 </button>
               ))}
             </div>
             <div className="mt-4 space-y-3">
-              {drafts.map((d, i) => {
-                const kw = Number(d.powerKw);
-                const showPowerHint = d.name.trim() && !powerOk(kw);
-                return (
-                  <div key={i} className="rounded-2xl border border-white/10 p-4">
-                    <div className="flex items-center justify-between">
-                      <span className="font-mono text-[11px] text-zinc-600">LOAD {i + 1}</span>
-                      {drafts.length > 1 && (
-                        <button type="button" onClick={() => setDrafts((ds) => ds.filter((_, j) => j !== i))} className="cursor-pointer font-mono text-[11px] text-zinc-600 transition hover:text-red-300">
-                          remove
-                        </button>
-                      )}
-                    </div>
-                    <input aria-label={`Load ${i + 1} name`} value={d.name} onChange={(e) => setDraft(i, { name: e.target.value })} placeholder="Name anything — e.g. hostel borewell pump" maxLength={40} className={`mt-3 ${inputCls}`} />
-                    {(() => {
-                      const c = classifyJob(d.name.trim() || "…");
-                      return d.name.trim() ? (
-                        <p className="mt-2 flex items-center gap-2 font-mono text-[11px]">
-                          <span className={`h-1.5 w-1.5 rounded-full ${c.shiftable ? "bg-lime-300" : "bg-zinc-600"}`} />
-                          <span className={c.shiftable ? "text-zinc-400" : "text-zinc-500"}>
-                            {c.category} · {c.shiftable ? c.why : `${c.why} — filtered out of Optimize`}
-                          </span>
-                        </p>
-                      ) : null;
-                    })()}
-                    <div className="mt-2 grid grid-cols-3 gap-2">
-                      <label className={`rounded-xl border bg-black px-3 py-2 focus-within:border-white/30 ${showPowerHint ? "border-orange-300/50" : "border-white/10"}`}>
-                        <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-600">power (kW)</span>
-                        <input value={d.powerKw} onChange={(e) => setDraft(i, { powerKw: e.target.value.replace(/[^0-9.]/g, "") })} inputMode="decimal" placeholder="e.g. 2" className="w-full bg-transparent text-sm text-white placeholder:text-zinc-700 focus:outline-none" />
-                      </label>
-                      <label className="rounded-xl border border-white/10 bg-black px-3 py-2">
-                        <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-600">ready by</span>
-                        <input type="time" value={d.readyBy} onChange={(e) => setDraft(i, { readyBy: e.target.value })} className="w-full cursor-pointer bg-transparent text-sm text-white focus:outline-none [color-scheme:dark]" />
-                      </label>
-                      <label className="rounded-xl border border-white/10 bg-black px-3 py-2">
-                        <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-600">flexible +{d.flexHours}h</span>
-                        <input type="range" min={0} max={6} value={d.flexHours} onChange={(e) => setDraft(i, { flexHours: Number(e.target.value) })} className="w-full cursor-pointer accent-lime-300" />
-                      </label>
-                    </div>
-                    {showPowerHint && (
-                      <p className="mt-2 font-mono text-[11px] text-orange-300">
-                        {kw > MAX_POWER_KW ? `Keep it at or under ${MAX_POWER_KW} kW.` : "Add the power rating in kW (check the appliance label)."}
-                      </p>
-                    )}
-                  </div>
-                );
-              })}
+              {drafts.map((d, i) => (
+                <DraftCard
+                  key={i}
+                  d={d}
+                  i={i}
+                  onChange={(patch) => patchDraft(i, patch)}
+                  onRemove={drafts.length > 1 ? () => setDrafts((ds) => ds.filter((_, j) => j !== i)) : undefined}
+                />
+              ))}
             </div>
             <button
               type="button"
-              onClick={() => setDrafts((ds) => [...ds, { name: "", powerKw: "", readyBy: "18:00", flexHours: 2 }])}
-              className="mt-3 w-full cursor-pointer rounded-xl border border-dashed border-white/15 py-3 text-sm text-zinc-400 transition hover:border-white/40 hover:text-white active:scale-[0.99]"
+              onClick={() => setDrafts((ds) => [...ds, { ...BLANK, readyBy: "18:00" }])}
+              className="mt-3 min-h-12 w-full cursor-pointer rounded-xl border border-dashed border-white/15 py-3 text-sm text-zinc-400 transition hover:border-white/40 hover:text-white active:scale-[0.99]"
             >
               + Add another load
             </button>
@@ -392,11 +527,11 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
                 <p className="mt-5 font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-600">Priority order</p>
                 <ol className="mt-2 space-y-2">
                   {ranked.map((j, i) => (
-                    <li key={j.id} className="flex items-center gap-4 rounded-xl border border-white/10 px-4 py-3">
+                    <li key={j.id} className="flex items-center gap-3 rounded-xl border border-white/10 px-3.5 py-3 sm:gap-4 sm:px-4">
                       <span className="font-mono text-[12px] text-zinc-600">{String(i + 1).padStart(2, "0")}</span>
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-sm font-medium">{j.name}</p>
-                        <p className="mt-0.5 truncate font-mono text-[11px] text-zinc-500">{j.reason}</p>
+                        <p className="mt-0.5 line-clamp-2 font-mono text-[11px] text-zinc-500">{j.reason}</p>
                       </div>
                       <span className={`shrink-0 rounded-full px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider ${j.band === "Critical" ? "bg-red-500/15 text-red-300" : j.band === "High" ? "bg-orange-400/15 text-orange-300" : j.band === "Normal" ? "bg-white/10 text-zinc-300" : "bg-white/5 text-zinc-500"}`}>
                         {j.band}
@@ -412,16 +547,16 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
               </p>
             )}
             <p className="mt-4 font-mono text-[11px] text-zinc-600">
-              {jobs.length} load{jobs.length === 1 ? "" : "s"} will be saved to your account.
+              {stored.length} load{stored.length === 1 ? "" : "s"} will be saved to your account.
             </p>
           </div>
         )}
 
         {err && <p role="alert" className="mt-4 font-mono text-[12px] text-orange-300">{err}</p>}
 
-        <div className="mt-7 flex items-center justify-between">
+        <div className="mt-7 flex items-center justify-between gap-3">
           {step > 0 ? (
-            <button type="button" onClick={() => { setErr(""); setStep(step - 1); }} disabled={working} className="cursor-pointer text-sm text-zinc-500 transition hover:text-white disabled:opacity-50">
+            <button type="button" onClick={() => { setErr(""); setStep(step - 1); }} disabled={working} className="min-h-11 cursor-pointer px-2 text-sm text-zinc-500 transition hover:text-white disabled:opacity-50">
               ← Back
             </button>
           ) : (
@@ -431,7 +566,7 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
                 const a = getFirebaseAuth();
                 if (a) void signOut(a);
               }}
-              className="cursor-pointer font-mono text-[11px] text-zinc-600 transition hover:text-white"
+              className="min-h-11 cursor-pointer px-1 font-mono text-[11px] text-zinc-600 transition hover:text-white"
             >
               Not you? Sign out
             </button>
@@ -440,7 +575,7 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
             <button
               type="submit"
               disabled={!canNext()}
-              className="cursor-pointer rounded-full bg-white px-7 py-2.5 text-sm font-medium text-black transition hover:bg-zinc-200 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-30"
+              className="min-h-11 cursor-pointer rounded-full bg-white px-8 py-2.5 text-sm font-medium text-black transition hover:bg-zinc-200 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-30"
             >
               Continue
             </button>
@@ -448,7 +583,7 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
             <button
               type="submit"
               disabled={working || !loadsValid}
-              className="flex cursor-pointer items-center gap-2 rounded-full bg-lime-300 px-8 py-2.5 text-sm font-medium text-black transition hover:bg-lime-200 active:scale-[0.98] disabled:cursor-wait disabled:opacity-60"
+              className="flex min-h-11 cursor-pointer items-center gap-2 rounded-full bg-lime-300 px-8 py-2.5 text-sm font-medium text-black transition hover:bg-lime-200 active:scale-[0.98] disabled:cursor-wait disabled:opacity-60"
             >
               {working && <span className="spinner" />}
               {working ? "Saving…" : "Save & finish"}

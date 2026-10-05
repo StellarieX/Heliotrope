@@ -14,10 +14,16 @@ export default function PublicProfile({ params }: { params: Promise<{ username: 
   const nameValid = validUsername(name);
   const [db] = useState(() => getDb());
   const [profile, setProfile] = useState<Profile | null>(null);
-  const [missing, setMissing] = useState(() => getDb() === null || !validUsername(username.toLowerCase()));
+  const [missing, setMissing] = useState(() => !validUsername(username.toLowerCase()));
 
   useEffect(() => {
-    if (!db || !nameValid) return;
+    if (!db) {
+      // No database configured on this deployment: the profile can never load.
+      // Deferred; the server and client must render the same first frame.
+      queueMicrotask(() => setMissing(true));
+      return;
+    }
+    if (!nameValid) return;
     let cancelled = false;
     (async () => {
       try {

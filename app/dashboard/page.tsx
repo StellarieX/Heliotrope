@@ -1,14 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { onAuthStateChanged, signInWithPopup, signOut, type User } from "firebase/auth";
-import { addDoc, collection, deleteDoc, doc, getDoc, getDocs } from "firebase/firestore";
+import { addDoc, collection, deleteDoc, doc, getDoc, getDocs, updateDoc } from "firebase/firestore";
 import { getDb, getFirebaseAuth, getGoogleProvider } from "../../lib/firebase";
 import { jevRank, classifyJob, type JobInput, type RankedJob } from "../../lib/prioritize";
 import {
-  advanceSimulation,
-  classifyLoad,
   compareSchedulers,
   coordinateBuilding,
   getCarbonForecast,
@@ -32,12 +30,12 @@ import type {
   JobType,
   LoadSpec,
   ScheduleHistory,
-  ThermalSpec,
 } from "../../lib/api/types";
 import BuildingChart from "./BuildingChart";
 import CarbonChart from "./CarbonChart";
 import ExecutionPanel from "./ExecutionPanel";
-import { readyByToDeadline } from "../../lib/jobs/normalize";
+import { buildSpecs, detailNeeded, kindOf, latestFinish, floorToSlot, type Detail, type StoredJob } from "../../lib/loads/specs";
+import { useClassification } from "../../lib/loads/useClassification";
 import Onboarding from "./Onboarding";
 import { scrubLegacyEmail } from "../../lib/profile";
 
@@ -127,7 +125,7 @@ function KindIcon({ kind }: { kind: string }) {
     );
   }
   return (
-    <span className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl border border-white/10 bg-black text-zinc-300">
+    <span className="grid h-10 w-10 shrink-0 place-items-center rounded-2xl border border-white/10 bg-black text-zinc-300 sm:h-12 sm:w-12">
       {path}
     </span>
   );
@@ -148,7 +146,7 @@ function BandChip({ band }: { band: RankedJob["band"] }) {
 }
 
 const inputCls =
-  "rounded-xl border border-white/10 bg-black px-4 py-2.5 text-sm text-white placeholder:text-zinc-700 focus:border-white/30 focus:outline-none";
+  "min-w-0 max-w-full rounded-xl border border-white/10 bg-black px-4 py-2.5 text-sm text-white placeholder:text-zinc-700 focus:border-white/30 focus:outline-none";
 
 /** localStorage key for the live schedule id, so a reload can rehydrate it. */
 const ACTIVE_SCHEDULE_KEY = "heliotrope:active_schedule_id";
@@ -156,102 +154,6 @@ const ACTIVE_SCHEDULE_KEY = "heliotrope:active_schedule_id";
 const ACTIVE_IMPACT_KEY = "heliotrope:active_impact";
 /** Fingerprint of the loads the active plan was built from, to flag a stale plan after a reload. */
 const ACTIVE_SIG_KEY = "heliotrope:active_plan_sig";
-
-function getDefaultCoordinationData() {
-  const slotMs = 15 * 60 * 1000;
-  const now = new Date(Math.floor(Date.now() / slotMs) * slotMs);
-  const dl = new Date(now.getTime() + 10 * 3600 * 1000);
-  const participants = [
-    { id: "unit-101", name: "Apt 101" },
-    { id: "unit-102", name: "Apt 102" },
-    { id: "unit-201", name: "Apt 201" },
-  ];
-  const coordJobs: LoadSpec[] = [
-    {
-      id: "bldg-ev-1",
-      participant_id: "unit-101",
-      user_input: "EV 1",
-      normalized_name: "EV Charger 101",
-      category: "EV charging",
-      job_type: "DEFERRABLE_INTERRUPTIBLE",
-      confidence: 1.0,
-      ambiguous: false,
-      power_kw: 7.2,
-      max_power_kw: 7.2,
-      energy_required_kwh: 14.4,
-      min_chunk_minutes: 15,
-      duration_minutes: null,
-      release_at: now.toISOString(),
-      deadline_at: dl.toISOString(),
-      timezone: "UTC",
-      thermal: null,
-      explanation: "",
-      assumptions: [],
-      warnings: [],
-      required_fields: [],
-      alternatives: [],
-    },
-    {
-      id: "bldg-wh-2",
-      participant_id: "unit-102",
-      user_input: "Geyser 102",
-      normalized_name: "Geyser 102",
-      category: "Water heating",
-      job_type: "THERMAL",
-      confidence: 1.0,
-      ambiguous: false,
-      power_kw: 2.0,
-      max_power_kw: 2.0,
-      energy_required_kwh: null,
-      duration_minutes: null,
-      min_chunk_minutes: null,
-      release_at: now.toISOString(),
-      deadline_at: dl.toISOString(),
-      timezone: "UTC",
-      thermal: {
-        a: 0.9,
-        b: 2.75,
-        c: 2.0,
-        max_power_kw: 2.0,
-        resolution_minutes: 15,
-        temperature_initial_c: 45.0,
-        temperature_min_c: 40.0,
-        temperature_max_c: 65.0,
-        temperature_target_c: 55.0,
-      },
-      explanation: "",
-      assumptions: [],
-      warnings: [],
-      required_fields: [],
-      alternatives: [],
-    },
-    {
-      id: "bldg-wash-3",
-      participant_id: "unit-201",
-      user_input: "Washer 201",
-      normalized_name: "Laundry 201",
-      category: "Laundry",
-      job_type: "DEFERRABLE_ATOMIC",
-      confidence: 1.0,
-      ambiguous: false,
-      power_kw: 2.5,
-      max_power_kw: 2.5,
-      duration_minutes: 60,
-      energy_required_kwh: null,
-      min_chunk_minutes: null,
-      release_at: now.toISOString(),
-      deadline_at: dl.toISOString(),
-      timezone: "UTC",
-      thermal: null,
-      explanation: "",
-      assumptions: [],
-      warnings: [],
-      required_fields: [],
-      alternatives: [],
-    },
-  ];
-  return { participants, coordJobs };
-}
 
 /** Merge consecutive slot allocations into "11:30 PM–1:00 AM" style windows. */
 function runWindows(allocs: Array<{ slot: number; timestamp: string }>, slotMin = 15): string[] {
@@ -267,6 +169,65 @@ function runWindows(allocs: Array<{ slot: number; timestamp: string }>, slotMin 
     i = j + 1;
   }
   return out;
+}
+
+/** Empty means "use the default"; garbage must not silently fall back. */
+function parseCapacity(raw: string, fallback: number): { value?: number; error?: string } {
+  const t = raw.trim();
+  if (!t) return { value: fallback };
+  const n = Number(t);
+  if (!Number.isFinite(n) || n <= 0) return { error: "Enter a capacity greater than 0 kW." };
+  if (n > 1000) return { error: "Enter a capacity up to 1000 kW." };
+  return { value: n };
+}
+
+/** "06:00" + 2h -> "08:00" (wraps past midnight). */
+function addHoursToClock(hhmm: string, hours: number): string {
+  const [h, m] = hhmm.split(":").map(Number);
+  const total = (((h || 0) * 60 + (m || 0) + Math.round(hours * 60)) % 1440 + 1440) % 1440;
+  return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+}
+
+const TYPE_NOTE: Record<string, string> = {
+  DEFERRABLE_INTERRUPTIBLE: "can pause and resume",
+  DEFERRABLE_ATOMIC: "one continuous run",
+  THERMAL: "holds a comfort band",
+  FIXED: "always-on, never shifted",
+};
+
+/** Inline prompt for the one number a load still needs before it can be planned. */
+function DetailPrompt({ need, onSave }: { need: Detail; onSave: (v: number) => void }) {
+  const [val, setVal] = useState("");
+  const n = Number(val);
+  const ok = Number.isFinite(n) && n > 0 && (need === "energy" ? n <= 1000 : n <= 1440);
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (ok) onSave(need === "duration" ? Math.round(n) : n);
+      }}
+      className="mt-2.5 flex flex-wrap items-center gap-2"
+    >
+      <span className="font-mono text-[11px] text-amber-400/90">
+        {need === "energy" ? "How much energy does it need in total?" : "How long does one run take?"}
+      </span>
+      <input
+        value={val}
+        onChange={(e) => setVal(e.target.value.replace(/[^0-9.]/g, ""))}
+        inputMode="decimal"
+        aria-label={need === "energy" ? "Energy needed in kilowatt-hours" : "Run length in minutes"}
+        placeholder={need === "energy" ? "kWh" : "min"}
+        className={`w-20 ${inputCls}`}
+      />
+      <button
+        type="submit"
+        disabled={!ok}
+        className="cursor-pointer rounded-full bg-lime-300 px-4 py-2 text-[12px] font-medium text-black transition hover:bg-lime-200 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-30"
+      >
+        Save
+      </button>
+    </form>
+  );
 }
 
 function greeting(now = new Date()) {
@@ -287,7 +248,7 @@ const PRESETS = [
 export default function Dashboard() {
   const [auth] = useState(() => getFirebaseAuth());
   const [user, setUser] = useState<User | null>(null);
-  const [ready, setReady] = useState(() => getFirebaseAuth() === null);
+  const [ready, setReady] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [profile, setProfile] = useState<Profile | null>(null);
@@ -303,11 +264,8 @@ export default function Dashboard() {
   const [fDuration, setFDuration] = useState("");
   const [fTempMin, setFTempMin] = useState("");
   const [fTempMax, setFTempMax] = useState("");
-  const [preview, setPreview] = useState<{ forName: string; jobType: JobType; category: string; confidence: number; ambiguous: boolean } | null>(null);
-  // A preview is only usable for the exact name it was computed from, so a
-  // stale one is ignored rather than cleared (clearing would mean a
-  // synchronous setState inside the effect).
-  const activePreview = preview && preview.forName === fName.trim() ? preview : null;
+  // Backend classification of the name being typed (AI when Jev is on, else rules).
+  const activePreview = useClassification(fName, fReady);
   const [signal, setSignal] = useState<CarbonSignalResponse | null>(null);
   const [signalError, setSignalError] = useState<string | null>(null);
   const [forecast, setForecast] = useState<CarbonForecastResponse | null>(null);
@@ -324,7 +282,6 @@ export default function Dashboard() {
 
   const [coordCapacity, setCoordCapacity] = useState("30");
   const [coordCapacityError, setCoordCapacityError] = useState<string | null>(null);
-  const [coordIsDemo, setCoordIsDemo] = useState(false);
   const [coordResult, setCoordResult] = useState<CoordinationResult | null>(null);
   const [coordBusy, setCoordBusy] = useState(false);
   const [coordError, setCoordError] = useState<string | null>(null);
@@ -372,7 +329,13 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
-    if (!auth) return;
+    if (!auth) {
+    // Firebase not configured: nothing will ever resolve, so stop showing "loading".
+    // Deferred, and `ready` starts false on both server and client so they render the
+    // same first frame (a different initial value caused a hydration mismatch).
+    queueMicrotask(() => setReady(true));
+    return;
+    }
     return onAuthStateChanged(auth, (u) => {
       setUser(u);
       setReady(true);
@@ -453,198 +416,8 @@ export default function Dashboard() {
     return () => clearInterval(t);
   }, [liveId, refreshLive, liveFailure]);
 
-  const loadsToSpecs = useCallback(() => {
-    const slotMs = 15 * 60 * 1000;
-    const now = new Date(Math.floor(Date.now() / slotMs) * slotMs);
-    const specs: LoadSpec[] = [];
-    const skipped: string[] = [];
-    for (const j of jobs) {
-      if (j.shiftable === false) {
-        specs.push({
-          id: j.id,
-          normalized_name: j.name,
-          category: j.kind || "Always-on",
-          job_type: "FIXED",
-          power_kw: j.powerKw,
-          max_power_kw: j.powerKw,
-          duration_minutes: null,
-          energy_required_kwh: null,
-          min_chunk_minutes: null,
-          confidence: 1.0,
-          ambiguous: false,
-          user_input: j.name,
-          timezone: "UTC",
-          thermal: null,
-          explanation: "",
-          warnings: [],
-          required_fields: [],
-          alternatives: [],
-          release_at: now.toISOString(),
-          deadline_at: readyByToDeadline(j.readyBy, now).toISOString(),
-          assumptions: [],
-        });
-        continue;
-      }
-
-      const isThermal =
-        j.jobType === "THERMAL" ||
-        /heater|geyser|cool|ac\b|thermal|water heater|boiler/i.test(`${j.name} ${j.kind || ""}`);
-
-      if (isThermal) {
-        const isAc = /cool|ac\b|air/i.test(`${j.name} ${j.kind || ""}`);
-        const pKw = j.powerKw > 0 ? j.powerKw : (isAc ? 1.5 : 2.0);
-        const minC = j.tempMinC ?? (isAc ? 22.0 : 40.0);
-        const maxC = j.tempMaxC ?? (isAc ? 26.0 : 65.0);
-        const tMin = Math.min(minC, maxC);
-        const tMax = Math.max(minC, maxC);
-        const tInit = isAc ? Math.max(tMax + 2, 30.0) : Math.min(tMin + 5, (tMin + tMax) / 2);
-        const tTarget = (tMin + tMax) / 2;
-
-        const thermalSpec: ThermalSpec = isAc
-          ? {
-              a: 0.85,
-              b: -1.40,
-              c: 5.10,
-              max_power_kw: pKw,
-              resolution_minutes: 15,
-              temperature_initial_c: tInit,
-              temperature_min_c: tMin,
-              temperature_max_c: tMax,
-              temperature_target_c: tTarget,
-            }
-          : {
-              a: 0.90,
-              b: 2.75,
-              c: 2.0,
-              max_power_kw: pKw,
-              resolution_minutes: 15,
-              temperature_initial_c: tInit,
-              temperature_min_c: tMin,
-              temperature_max_c: tMax,
-              temperature_target_c: tTarget,
-            };
-
-        specs.push({
-          id: j.id,
-          normalized_name: j.name,
-          category: j.kind || (isAc ? "Cooling" : "Water heating"),
-          job_type: "THERMAL",
-          power_kw: pKw,
-          max_power_kw: pKw,
-          duration_minutes: null,
-          energy_required_kwh: null,
-          min_chunk_minutes: null,
-          confidence: 1.0,
-          ambiguous: false,
-          user_input: j.name,
-          timezone: "UTC",
-          thermal: thermalSpec,
-          explanation: "",
-          warnings: [],
-          required_fields: [],
-          alternatives: [],
-          release_at: now.toISOString(),
-          deadline_at: readyByToDeadline(j.readyBy, now).toISOString(),
-          assumptions: [
-            {
-              field: "thermal",
-              origin: j.tempMinC !== undefined ? "user-configured" : "synthetic default",
-              detail: `comfort band ${tMin}°C–${tMax}°C`,
-            },
-          ],
-        });
-        continue;
-      }
-
-      const isInterruptible =
-        j.jobType === "DEFERRABLE_INTERRUPTIBLE" ||
-        (!j.jobType && /ev|charge|pump|laundry|wash/i.test(`${j.name} ${j.kind || ""}`));
-
-      const hasUserEnergy =
-        j.energyKwh !== undefined && !Number.isNaN(j.energyKwh) && j.energyKwh > 0;
-      const hasUserDuration =
-        j.durationMin !== undefined && !Number.isNaN(j.durationMin) && j.durationMin > 0;
-
-      if (isInterruptible) {
-        const energyKwh = hasUserEnergy ? j.energyKwh! : (j.powerKw > 0 ? j.powerKw * 2 : 2.0);
-        specs.push({
-          id: j.id,
-          normalized_name: j.name,
-          category: j.kind || "Flexible",
-          job_type: "DEFERRABLE_INTERRUPTIBLE",
-          power_kw: j.powerKw > 0 ? j.powerKw : 2.0,
-          max_power_kw: j.powerKw > 0 ? j.powerKw : 2.0,
-          energy_required_kwh: energyKwh,
-          duration_minutes: hasUserDuration ? j.durationMin! : null,
-          min_chunk_minutes: 15,
-          confidence: 1.0,
-          ambiguous: false,
-          user_input: j.name,
-          timezone: "UTC",
-          thermal: null,
-          explanation: "",
-          warnings: [],
-          required_fields: [],
-          alternatives: [],
-          release_at: now.toISOString(),
-          deadline_at: readyByToDeadline(j.readyBy, now).toISOString(),
-          assumptions: [
-            {
-              field: "energy_required_kwh",
-              origin: hasUserEnergy ? "user-configured" : "synthetic default",
-              detail: hasUserEnergy
-                ? `user entered ${j.energyKwh} kWh`
-                : "energy assumed = rating × 2h (frontend default — declare exact values later)",
-            },
-          ],
-        });
-      } else {
-        const durationMin = hasUserDuration ? j.durationMin! : 60;
-        specs.push({
-          id: j.id,
-          normalized_name: j.name,
-          category: j.kind || "Flexible",
-          job_type: "DEFERRABLE_ATOMIC",
-          power_kw: j.powerKw > 0 ? j.powerKw : 1.5,
-          max_power_kw: j.powerKw > 0 ? j.powerKw : 1.5,
-          duration_minutes: durationMin,
-          energy_required_kwh: hasUserEnergy ? j.energyKwh! : null,
-          min_chunk_minutes: null,
-          confidence: 1.0,
-          ambiguous: false,
-          user_input: j.name,
-          timezone: "UTC",
-          thermal: null,
-          explanation: "",
-          warnings: [],
-          required_fields: [],
-          alternatives: [],
-          release_at: now.toISOString(),
-          deadline_at: readyByToDeadline(j.readyBy, now).toISOString(),
-          assumptions: [
-            {
-              field: "duration_minutes",
-              origin: hasUserDuration ? "user-configured" : "synthetic default",
-              detail: hasUserDuration
-                ? `user entered ${j.durationMin} min`
-                : "duration assumed 60 min (frontend default — declare exact values later)",
-            },
-          ],
-        });
-      }
-    }
-    return { specs, skipped };
-  }, [jobs]);
-
-  /** Empty means "use the default"; garbage must not silently fall back. */
-  function parseCapacity(raw: string, fallback: number): { value?: number; error?: string } {
-    const t = raw.trim();
-    if (!t) return { value: fallback };
-    const n = Number(t);
-    if (!Number.isFinite(n) || n <= 0) return { error: "Enter a capacity greater than 0 kW." };
-    if (n > 1000) return { error: "Enter a capacity up to 1000 kW." };
-    return { value: n };
-  }
+  // Loads that cannot be planned yet because a number only the user knows is missing.
+  const needsDetail = useMemo(() => buildSpecs(jobs as StoredJob[]).needsDetail, [jobs]);
 
   const jobsSignature = jobs
     .map((j) => `${j.id}:${j.powerKw}:${j.readyBy}:${j.flexHours}:${j.energyKwh ?? ""}:${j.durationMin ?? ""}:${j.tempMinC ?? ""}:${j.tempMaxC ?? ""}:${j.jobType ?? ""}:${j.shiftable ?? ""}`)
@@ -659,9 +432,13 @@ export default function Dashboard() {
       return;
     }
     setLiveCapacityError(null);
-    const { specs, skipped } = loadsToSpecs();
+    const { specs, needsDetail: left } = buildSpecs(jobs as StoredJob[]);
     if (!specs.length) {
-      setLiveError(skipped.length ? "Only thermal loads present — they need a comfort band first." : "Add a load first.");
+      setLiveError(
+        left.length
+          ? `Add the missing detail for ${left.map((n) => n.job.name).join(", ")} first (see your loads above).`
+          : "Add a load first."
+      );
       return;
     }
     setLiveBusy(true);
@@ -705,22 +482,9 @@ export default function Dashboard() {
       }
       setPlannedJobsSignature(jobsSignature);
       await refreshLive(state.schedule_id);
-      if (skipped.length) setLiveError(`Thermal skipped for now: ${skipped.join(", ")} — comfort band unknown.`);
+      if (left.length) setLiveError(`Left out until you add their details: ${left.map((n) => n.job.name).join(", ")}.`);
     } catch (e) {
       setLiveError(e instanceof Error ? e.message : "Planning failed.");
-    } finally {
-      setLiveBusy(false);
-    }
-  }
-
-  async function liveAdvance() {
-    if (!liveId) return;
-    setLiveBusy(true);
-    try {
-      await advanceSimulation(liveId, { to_time: new Date(Date.now() + 15 * 60 * 1000).toISOString(), script: [] });
-      await refreshLive(liveId);
-    } catch (e) {
-      liveFailure(e, "Advance failed.");
     } finally {
       setLiveBusy(false);
     }
@@ -752,54 +516,35 @@ export default function Dashboard() {
     }
   }
 
-  const runCoordination = useCallback(
-    async (capKw?: number) => {
-      setCoordBusy(true);
-      setCoordError(null);
-      try {
-        const parsed =
-          capKw !== undefined ? { value: capKw } : parseCapacity(coordCapacity, 30);
-        if (parsed.error || parsed.value === undefined || !(parsed.value > 0)) {
-          setCoordCapacityError(parsed.error ?? "Enter a capacity greater than 0 kW.");
-          return;
-        }
-        setCoordCapacityError(null);
-        const cap = parsed.value;
-        const { specs } = loadsToSpecs();
-
-        let coordJobs: LoadSpec[] = [];
-        let participants: Array<{ id: string; name: string }> = [];
-
-        if (specs.length > 0) {
-          participants = specs.map((s, idx) => ({
-            id: `unit-${idx + 1}`,
-            name: `Unit ${idx + 1}`,
-          }));
-          coordJobs = specs.map((s, idx) => ({
-            ...s,
-            participant_id: `unit-${idx + 1}`,
-          }));
-        } else {
-          const defaults = getDefaultCoordinationData();
-          participants = defaults.participants;
-          coordJobs = defaults.coordJobs;
-        }
-
-        const res = await coordinateBuilding({
-          participants,
-          shared_resource: { capacity_kw: cap },
-          jobs: coordJobs,
-        });
-        setCoordResult(res);
-        setCoordIsDemo(specs.length === 0);
-      } catch (err) {
-        setCoordError(err instanceof Error ? err.message : "Coordination failed.");
-      } finally {
-        setCoordBusy(false);
-      }
-    },
-    [coordCapacity, loadsToSpecs]
-  );
+  // Schedules all of the user's loads together under one site limit. Each load is
+  // its own participant, so the fairness and peak logic are real; there is no demo data.
+  const runCoordination = useCallback(async () => {
+    const parsed = parseCapacity(coordCapacity, 30);
+    if (parsed.error || parsed.value === undefined) {
+      setCoordCapacityError(parsed.error ?? "Enter a capacity greater than 0 kW.");
+      return;
+    }
+    setCoordCapacityError(null);
+    const { specs } = buildSpecs(jobs as StoredJob[]);
+    if (specs.length === 0) {
+      setCoordResult(null);
+      return;
+    }
+    setCoordBusy(true);
+    setCoordError(null);
+    try {
+      const res = await coordinateBuilding({
+        participants: specs.map((sp) => ({ id: sp.id, name: sp.normalized_name })),
+        shared_resource: { capacity_kw: parsed.value },
+        jobs: specs.map((sp) => ({ ...sp, participant_id: sp.id })),
+      });
+      setCoordResult(res);
+    } catch (err) {
+      setCoordError(err instanceof Error ? err.message : "Coordination failed.");
+    } finally {
+      setCoordBusy(false);
+    }
+  }, [coordCapacity, jobs]);
 
   // Wait for the backend (it may be waking from sleep), THEN read the grid
   // signal. Fetching immediately would fail on a healthy-but-cold deployment.
@@ -816,8 +561,9 @@ export default function Dashboard() {
         return;
       }
       setBackend("online");
-      const end = new Date();
-      const start = new Date(end.getTime() - 24 * 3600 * 1000);
+      // Six hours of recent past plus the next 24: the window the planner actually works in.
+      const start = new Date(Date.now() - 6 * 3600 * 1000);
+      const end = new Date(Date.now() + 24 * 3600 * 1000);
       getCarbonSignal({ start: start.toISOString(), end: end.toISOString() })
         .then((s) => {
           if (!ctl.signal.aborted) setSignal(s);
@@ -849,48 +595,13 @@ export default function Dashboard() {
     setBackendTry((n) => n + 1);
   }
 
-  // Demo coordination runs only when the user has no loads: the empty state
-  // below explains the demo, and a user with jobs must press "Coordinate
-  // building" themselves — never a silent demo-first-paint over real data.
+  // Keep the shared-capacity view in step with the loads and the limit (it is cheap
+  // on the backend), once the backend is reachable. Debounced while typing a limit.
   useEffect(() => {
-    if (!profileLoaded) return;
-    if (jobs.length > 0) return;
-    if (coordResult || coordBusy) return;
-    // Deferred so the effect body itself stays free of synchronous state
-    // updates; the demo fetch resolves in a callback.
-    void Promise.resolve().then(() => runCoordination(30));
-  }, [profileLoaded, jobs.length, coordResult, coordBusy, runCoordination]);
-
-  // Progressive disclosure: ask the backend what this name is, debounced, and
-  // reveal only the fields that class actually needs. Local `classifyJob`
-  // still renders instantly so the form stays usable when the backend is down.
-  useEffect(() => {
-    const name = fName.trim();
-    if (name.length < 2) return;
-    let cancelled = false;
-    const t = setTimeout(() => {
-      classifyLoad({ name, deadline_wall: fReady })
-        .then((r) => {
-          if (cancelled) return;
-          setPreview({
-            forName: name,
-            jobType: r.classification.job_type,
-            category: r.classification.category,
-            confidence: r.confidence,
-            ambiguous: r.ambiguous,
-          });
-        })
-        .catch(() => {
-          // Backend classification is an enhancement, not a requirement: the
-          // local heuristic already renders and the form still works.
-          if (!cancelled) setPreview(null);
-        });
-    }, 350);
-    return () => {
-      cancelled = true;
-      clearTimeout(t);
-    };
-  }, [fName, fReady]);
+    if (!profileLoaded || backend !== "online") return;
+    const t = setTimeout(() => void runCoordination(), 500);
+    return () => clearTimeout(t);
+  }, [profileLoaded, backend, runCoordination]);
 
   // Validate the in-progress load against the backend before adding, so
   // feasibility errors/warnings show inline in the form (never silent).
@@ -916,8 +627,7 @@ export default function Dashboard() {
       const pKw = Number(fPower);
       const eKwh = fEnergy ? Number(fEnergy) : null;
       const dMin = fDuration ? Math.round(Number(fDuration)) : null;
-      const slotMs = 15 * 60 * 1000;
-      const now = new Date(Math.floor(Date.now() / slotMs) * slotMs);
+      const now = floorToSlot();
       const isThermalForm = jobType === "THERMAL";
       const isAcForm = /cool|ac\b|air/i.test(`${name} ${activePreview?.category ?? c.category}`);
       const tMin = fTempMin ? Number(fTempMin) : isThermalForm ? (isAcForm ? 22 : 40) : NaN;
@@ -966,7 +676,7 @@ export default function Dashboard() {
         required_fields: [],
         alternatives: [],
         release_at: now.toISOString(),
-        deadline_at: readyByToDeadline(fReady, now).toISOString(),
+        deadline_at: latestFinish({ readyBy: fReady, flexHours: fFlex }, now).toISOString(),
         assumptions: [],
       };
       validateLoad(spec)
@@ -987,7 +697,7 @@ export default function Dashboard() {
       cancelled = true;
       clearTimeout(t);
     };
-  }, [fName, fReady, fPower, fEnergy, fDuration, fTempMin, fTempMax, activePreview]);
+  }, [fName, fReady, fFlex, fPower, fEnergy, fDuration, fTempMin, fTempMax, activePreview]);
 
   async function addJob() {
     if (!user || !fName.trim() || !fReady) return;
@@ -1063,7 +773,6 @@ export default function Dashboard() {
       setFDuration("");
       setFTempMin("");
       setFTempMax("");
-      setPreview(null);
       setAddErrors([]);
       setAddWarnings([]);
       setFPowerError(null);
@@ -1088,6 +797,20 @@ export default function Dashboard() {
     setFDuration(p.durationMin);
     setFPowerError(null);
     setAddError(null);
+  }
+
+  async function saveDetail(id: string, need: Detail, value: number) {
+    if (!user) return;
+    const db = getDb();
+    if (!db) return;
+    const field = need === "energy" ? "energyKwh" : "durationMin";
+    try {
+      await updateDoc(doc(db, "users", user.uid, "jobs", id), { [field]: value });
+      setJobs((js) => js.map((j) => (j.id === id ? { ...j, [field]: value } : j)));
+      setLoadError(null);
+    } catch {
+      setLoadError("Couldn't save that detail. Check your connection and try again.");
+    }
   }
 
   async function removeJob(id: string) {
@@ -1186,9 +909,9 @@ export default function Dashboard() {
     <main className="min-h-screen bg-black text-zinc-100">
       {needsOnboarding && <Onboarding user={user} onDone={() => void loadAll(user)} />}
       {/* inert: while the wizard is open the page behind it must not take focus or be read out */}
-      <div inert={needsOnboarding} className="mx-auto max-w-7xl px-6 py-6 sm:px-10 lg:px-16">
+      <div inert={needsOnboarding} className="mx-auto max-w-7xl px-4 py-4 sm:px-10 sm:py-6 lg:px-16">
         <header className="flex items-center justify-between">
-          <Link href="/" className="text-[13px] font-semibold uppercase tracking-[0.28em]">Heliotrope</Link>
+          <Link href="/" className="inline-flex min-h-11 items-center text-[13px] font-semibold uppercase tracking-[0.28em]">Heliotrope</Link>
           <div className="relative flex items-center gap-3">
             <span
               role="status"
@@ -1216,7 +939,7 @@ export default function Dashboard() {
             <button
               onClick={() => setMenuOpen((v) => !v)}
               aria-label="Account menu"
-              className="grid h-8 w-8 cursor-pointer place-items-center text-lg leading-none text-zinc-300 transition hover:text-white active:scale-95"
+              className="grid h-11 w-11 cursor-pointer place-items-center text-lg leading-none text-zinc-300 transition hover:text-white active:scale-95"
             >
               ⋮
             </button>
@@ -1295,7 +1018,7 @@ export default function Dashboard() {
 
         {/* loads */}
         <section className="mt-3 overflow-hidden rounded-2xl border border-white/10 bg-[#0a0a0a]">
-          <div className="flex flex-wrap items-center justify-between gap-3 px-6 py-5 sm:px-8">
+          <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-5 sm:px-8">
             <div>
               <h2 className="text-[15px] font-medium">Your loads</h2>
               <p className="mt-0.5 font-mono text-[11px] text-zinc-600">
@@ -1306,7 +1029,7 @@ export default function Dashboard() {
               onClick={() => setRanked(ranked ? null : jevRank(jobs))}
               disabled={jobs.length === 0}
               title="A quick priority order by urgency, size and flexibility. The real timing comes from Plan live below."
-              className="cursor-pointer rounded-full border border-white/15 px-5 py-2 text-[13px] text-zinc-300 transition hover:border-white/40 hover:text-white active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-30"
+              className="min-h-11 cursor-pointer rounded-full border border-white/15 px-5 py-2 text-[13px] text-zinc-300 transition hover:border-white/40 hover:text-white active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-30"
             >
               {ranked ? "Hide ranking" : "Rank by priority"}
             </button>
@@ -1324,7 +1047,7 @@ export default function Dashboard() {
           {(ranked ? [...ranked, ...jobs.filter((j) => j.shiftable === false)] : jobs).map((item, i) => {
             const j = item as DashboardJob & Partial<RankedJob>;
             return (
-              <div key={j.id} className="group flex items-center gap-5 border-t border-white/5 px-6 py-5 transition hover:bg-white/[0.02] sm:px-8">
+              <div key={j.id} className="group flex items-start gap-3 border-t border-white/5 px-4 py-4 transition hover:bg-white/[0.02] sm:items-center sm:gap-5 sm:px-8 sm:py-5">
                 {ranked && j.shiftable !== false && <span className="w-6 shrink-0 font-mono text-[13px] text-zinc-600">{String(i + 1).padStart(2, "0")}</span>}
                 <KindIcon kind={j.kind} />
                 <div className="min-w-0 flex-1">
@@ -1337,11 +1060,16 @@ export default function Dashboard() {
                     )}
                   </div>
                   <p className="mt-1.5 text-[13px] text-zinc-500">
-                    {j.kind || "Load"} · {j.powerKw} kW · ready by {j.readyBy} · +{j.flexHours}h flexible
+                    {j.kind || "Load"} · {TYPE_NOTE[kindOf(j as StoredJob)]} · {j.powerKw} kW · ready by {j.readyBy}
+                    {j.flexHours > 0 ? ` (up to ${addHoursToClock(j.readyBy, j.flexHours)})` : ""}
                     {j.energyKwh ? ` · ${j.energyKwh} kWh` : ""}
                     {j.durationMin ? ` · ${j.durationMin} min` : ""}
                     {j.tempMinC !== undefined && j.tempMaxC !== undefined ? ` · comfort ${j.tempMinC}°C–${j.tempMaxC}°C` : ""}
                   </p>
+                  {(() => {
+                    const need = detailNeeded(j as StoredJob);
+                    return need ? <DetailPrompt need={need} onSave={(v) => void saveDetail(j.id, need, v)} /> : null;
+                  })()}
                   {ranked && j.shiftable !== false && (
                     <>
                       <div className="mt-2.5 h-1 max-w-md overflow-hidden rounded-full bg-white/10">
@@ -1351,7 +1079,7 @@ export default function Dashboard() {
                     </>
                   )}
                 </div>
-                <button onClick={() => void removeJob(j.id)} className="shrink-0 cursor-pointer font-mono text-[11px] text-zinc-700 transition hover:text-red-300 focus-visible:opacity-100 focus-visible:text-red-300 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100">
+                <button onClick={() => void removeJob(j.id)} aria-label={`Remove ${j.name}`} className="-mr-2 shrink-0 cursor-pointer px-2 py-2.5 font-mono text-[12px] text-zinc-500 transition hover:text-red-300 focus-visible:opacity-100 focus-visible:text-red-300 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100">
                   remove
                 </button>
               </div>
@@ -1359,13 +1087,13 @@ export default function Dashboard() {
           })}
 
           {jobs.length === 0 && (
-            <p className="border-t border-white/5 px-6 py-6 text-sm leading-6 text-zinc-500 sm:px-8">
+            <p className="border-t border-white/5 px-4 py-6 text-sm leading-6 text-zinc-500 sm:px-8">
               No loads yet. Name your first one below — it takes ten seconds.
             </p>
           )}
 
           {/* add */}
-          <div className="border-t border-white/10 bg-white/[0.015] px-6 py-6 sm:px-8">
+          <div className="border-t border-white/10 bg-white/[0.015] px-4 py-6 sm:px-8">
             <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-600">Add a load — name anything</p>
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <span className="font-mono text-[11px] text-zinc-600">quick fill</span>
@@ -1374,23 +1102,44 @@ export default function Dashboard() {
                   key={p.label}
                   type="button"
                   onClick={() => applyPreset(p)}
-                  className="cursor-pointer rounded-full border border-white/15 px-3 py-1 text-[12px] text-zinc-400 transition hover:border-lime-300/60 hover:text-white active:scale-[0.96]"
+                  className="min-h-10 cursor-pointer rounded-full border border-white/15 px-3.5 py-2 text-[12px] text-zinc-400 transition hover:border-lime-300/60 hover:text-white active:scale-[0.96]"
                 >
                   {p.label}
                 </button>
               ))}
             </div>
-            <div className="mt-3 grid gap-2 sm:grid-cols-2">
-              <input aria-label="Load name" value={fName} onChange={(e) => setFName(e.target.value)} maxLength={40} placeholder="Name — e.g. hostel borewell pump" className={inputCls} />
-              <div className={`flex items-center px-4 ${inputCls} ${fName.trim() ? "" : "opacity-40"}`}>
+            <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <input aria-label="Load name" value={fName} onChange={(e) => setFName(e.target.value)} maxLength={40} placeholder="Name — e.g. hostel borewell pump" className={`w-full ${inputCls}`} />
+              <div className={`flex w-full items-center overflow-hidden px-4 ${inputCls} ${fName.trim() ? "" : "opacity-40"}`}>
                 {(() => {
                   const c = classifyJob(fName.trim() || "…");
+                  const shiftable = activePreview ? activePreview.jobType !== "FIXED" : c.shiftable;
                   return (
                     <>
-                      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${c.shiftable ? "bg-lime-300" : "bg-zinc-600"}`} />
-                      <span className="ml-2 truncate text-sm text-zinc-200">
-                        {fName.trim() ? `${c.category} · ${c.why}` : "type a name and we'll work out what kind of load it is"}
+                      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${shiftable ? "bg-lime-300" : "bg-zinc-600"}`} />
+                      <span className="ml-2 min-w-0 flex-1 truncate text-sm text-zinc-200">
+                        {!fName.trim()
+                          ? "type a name and we'll work out what kind of load it is"
+                          : activePreview
+                            ? `${activePreview.category} · ${TYPE_NOTE[activePreview.jobType] ?? ""}`
+                            : `${c.category} · ${c.why}`}
                       </span>
+                      {activePreview && (
+                        <span
+                          title={
+                            activePreview.provider === "jev"
+                              ? "Classified by the Jev AI model; double-check the type."
+                              : activePreview.fallbackReason
+                                ? `AI classifier unavailable (${activePreview.fallbackReason}); the built-in rules answered.`
+                                : "Classified by the built-in rules."
+                          }
+                          className={`ml-2 shrink-0 rounded-full px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${
+                            activePreview.provider === "jev" ? "bg-violet-400/15 text-violet-300" : "bg-white/5 text-zinc-500"
+                          }`}
+                        >
+                          {activePreview.provider === "jev" ? "AI" : "rules"}
+                        </span>
+                      )}
                     </>
                   );
                 })()}
@@ -1411,14 +1160,14 @@ export default function Dashboard() {
                 <input type="time" value={fReady} onChange={(e) => setFReady(e.target.value)} className={`cursor-pointer [color-scheme:dark] ${inputCls}`} />
               </label>
               <label className="flex items-center gap-2 text-[13px] text-zinc-400">
-                <span className="font-mono text-[11px] text-zinc-600">+{fFlex}h flex</span>
+                <span className="font-mono text-[11px] text-zinc-600">may finish up to +{fFlex}h later</span>
                 <input type="range" min={0} max={6} value={fFlex} aria-label="Flexibility in hours" onChange={(e) => setFFlex(Number(e.target.value))} className="w-28 cursor-pointer accent-lime-300" />
               </label>
               <button
                 onClick={() => void addJob()}
                 disabled={adding || !fName.trim() || !fReady || addErrors.length > 0}
                 title={addErrors.length > 0 ? "Fix the errors above before adding." : undefined}
-                className="flex cursor-pointer items-center gap-2 rounded-full bg-white px-6 py-2 text-[13px] font-medium text-black transition hover:bg-zinc-200 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-30"
+                className="flex min-h-11 cursor-pointer items-center gap-2 rounded-full bg-white px-6 py-2 text-[13px] font-medium text-black transition hover:bg-zinc-200 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-30"
               >
                 {adding && <span className="spinner" />}
                 {adding ? "Adding…" : "Add load"}
@@ -1507,7 +1256,7 @@ export default function Dashboard() {
           </div>
         </section>
 
-        <div className="mt-3 rounded-2xl border border-white/10 bg-[#0a0a0a] p-6 sm:p-8">
+        <div className="mt-3 rounded-2xl border border-white/10 bg-[#0a0a0a] p-4 sm:p-8">
           {signal ? (
             <>
               <CarbonChart
@@ -1529,7 +1278,7 @@ export default function Dashboard() {
           )}
         </div>
 
-        <div className="mt-3 rounded-2xl border border-white/10 bg-[#0a0a0a] p-6 sm:p-8">
+        <div className="mt-3 rounded-2xl border border-white/10 bg-[#0a0a0a] p-4 sm:p-8">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <h2 className="text-[15px] font-medium">Live schedule</h2>
@@ -1557,7 +1306,7 @@ export default function Dashboard() {
                       ? "Waiting for the compute backend."
                       : undefined
                 }
-                className={`cursor-pointer rounded-full px-5 py-2 text-[13px] font-medium text-black transition active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-30 ${
+                className={`min-h-11 cursor-pointer rounded-full px-5 py-2 text-[13px] font-medium text-black transition active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-30 ${
                   !liveId || loadsStale ? "bg-lime-300 hover:bg-lime-200" : "bg-white hover:bg-zinc-200"
                 }`}
               >
@@ -1570,7 +1319,9 @@ export default function Dashboard() {
             <p className="mt-3 text-[13px] leading-6 text-zinc-500">
               {jobs.length === 0
                 ? "Add a load above, then plan it here."
-                : "Plan live solves the cleanest start time for every flexible load while keeping each deadline, then lets you track and replan as the day moves."}
+                : needsDetail.length > 0
+                  ? `${needsDetail.length} load${needsDetail.length > 1 ? "s" : ""} still need${needsDetail.length > 1 ? "" : "s"} a detail (see your loads above) and will be left out of the plan.`
+                  : "Plan live solves the cleanest start time for every flexible load while keeping each deadline, then lets you track and replan as the day moves."}
             </p>
           )}
           {loadsStale && liveState && (
@@ -1597,7 +1348,9 @@ export default function Dashboard() {
                   )}
                 </div>
                 <p className="font-mono text-[11px] text-zinc-600">
-                  {impact.signal?.signal_type ? `${impact.signal.signal_type.toLowerCase()} grid signal · ` : ""}
+                  {impact.signal?.signal_type
+                    ? `${impact.signal.signal_type === "PROXY" ? "weather-estimated" : impact.signal.signal_type === "SYNTHETIC" ? "test" : impact.signal.signal_type.toLowerCase()} grid signal · `
+                    : ""}
                   {impact.metrics.deadline_misses === 0 ? "every deadline met" : `${impact.metrics.deadline_misses} deadline(s) missed`}
                 </p>
               </div>
@@ -1625,7 +1378,6 @@ export default function Dashboard() {
                 history={liveHistory}
                 names={nameOf}
                 busy={liveBusy}
-                onAdvance={() => void liveAdvance()}
                 onReplan={() => void liveReplan()}
                 onEvent={(jobId, type) => void liveEvent(jobId, type)}
               />
@@ -1634,17 +1386,17 @@ export default function Dashboard() {
         </div>
 
         {/* Multi-user building coordination */}
-        <div className="mt-3 rounded-2xl border border-white/10 bg-[#0a0a0a] p-6 sm:p-8">
+        <div className="mt-3 rounded-2xl border border-white/10 bg-[#0a0a0a] p-4 sm:p-8">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-[15px] font-medium">Building coordination</h2>
+                <h2 className="text-[15px] font-medium">Shared capacity</h2>
                 <span className="rounded-full bg-lime-300/15 px-2.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-lime-300">
                   {coordResult?.status ?? "Ready"}
                 </span>
               </div>
               <p className="mt-0.5 font-mono text-[11px] text-zinc-600">
-                Multi-user scheduling under shared feeder capacity constraint
+                All your loads scheduled together under one site limit, so they never overload it
               </p>
             </div>
             <div className="flex items-start gap-2">
@@ -1667,9 +1419,9 @@ export default function Dashboard() {
               <button
                 onClick={() => void runCoordination()}
                 disabled={coordBusy}
-                className="cursor-pointer rounded-full bg-white px-5 py-2 text-[13px] font-medium text-black transition hover:bg-zinc-200 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-30"
+                className="min-h-11 cursor-pointer rounded-full bg-white px-5 py-2 text-[13px] font-medium text-black transition hover:bg-zinc-200 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-30"
               >
-                {coordBusy ? "Coordinating…" : "Coordinate building"}
+                {coordBusy ? "Checking…" : "Re-check now"}
               </button>
             </div>
           </div>
@@ -1681,16 +1433,6 @@ export default function Dashboard() {
               <div className="mb-4 flex flex-wrap items-center gap-4 font-mono text-[11px] text-zinc-400">
                 <span>
                   Mode: <strong className="text-zinc-200">{coordResult.coordination_mode}</strong>
-                </span>
-                <span
-                  className={`rounded-full px-2.5 py-0.5 uppercase tracking-wider ${
-                    coordIsDemo ? "bg-white/10 text-zinc-300" : "bg-lime-300/15 text-lime-300"
-                  }`}
-                >
-                  {coordIsDemo ? "demo data" : "your loads"}
-                </span>
-                <span>
-                  Tenants: <strong className="text-zinc-200">{coordResult.participants.length}</strong>
                 </span>
                 <span>
                   Loads: <strong className="text-zinc-200">{coordResult.jobs.length}</strong>
@@ -1706,18 +1448,17 @@ export default function Dashboard() {
                 </span>
               </div>
               <BuildingChart points={coordResult.aggregate_profile} />
-              {coordIsDemo && (
-                <p className="mt-2 font-mono text-[11px] text-zinc-600">
-                  Demo preview — add your own loads and press “Coordinate building” to replace it.
-                </p>
-              )}
             </div>
           ) : (
             <div className="mt-4 border-t border-white/5 pt-4">
               <p className="mb-3 font-mono text-[11px] text-zinc-600">
                 {jobs.length === 0
-                  ? "No loads yet — the demo preview loads here, or add a load above."
-                  : "No coordination yet — press “Coordinate building” to schedule your loads."}
+                  ? "Add a load above and its combined profile appears here."
+                  : needsDetail.length === jobs.filter((j) => j.shiftable !== false).length && needsDetail.length > 0
+                    ? "Fill in the missing details on your loads to see the combined profile."
+                    : coordBusy
+                      ? "Working out the combined profile…"
+                      : "The combined profile appears here once the backend answers."}
               </p>
               <BuildingChart points={[]} />
             </div>
@@ -1727,12 +1468,22 @@ export default function Dashboard() {
         <div className="mt-3 grid gap-3 md:grid-cols-3">
           <div className="rounded-2xl border border-white/10 bg-[#0a0a0a] p-6">
             <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-600">Carbon signal</p>
-            <h2 className="mt-2 text-[15px] font-medium">{signal ? signal.signal_type.toLowerCase() : "—"}</h2>
+            <h2 className="mt-2 text-[15px] font-medium">
+              {signal
+                ? signal.signal_type === "PROXY"
+                  ? "live weather estimate"
+                  : signal.signal_type === "SYNTHETIC"
+                    ? "synthetic (test data)"
+                    : signal.signal_type.toLowerCase()
+                : "—"}
+            </h2>
             <p className="mt-2 text-sm leading-6 text-zinc-500">
               {signal
-                ? signal.signal_type === "SYNTHETIC"
-                  ? "A modelled daily curve, not live grid data. Set ELECTRICITY_MAPS_API_KEY on the backend for the real thing."
-                  : `Source: ${signal.source}.`
+                ? signal.signal_type === "PROXY"
+                  ? "Built from real solar and wind forecasts for your area, not metered grid data. It rises and falls with the actual weather."
+                  : signal.signal_type === "SYNTHETIC"
+                    ? "A fixed test curve. Set CARBON_PROVIDER=weather on the backend for live data."
+                    : `Source: ${signal.source}.`
                 : "Waiting for the backend."}
             </p>
           </div>
@@ -1741,15 +1492,17 @@ export default function Dashboard() {
             <h2 className="mt-2 text-[15px] font-medium">{forecast ? forecast.provenance.model : "unavailable"}</h2>
             <p className="mt-2 text-sm leading-6 text-zinc-500">
               {forecast
-                ? `${Math.round(forecast.provenance.interval_nominal_coverage * 100)}% prediction band from the model's own past errors. Use Expected or Robust in the chart to plan with it.`
-                : "Planning still works against the actual signal."}
+                ? forecast.provenance.source_signal_type === "SYNTHETIC"
+                  ? "Trained on placeholder history because live history was unavailable. Treat it as a rough guide only."
+                  : `${Math.round(forecast.provenance.interval_nominal_coverage * 100)}% prediction band learned from the signal's own recent history. Use Expected or Robust in the chart to plan with it.`
+                : "Planning still works against the live signal."}
             </p>
           </div>
           <div className="rounded-2xl border border-white/10 bg-[#0a0a0a] p-6">
-            <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-600">Execution</p>
-            <h2 className="mt-2 text-[15px] font-medium">simulated</h2>
+            <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-600">Tracking</p>
+            <h2 className="mt-2 text-[15px] font-medium">you confirm it</h2>
             <p className="mt-2 text-sm leading-6 text-zinc-500">
-              Start, finish and fail events drive the tracker. No meters or devices are connected, so nothing here is real telemetry.
+              No smart meters or device control are connected, so you press Start and Done when an appliance actually runs. The planner uses the real clock.
             </p>
           </div>
         </div>

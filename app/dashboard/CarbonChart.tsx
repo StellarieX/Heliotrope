@@ -149,11 +149,17 @@ export default function CarbonChart({
       max: maxVal,
       startTime: signal.start,
       endTime: signal.end,
-      label: `Carbon intensity over 24 hours, ${signal.points.length} points, peak ${Math.round(maxVal)} grams CO2 per kilowatt-hour`,
+      label: `Carbon intensity, ${signal.points.length} points, peak ${Math.round(maxVal)} grams CO2 per kilowatt-hour`,
     };
   }, [isForecastActive, forecast, signal, activeRiskWeight, activeMode]);
 
   const synthetic = signal.signal_type === "SYNTHETIC";
+  const estimated = signal.signal_type === "PROXY";
+  // A fixed "now" for this render pass; the chart does not tick, the page refetches.
+  const [nowMs] = useState(() => Date.now());
+  const spanMs = new Date(endTime).getTime() - new Date(startTime).getTime();
+  const nowFrac = spanMs > 0 ? (nowMs - new Date(startTime).getTime()) / spanMs : -1;
+  const showNow = !isForecastActive && nowFrac > 0.02 && nowFrac < 0.98;
   const empty = !isForecastActive && signal.points.length === 0;
 
   if (empty) {
@@ -180,7 +186,7 @@ export default function CarbonChart({
                 key={m}
                 onClick={() => setMode(m)}
                 type="button"
-                className={`cursor-pointer rounded-lg px-2.5 py-1 transition ${
+                className={`min-h-10 cursor-pointer rounded-lg px-3.5 py-2 transition ${
                   activeMode === m
                     ? "bg-lime-300 font-semibold text-black"
                     : "bg-white/5 text-zinc-400 hover:bg-white/10 hover:text-white"
@@ -197,7 +203,7 @@ export default function CarbonChart({
                     key={w}
                     type="button"
                     onClick={() => setRiskWeight(w)}
-                    className={`cursor-pointer rounded px-1.5 py-0.5 text-[10px] ${
+                    className={`min-h-10 min-w-10 cursor-pointer rounded px-2.5 py-2 text-[11px] ${
                       activeRiskWeight === w
                         ? "bg-amber-400 font-bold text-black"
                         : "bg-white/5 hover:bg-white/10"
@@ -217,7 +223,7 @@ export default function CarbonChart({
               isForecastActive
                 ? "bg-sky-400/15 text-sky-300"
                 : synthetic
-                  ? "bg-white/10 text-zinc-300"
+                  ? "bg-orange-400/15 text-orange-300"
                   : "bg-lime-300/15 text-lime-300"
             }`}
             title={
@@ -229,8 +235,10 @@ export default function CarbonChart({
             {isForecastActive
               ? `Forecast · ${activeMode}${activeMode === "ROBUST" ? ` (λ=${activeRiskWeight})` : ""}`
               : synthetic
-                ? "Synthetic signal"
-                : signal.signal_type}
+                ? "Synthetic test data"
+                : estimated
+                  ? "Live weather estimate"
+                  : signal.signal_type}
           </span>
           {isForecastActive && (
             <div className="flex items-center gap-3 font-mono text-[10px] text-zinc-500">
@@ -315,17 +323,31 @@ export default function CarbonChart({
               strokeWidth="1.8"
               vectorEffect="non-scaling-stroke"
             />
+            {showNow && (
+              <line
+                x1={nowFrac * W}
+                x2={nowFrac * W}
+                y1="0"
+                y2={H}
+                stroke="#fff"
+                strokeWidth="1"
+                strokeDasharray="3 3"
+                opacity="0.45"
+                vectorEffect="non-scaling-stroke"
+              />
+            )}
           </>
         )}
       </svg>
 
-      <div className="mt-1 flex justify-between font-mono text-[10px] text-zinc-600">
-        <span>{new Date(startTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
-        <span>
+      <div className="mt-1 flex flex-wrap justify-between gap-x-3 gap-y-0.5 font-mono text-[10px] text-zinc-600">
+        <span>{new Date(startTime).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span>
+        <span className="order-last w-full text-center sm:order-none sm:w-auto">
           min {Math.round(min)} · max {Math.round(max)} gCO₂/kWh
+          {showNow ? " · dashed line = now" : ""}
           {isForecastActive ? " · 90% prediction interval" : ""}
         </span>
-        <span>{new Date(endTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+        <span>{new Date(endTime).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span>
       </div>
     </div>
   );

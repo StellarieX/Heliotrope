@@ -15,7 +15,7 @@ export default function Account() {
   const router = useRouter();
   const [auth] = useState(() => getFirebaseAuth());
   const [user, setUser] = useState<User | null>(null);
-  const [ready, setReady] = useState(() => getFirebaseAuth() === null);
+  const [ready, setReady] = useState(false);
   const [name, setName] = useState("");
   const [username, setUsername] = useState("");
   const [currentUsername, setCurrentUsername] = useState<string | null>(null);
@@ -29,7 +29,13 @@ export default function Account() {
   const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
-    if (!auth) return;
+    if (!auth) {
+    // Firebase not configured: nothing will ever resolve, so stop showing "loading".
+    // Deferred, and `ready` starts false on both server and client so they render the
+    // same first frame (a different initial value caused a hydration mismatch).
+    queueMicrotask(() => setReady(true));
+    return;
+    }
     return onAuthStateChanged(auth, async (u) => {
       setUser(u);
       setReady(true);
@@ -161,9 +167,9 @@ export default function Account() {
 
   return (
     <main className="min-h-screen bg-black text-zinc-100">
-      <div className="mx-auto max-w-3xl px-6 py-6 sm:px-10">
+      <div className="mx-auto max-w-3xl px-4 py-4 sm:px-10 sm:py-6">
         <header className="flex items-center justify-between">
-          <Link href="/" className="text-[13px] font-semibold uppercase tracking-[0.28em]">Heliotrope</Link>
+          <Link href="/" className="inline-flex min-h-11 items-center text-[13px] font-semibold uppercase tracking-[0.28em]">Heliotrope</Link>
           <div className="relative flex items-center gap-3">
             {user.photoURL ? (
               // eslint-disable-next-line @next/next/no-img-element
@@ -173,7 +179,7 @@ export default function Account() {
             <button
               onClick={() => setMenuOpen((v) => !v)}
               aria-label="Account menu"
-              className="grid h-8 w-8 cursor-pointer place-items-center text-lg leading-none text-zinc-300 transition hover:text-white active:scale-95"
+              className="grid h-11 w-11 cursor-pointer place-items-center text-lg leading-none text-zinc-300 transition hover:text-white active:scale-95"
             >
               ⋮
             </button>
@@ -206,7 +212,7 @@ export default function Account() {
         <p className="mt-3 text-[15px] text-zinc-500">Signed in with Google as <span className="font-mono text-[13px] text-zinc-300">{user.email}</span></p>
 
         {/* profile */}
-        <section className="mt-10 rounded-2xl border border-white/10 bg-[#0a0a0a] p-6 sm:p-8">
+        <section className="mt-10 rounded-2xl border border-white/10 bg-[#0a0a0a] p-4 sm:p-8">
           <div className="flex items-center gap-4">
             {user.photoURL ? (
               // eslint-disable-next-line @next/next/no-img-element
@@ -265,14 +271,14 @@ export default function Account() {
             {userStatus.text && <p className={`mt-2 font-mono text-[12px] ${userStatus.kind === "ok" ? "text-lime-300" : "text-orange-300"}`}>{userStatus.text}</p>}
             {currentUsername && (
               <p className="mt-2 text-[13px] text-zinc-500">
-                Public page: <a href={`/${currentUsername}`} className="font-mono text-[12px] text-zinc-200 underline decoration-white/20 underline-offset-4 hover:decoration-white/60">/{currentUsername}</a>
+                Public page: <a href={`/${currentUsername}`} className="inline-block py-2 font-mono text-[12px] text-zinc-200 underline decoration-white/20 underline-offset-4 hover:decoration-white/60">/{currentUsername}</a>
               </p>
             )}
           </div>
         </section>
 
         {/* danger */}
-        <section className="mt-3 rounded-2xl border border-red-500/25 bg-red-500/[0.03] p-6 sm:p-8">
+        <section className="mt-3 rounded-2xl border border-red-500/25 bg-red-500/[0.03] p-4 sm:p-8">
           <h2 className="text-[15px] font-medium text-red-300">Delete account</h2>
           <p className="mt-2 text-sm leading-6 text-zinc-500">
             Permanently removes your profile, username{currentUsername ? ` (@${currentUsername})` : ""} and sign-in.
