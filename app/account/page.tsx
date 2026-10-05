@@ -4,9 +4,10 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { deleteUser, onAuthStateChanged, reauthenticateWithPopup, signOut, updateProfile, type User } from "firebase/auth";
-import { deleteDoc, doc, getDoc, getDocs, collection, runTransaction, serverTimestamp, setDoc } from "firebase/firestore";
+import { deleteDoc, doc, getDoc, getDocs, collection, serverTimestamp, setDoc } from "firebase/firestore";
 import { getDb, getFirebaseAuth, getGoogleProvider } from "../../lib/firebase";
-import { validUsername } from "../../lib/username";
+import { claimUsername as claimUsernameFor, validUsername } from "../../lib/username";
+import { scrubLegacyEmail } from "../../lib/profile";
 
 type Status = { kind: "idle" | "ok" | "err"; text: string };
 
@@ -37,6 +38,7 @@ export default function Account() {
         const db = getDb();
         if (db) {
           const snap = await getDoc(doc(db, "users", u.uid));
+          if (snap.exists()) void scrubLegacyEmail(db, u.uid, snap.data());
           const un = snap.exists() ? (snap.data().username as string | undefined) : undefined;
           setCurrentUsername(un ?? null);
           setUsername(un ?? "");
@@ -100,15 +102,10 @@ export default function Account() {
     }
     setChecking(true);
     try {
-      await runTransaction(db, async (tx) => {
-        const claimRef = doc(db, "usernames", v);
-        const claim = await tx.get(claimRef);
-        if (claim.exists() && claim.data().uid !== user!.uid) throw new Error("taken");
-        const userRef = doc(db, "users", user!.uid);
-        const prev = currentUsername && currentUsername !== v ? doc(db, "usernames", currentUsername) : null;
-        tx.set(claimRef, { uid: user!.uid, updatedAt: serverTimestamp() });
-        tx.set(userRef, { username: v, displayName: user!.displayName ?? null, email: user!.email ?? null, photoURL: user!.photoURL ?? null, updatedAt: serverTimestamp() }, { merge: true });
-        if (prev) tx.delete(prev);
+      // Profile docs are world-readable, so the email is never stored there.
+      await claimUsernameFor(db, user!.uid, v, currentUsername, {
+        displayName: user!.displayName ?? null,
+        photoURL: user!.photoURL ?? null,
       });
       setCurrentUsername(v);
       setUserStatus({ kind: "ok", text: `@${v} is yours.` });
@@ -118,7 +115,7 @@ export default function Account() {
       if (msg === "taken") {
         setUserStatus({ kind: "err", text: `@${v} is taken. Try another.` });
       } else if (code === "permission-denied") {
-        setUserStatus({ kind: "err", text: "Firestore rules are blocking this — apply the rules from chat, then retry." });
+        setUserStatus({ kind: "err", text: "Firestore rules are blocking this — deploy firestore.rules, then retry." });
       } else if (code === "not-found" || /does not exist/i.test(msg)) {
         setUserStatus({ kind: "err", text: "Firestore database doesn't exist yet — create it in Firebase Console → Firestore, then retry." });
       } else {
@@ -136,8 +133,13 @@ export default function Account() {
     if (!auth?.currentUser) return;
     setDeleting(true);
     try {
-      // Delete Firestore docs while still authenticated — deleting the auth
-      // user first would leave these orphaned behind permission-denied rules.
+      // Re-authenticate FIRST: deleteUser needs a recent login, and if that
+      // fails after the data is gone the user keeps an account with no
+      // profile or username. The popup is the first await, so it still runs
+      // inside the click gesture and isn't blocked.
+      await reauthenticateWithPopup(auth.currentUser, getGoogleProvider());
+      // Then delete Firestore docs while still authenticated — deleting the
+      // auth user first would leave these orphaned behind owner-only rules.
       const uid = auth.currentUser.uid;
       if (db) {
         try {
@@ -149,14 +151,7 @@ export default function Account() {
         if (currentUsername) await deleteDoc(doc(db, "usernames", currentUsername)).catch(() => {});
         await deleteDoc(doc(db, "users", uid)).catch(() => {});
       }
-      try {
-        await deleteUser(auth.currentUser);
-      } catch (e: unknown) {
-        if (e instanceof Error && (e as { code?: string }).code === "auth/requires-recent-login") {
-          await reauthenticateWithPopup(auth.currentUser, getGoogleProvider());
-          await deleteUser(auth.currentUser);
-        } else throw e;
-      }
+      await deleteUser(auth.currentUser);
       router.push("/");
     } catch {
       setDeleteStatus({ kind: "err", text: "Deletion needs a fresh sign-in — it failed. Try again." });

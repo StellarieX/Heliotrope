@@ -118,6 +118,41 @@ export async function getHealth(): Promise<HealthResponse> {
   return getJson<HealthResponse>("/api/v1/health");
 }
 
+/**
+ * Poll /health until the backend answers. Free hosting tiers put an idle
+ * service to sleep and need ~50s to wake it, longer than the 30s request
+ * timeout, so the first real call would fail on a healthy deployment. Resolves
+ * true once the backend is up, false if it never answered within `maxMs`.
+ * `onWaking` fires once, after the first failed attempt.
+ */
+export async function waitForBackend(opts: {
+  maxMs?: number;
+  onWaking?: () => void;
+  signal?: AbortSignal;
+} = {}): Promise<boolean> {
+  const { maxMs = 90_000, onWaking, signal } = opts;
+  const deadline = Date.now() + maxMs;
+  let announced = false;
+  while (!signal?.aborted) {
+    try {
+      const res = await fetch(`${BASE}/api/v1/health`, {
+        cache: "no-store",
+        signal: AbortSignal.timeout(8_000),
+      });
+      if (res.ok) return true;
+    } catch {
+      /* not up yet */
+    }
+    if (!announced) {
+      announced = true;
+      onWaking?.();
+    }
+    if (Date.now() >= deadline) return false;
+    await new Promise((r) => setTimeout(r, 2_000));
+  }
+  return false;
+}
+
 /** Real scheduling: ASAP / GREEDY / CPSAT. Returns the backend
  *  SchedulerResult payload (status FEASIBLE/OPTIMAL or honest INFEASIBLE).
  *  Throws with status 400/422/503 on bad input or unavailable providers. */
@@ -194,6 +229,45 @@ export async function getCarbonForecast(
     coverage: params.coverage ?? 0.9,
     history_days: params.history_days ?? 14,
   });
+}
+
+export interface ScheduleAllocation {
+  slot: number;
+  timestamp: string;
+  power_w: number;
+}
+
+export interface CompareSchedulerResult {
+  status: string;
+  metrics: {
+    total_co2_kg: number | null;
+    co2_saved_kg: number | null;
+    co2_saved_percent: number | null;
+    peak_kw: number | null;
+    deadline_misses: number;
+  };
+  schedule: Array<{ job_id: string; name: string; allocations: ScheduleAllocation[] }>;
+  explanations: Array<{
+    job_id: string;
+    name: string;
+    reason: string;
+    co2_before_kg: number | null;
+    co2_after_kg: number | null;
+    co2_saved_kg: number | null;
+    deadline_preserved: boolean;
+  }>;
+  signal?: { signal_type?: string };
+}
+
+export interface ScheduleCompareResponse {
+  reference_scheduler: string;
+  results: Record<string, CompareSchedulerResult>;
+}
+
+/** Same input through several schedulers (ASAP = "run now" baseline vs CPSAT),
+ *  so the impact shown to the user is computed by the backend, not estimated here. */
+export async function compareSchedulers(body: Record<string, unknown>): Promise<ScheduleCompareResponse> {
+  return postJson<ScheduleCompareResponse>("/api/v1/schedule/compare", body);
 }
 
 /** Phase 3: free text -> classification + canonical LoadSpec + feasibility.

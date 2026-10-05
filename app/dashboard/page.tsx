@@ -9,6 +9,7 @@ import { jevRank, classifyJob, type JobInput, type RankedJob } from "../../lib/p
 import {
   advanceSimulation,
   classifyLoad,
+  compareSchedulers,
   coordinateBuilding,
   getCarbonForecast,
   getCarbonSignal,
@@ -19,7 +20,9 @@ import {
   replanSchedule,
   tickSchedule,
   validateLoad,
+  waitForBackend,
   type CarbonForecastResponse,
+  type CompareSchedulerResult,
   type ForecastMode,
 } from "../../lib/api/client";
 import type {
@@ -36,6 +39,7 @@ import CarbonChart from "./CarbonChart";
 import ExecutionPanel from "./ExecutionPanel";
 import { readyByToDeadline } from "../../lib/jobs/normalize";
 import Onboarding from "./Onboarding";
+import { scrubLegacyEmail } from "../../lib/profile";
 
 type Profile = { username?: string; occupation?: string; place?: string; rooms?: number | null; onboarded?: boolean };
 
@@ -148,6 +152,10 @@ const inputCls =
 
 /** localStorage key for the live schedule id, so a reload can rehydrate it. */
 const ACTIVE_SCHEDULE_KEY = "heliotrope:active_schedule_id";
+/** The impact comparison for that schedule, so a reload doesn't drop it. */
+const ACTIVE_IMPACT_KEY = "heliotrope:active_impact";
+/** Fingerprint of the loads the active plan was built from, to flag a stale plan after a reload. */
+const ACTIVE_SIG_KEY = "heliotrope:active_plan_sig";
 
 function getDefaultCoordinationData() {
   const slotMs = 15 * 60 * 1000;
@@ -245,6 +253,37 @@ function getDefaultCoordinationData() {
   return { participants, coordJobs };
 }
 
+/** Merge consecutive slot allocations into "11:30 PM–1:00 AM" style windows. */
+function runWindows(allocs: Array<{ slot: number; timestamp: string }>, slotMin = 15): string[] {
+  const sorted = [...allocs].sort((a, b) => a.slot - b.slot);
+  const fmt = (iso: string, plusMin = 0) =>
+    new Date(new Date(iso).getTime() + plusMin * 60_000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const out: string[] = [];
+  let i = 0;
+  while (i < sorted.length) {
+    let j = i;
+    while (j + 1 < sorted.length && sorted[j + 1].slot === sorted[j].slot + 1) j++;
+    out.push(`${fmt(sorted[i].timestamp)}–${fmt(sorted[j].timestamp, slotMin)}`);
+    i = j + 1;
+  }
+  return out;
+}
+
+function greeting(now = new Date()) {
+  const h = now.getHours();
+  return h < 5 ? "Late night" : h < 12 ? "Morning" : h < 18 ? "Afternoon" : "Evening";
+}
+
+// Each preset carries the one extra field its load type needs (the backend
+// refuses to schedule an interruptible load without energy, or an atomic one
+// without a run length), so a quick fill is always addable as-is.
+const PRESETS = [
+  { label: "EV charger", name: "EV charger", powerKw: "7.4", readyBy: "07:00", flex: 3, energyKwh: "20", durationMin: "" },
+  { label: "Water heater", name: "Water heater", powerKw: "2", readyBy: "06:00", flex: 2, energyKwh: "", durationMin: "" },
+  { label: "Washing machine", name: "Washing machine", powerKw: "2", readyBy: "18:00", flex: 4, energyKwh: "", durationMin: "60" },
+  { label: "Borewell pump", name: "Borewell pump", powerKw: "1.5", readyBy: "08:00", flex: 3, energyKwh: "4", durationMin: "" },
+];
+
 export default function Dashboard() {
   const [auth] = useState(() => getFirebaseAuth());
   const [user, setUser] = useState<User | null>(null);
@@ -275,6 +314,13 @@ export default function Dashboard() {
   const [forecastMode, setForecastMode] = useState<ForecastMode>("ACTUAL");
   const [forecastError, setForecastError] = useState<string | null>(null);
   const [riskWeight, setRiskWeight] = useState<number>(0.5);
+  // "waking" = the first health probe failed; free hosts need ~50s to wake up.
+  const [backend, setBackend] = useState<"checking" | "waking" | "online" | "offline">("checking");
+  const [backendTry, setBackendTry] = useState(0);
+  const [profileError, setProfileError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [addError, setAddError] = useState<string | null>(null);
+  const [signInError, setSignInError] = useState<string | null>(null);
 
   const [coordCapacity, setCoordCapacity] = useState("30");
   const [coordCapacityError, setCoordCapacityError] = useState<string | null>(null);
@@ -283,6 +329,8 @@ export default function Dashboard() {
   const [coordBusy, setCoordBusy] = useState(false);
   const [coordError, setCoordError] = useState<string | null>(null);
 
+  // Backend-computed "run now" vs planned comparison for the current plan.
+  const [impact, setImpact] = useState<CompareSchedulerResult | null>(null);
   const [liveId, setLiveId] = useState<string | null>(null);
   const [liveState, setLiveState] = useState<ExecutionState | null>(null);
   const [liveHistory, setLiveHistory] = useState<ScheduleHistory | null>(null);
@@ -301,17 +349,24 @@ export default function Dashboard() {
       setProfileLoaded(true);
       return;
     }
+    setProfileError(null);
+    setLoadError(null);
     try {
       const snap = await getDoc(doc(db, "users", u.uid));
       setProfile(snap.exists() ? (snap.data() as Profile) : {});
+      if (snap.exists()) void scrubLegacyEmail(db, u.uid, snap.data());
     } catch {
-      setProfile({});
+      // A failed read is NOT "new user": treating it that way would pop the
+      // onboarding wizard over an existing account (offline, rules, quota).
+      setProfileError("Couldn't load your profile. Check your connection and retry.");
+      setProfileLoaded(true);
+      return;
     }
     try {
       const js = await getDocs(collection(db, "users", u.uid, "jobs"));
       setJobs(js.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<DashboardJob, "id">) })));
     } catch {
-      /* jobs unreadable (rules/offline) — onboarding still proceeds */
+      setLoadError("Couldn't load your saved loads. They are safe; check your connection and retry.");
     }
     setProfileLoaded(true);
   }, []);
@@ -339,6 +394,24 @@ export default function Dashboard() {
     }
   }, []);
 
+  // A 404 mid-session means the backend lost the schedule (restart, redeploy,
+  // ephemeral SQLite). Drop it so actions and the tick stop hitting a dead id.
+  const liveFailure = useCallback((e: unknown, fallback: string) => {
+    if ((e as { status?: number }).status === 404) {
+      localStorage.removeItem(ACTIVE_SCHEDULE_KEY);
+      localStorage.removeItem(ACTIVE_IMPACT_KEY);
+      localStorage.removeItem(ACTIVE_SIG_KEY);
+      setImpact(null);
+      setPlannedJobsSignature(null);
+      setLiveId(null);
+      setLiveState(null);
+      setLiveHistory(null);
+      setLiveError("This schedule is no longer on the server (the backend restarted). Plan again.");
+      return;
+    }
+    setLiveError(e instanceof Error ? e.message : fallback);
+  }, []);
+
   // Rehydrate a live session that survived a reload. A stale id (schedule
   // deleted, backend restarted, network down) is dropped quietly — the user
   // simply plans again.
@@ -349,7 +422,17 @@ export default function Dashboard() {
     // updates; the effect only kicks off the rehydration.
     void Promise.resolve()
       .then(() => refreshLive(savedId))
-      .then(() => setLiveId(savedId))
+      .then(() => {
+        setLiveId(savedId);
+        try {
+          setPlannedJobsSignature(localStorage.getItem(ACTIVE_SIG_KEY));
+          const raw = localStorage.getItem(ACTIVE_IMPACT_KEY);
+          const saved = raw ? (JSON.parse(raw) as { id?: string; impact?: CompareSchedulerResult }) : null;
+          if (saved?.id === savedId && saved.impact) setImpact(saved.impact);
+        } catch {
+          /* unreadable: show the schedule without the impact card */
+        }
+      })
       .catch(() => {
         localStorage.removeItem(ACTIVE_SCHEDULE_KEY);
       });
@@ -362,12 +445,13 @@ export default function Dashboard() {
     const t = setInterval(() => {
       void tickSchedule(liveId, new Date().toISOString())
         .then(() => refreshLive(liveId))
-        .catch(() => {
-          /* transient tick failure — next poll retries */
+        .catch((e) => {
+          // Transient failures retry on the next poll; a lost schedule stops it.
+          if ((e as { status?: number }).status === 404) liveFailure(e, "");
         });
     }, 60_000);
     return () => clearInterval(t);
-  }, [liveId, refreshLive]);
+  }, [liveId, refreshLive, liveFailure]);
 
   const loadsToSpecs = useCallback(() => {
     const slotMs = 15 * 60 * 1000;
@@ -592,14 +676,33 @@ export default function Dashboard() {
               risk_weight: forecastMode === "ROBUST" ? riskWeight : 0.0,
             };
 
-      const state = await planSchedule({
+      const planBody = {
         jobs: specs,
         capacity_kw: cap.value,
         scheduler: "CPSAT",
         ...(carbonPayload ? { carbon: carbonPayload } : {}),
-      });
+      };
+      setImpact(null);
+      const state = await planSchedule(planBody);
+      // Fire-and-forget: the impact card is a bonus and must never block or fail the plan.
+      void compareSchedulers({ ...planBody, schedulers: ["ASAP", "CPSAT"] })
+        .then((cmp) => {
+          const result = cmp.results.CPSAT ?? null;
+          setImpact(result);
+          try {
+            if (result) localStorage.setItem(ACTIVE_IMPACT_KEY, JSON.stringify({ id: state.schedule_id, impact: result }));
+          } catch {
+            /* storage full/blocked: the card just won't survive a reload */
+          }
+        })
+        .catch(() => setImpact(null));
       setLiveId(state.schedule_id);
       localStorage.setItem(ACTIVE_SCHEDULE_KEY, state.schedule_id);
+      try {
+        localStorage.setItem(ACTIVE_SIG_KEY, jobsSignature);
+      } catch {
+        /* storage blocked: stale detection just won't survive a reload */
+      }
       setPlannedJobsSignature(jobsSignature);
       await refreshLive(state.schedule_id);
       if (skipped.length) setLiveError(`Thermal skipped for now: ${skipped.join(", ")} — comfort band unknown.`);
@@ -617,7 +720,7 @@ export default function Dashboard() {
       await advanceSimulation(liveId, { to_time: new Date(Date.now() + 15 * 60 * 1000).toISOString(), script: [] });
       await refreshLive(liveId);
     } catch (e) {
-      setLiveError(e instanceof Error ? e.message : "Advance failed.");
+      liveFailure(e, "Advance failed.");
     } finally {
       setLiveBusy(false);
     }
@@ -630,7 +733,7 @@ export default function Dashboard() {
       await replanSchedule(liveId, { reason: "MANUAL" });
       await refreshLive(liveId);
     } catch (e) {
-      setLiveError(e instanceof Error ? e.message : "Replan failed.");
+      liveFailure(e, "Replan failed.");
     } finally {
       setLiveBusy(false);
     }
@@ -643,7 +746,7 @@ export default function Dashboard() {
       await postScheduleEvent(liveId, { event_type: type, job_id: jobId });
       await refreshLive(liveId);
     } catch (e) {
-      setLiveError(e instanceof Error ? e.message : "Event failed.");
+      liveFailure(e, "Event failed.");
     } finally {
       setLiveBusy(false);
     }
@@ -698,35 +801,53 @@ export default function Dashboard() {
     [coordCapacity, loadsToSpecs]
   );
 
+  // Wait for the backend (it may be waking from sleep), THEN read the grid
+  // signal. Fetching immediately would fail on a healthy-but-cold deployment.
   useEffect(() => {
-    let cancelled = false;
-    const end = new Date();
-    const start = new Date(end.getTime() - 24 * 3600 * 1000);
-    getCarbonSignal({ start: start.toISOString(), end: end.toISOString() })
-      .then((s) => {
-        if (!cancelled) setSignal(s);
-      })
-      .catch(() => {
-        if (!cancelled) setSignalError("Backend signal unreachable — is it running?");
-      });
+    const ctl = new AbortController();
+    void waitForBackend({
+      signal: ctl.signal,
+      onWaking: () => setBackend("waking"),
+    }).then((up) => {
+      if (ctl.signal.aborted) return;
+      if (!up) {
+        setBackend("offline");
+        setSignalError("The compute backend isn't answering.");
+        return;
+      }
+      setBackend("online");
+      const end = new Date();
+      const start = new Date(end.getTime() - 24 * 3600 * 1000);
+      getCarbonSignal({ start: start.toISOString(), end: end.toISOString() })
+        .then((s) => {
+          if (!ctl.signal.aborted) setSignal(s);
+        })
+        .catch(() => {
+          if (!ctl.signal.aborted) setSignalError("Couldn't read the grid carbon signal.");
+        });
 
-    const fStart = new Date();
-    const fEnd = new Date(fStart.getTime() + 24 * 3600 * 1000);
-    getCarbonForecast({ start: fStart.toISOString(), end: fEnd.toISOString() })
-      .then((f) => {
-        if (cancelled) return;
-        setForecast(f);
-        setForecastError(null);
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setForecast(null);
-        setForecastError("Forecast unavailable — showing actual signal only.");
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+      const fStart = new Date();
+      const fEnd = new Date(fStart.getTime() + 24 * 3600 * 1000);
+      getCarbonForecast({ start: fStart.toISOString(), end: fEnd.toISOString() })
+        .then((f) => {
+          if (ctl.signal.aborted) return;
+          setForecast(f);
+          setForecastError(null);
+        })
+        .catch(() => {
+          if (ctl.signal.aborted) return;
+          setForecast(null);
+          setForecastError("Forecast unavailable — showing actual signal only.");
+        });
+    });
+    return () => ctl.abort();
+  }, [backendTry]);
+
+  function retryBackend() {
+    setBackend("checking");
+    setSignalError(null);
+    setBackendTry((n) => n + 1);
+  }
 
   // Demo coordination runs only when the user has no loads: the empty state
   // below explains the demo, and a user with jobs must press "Coordinate
@@ -881,6 +1002,7 @@ export default function Dashboard() {
     setFPowerError(null);
     const db = getDb();
     if (!db) return;
+    setAddError(null);
     setAdding(true);
     const c = classifyJob(fName);
     // Backend classification wins when it is available; the local heuristic is
@@ -945,9 +1067,27 @@ export default function Dashboard() {
       setAddErrors([]);
       setAddWarnings([]);
       setFPowerError(null);
+    } catch (e) {
+      const code = e instanceof Error && "code" in e ? (e as { code?: string }).code : undefined;
+      setAddError(
+        code === "permission-denied"
+          ? "Saving was blocked by the database security rules."
+          : "Couldn't save this load. Check your connection and try again."
+      );
     } finally {
       setAdding(false);
     }
+  }
+
+  function applyPreset(p: (typeof PRESETS)[number]) {
+    setFName(p.name);
+    setFPower(p.powerKw);
+    setFReady(p.readyBy);
+    setFFlex(p.flex);
+    setFEnergy(p.energyKwh);
+    setFDuration(p.durationMin);
+    setFPowerError(null);
+    setAddError(null);
   }
 
   async function removeJob(id: string) {
@@ -980,22 +1120,39 @@ export default function Dashboard() {
         <div>
           <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-zinc-600">Heliotrope · dashboard</p>
           <h1 className="mt-4 text-3xl font-semibold tracking-tight">Sign in to continue</h1>
+          {!auth && (
+            <p className="mx-auto mt-4 max-w-sm text-sm leading-6 text-orange-300">
+              Sign-in isn&apos;t configured on this deployment (the Firebase keys are missing).
+            </p>
+          )}
           <button
             onClick={async () => {
               setBusy(true);
+              setSignInError(null);
               try {
-                const auth = getFirebaseAuth();
-                if (auth) await signInWithPopup(auth, getGoogleProvider());
+                const a = getFirebaseAuth();
+                if (a) await signInWithPopup(a, getGoogleProvider());
+              } catch (e) {
+                const code = e instanceof Error && "code" in e ? (e as { code?: string }).code : undefined;
+                // Closing the popup is a choice, not an error worth shouting about.
+                if (code !== "auth/popup-closed-by-user" && code !== "auth/cancelled-popup-request") {
+                  setSignInError(
+                    code === "auth/popup-blocked"
+                      ? "Your browser blocked the sign-in popup. Allow popups for this site and retry."
+                      : "Sign-in failed. Try again."
+                  );
+                }
               } finally {
                 setBusy(false);
               }
             }}
-            disabled={busy}
+            disabled={busy || !auth}
             className="mt-7 flex cursor-pointer items-center justify-center gap-2 rounded-full bg-white px-7 py-2.5 text-sm font-medium text-black transition hover:bg-zinc-200 active:scale-[0.98] disabled:cursor-wait disabled:opacity-70"
           >
             {busy && <span className="spinner" />}
             {busy ? "Signing in…" : "Sign in with Google"}
           </button>
+          {signInError && <p role="alert" className="mt-3 font-mono text-[12px] text-orange-300">{signInError}</p>}
           <p className="mt-6 text-[13px]">
             <Link href="/" className="text-zinc-500 transition hover:text-white">← back home</Link>
           </p>
@@ -1004,15 +1161,53 @@ export default function Dashboard() {
     );
   }
 
+  if (profileError) {
+    return (
+      <main className="grid min-h-screen place-items-center bg-black px-6 text-center text-zinc-100">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">We couldn&apos;t load your account</h1>
+          <p className="mx-auto mt-3 max-w-sm text-sm leading-6 text-zinc-500">{profileError}</p>
+          <button
+            onClick={() => void loadAll(user)}
+            className="mt-6 cursor-pointer rounded-full bg-white px-7 py-2.5 text-sm font-medium text-black transition hover:bg-zinc-200 active:scale-[0.98]"
+          >
+            Retry
+          </button>
+        </div>
+      </main>
+    );
+  }
+
   const needsOnboarding = profileLoaded && (!profile || !profile.onboarded);
+  const nameOf: Record<string, string> = Object.fromEntries(jobs.map((j) => [j.id, j.name]));
+  const shiftableCount = jobs.filter((j) => j.shiftable !== false).length;
 
   return (
     <main className="min-h-screen bg-black text-zinc-100">
       {needsOnboarding && <Onboarding user={user} onDone={() => void loadAll(user)} />}
-      <div className="mx-auto max-w-7xl px-6 py-6 sm:px-10 lg:px-16">
+      {/* inert: while the wizard is open the page behind it must not take focus or be read out */}
+      <div inert={needsOnboarding} className="mx-auto max-w-7xl px-6 py-6 sm:px-10 lg:px-16">
         <header className="flex items-center justify-between">
           <Link href="/" className="text-[13px] font-semibold uppercase tracking-[0.28em]">Heliotrope</Link>
           <div className="relative flex items-center gap-3">
+            <span
+              role="status"
+              title={
+                backend === "online"
+                  ? "Compute backend is online"
+                  : backend === "offline"
+                    ? "Compute backend isn't answering"
+                    : "Connecting to the compute backend"
+              }
+              className="hidden items-center gap-2 font-mono text-[11px] text-zinc-500 sm:flex"
+            >
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${
+                  backend === "online" ? "bg-lime-300" : backend === "offline" ? "bg-red-400" : "animate-pulse bg-amber-400"
+                }`}
+              />
+              {backend === "online" ? "backend online" : backend === "offline" ? "backend offline" : backend === "waking" ? "waking backend…" : "connecting…"}
+            </span>
             {user.photoURL ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img src={user.photoURL} alt="" referrerPolicy="no-referrer" className="h-8 w-8 rounded-full bg-white/10 object-cover" />
@@ -1057,15 +1252,49 @@ export default function Dashboard() {
         </header>
 
         <h1 className="mt-12 text-3xl font-semibold tracking-tight sm:text-4xl">
-          Evening, {(user.displayName ?? "there").split(" ")[0]}.
+          {greeting()}, {(user.displayName ?? "there").split(" ")[0]}.
         </h1>
         <p className="mt-3 max-w-lg text-[15px] leading-7 text-zinc-500">
           {profile?.place ? `${profile.place}${profile.rooms ? ` · ${profile.rooms} rooms` : ""} — ` : ""}
-          your loads, ranked by priority. Timed schedules come from the live planner below.
+          add your loads, then plan them into the cleanest hours of the grid.
         </p>
 
+        {(backend === "waking" || backend === "offline") && (
+          <div role="status" className="mt-6 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber-400/25 bg-amber-400/[0.04] px-5 py-4">
+            <p className="text-[13px] leading-6 text-amber-200/90">
+              {backend === "waking"
+                ? "Waking the compute backend — this can take up to a minute on the first visit. Planning and charts unlock as soon as it answers."
+                : "The compute backend isn't answering, so charts and planning are unavailable."}
+            </p>
+            {backend === "offline" && (
+              <button onClick={retryBackend} className="cursor-pointer rounded-full border border-amber-400/40 px-4 py-1.5 text-[12px] text-amber-200 transition hover:bg-amber-400/10 active:scale-[0.97]">
+                Retry
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* where you are in the flow */}
+        <ol className="mt-8 grid gap-2 sm:grid-cols-3" aria-label="Progress">
+          {[
+            { n: 1, title: "Add loads", done: jobs.length > 0, note: jobs.length ? `${jobs.length} added` : "name what you run" },
+            { n: 2, title: "Plan", done: liveState !== null, note: liveState ? `v${liveState.version} · ${liveState.solver_status.toLowerCase()}` : shiftableCount ? "ready to plan" : "needs a flexible load" },
+            { n: 3, title: "Track", done: liveState !== null && liveState.jobs.some((j) => j.status !== "PENDING"), note: "start, finish, replan" },
+          ].map((st) => (
+            <li key={st.n} className={`flex items-center gap-3 rounded-2xl border px-4 py-3 ${st.done ? "border-lime-300/30 bg-lime-300/[0.04]" : "border-white/10"}`}>
+              <span className={`grid h-6 w-6 shrink-0 place-items-center rounded-full font-mono text-[11px] ${st.done ? "bg-lime-300 text-black" : "border border-white/15 text-zinc-500"}`}>
+                {st.done ? "✓" : st.n}
+              </span>
+              <span className="min-w-0">
+                <span className="block text-[13px] font-medium">{st.title}</span>
+                <span className="block truncate font-mono text-[11px] text-zinc-600">{st.note}</span>
+              </span>
+            </li>
+          ))}
+        </ol>
+
         {/* loads */}
-        <section className="mt-10 overflow-hidden rounded-2xl border border-white/10 bg-[#0a0a0a]">
+        <section className="mt-3 overflow-hidden rounded-2xl border border-white/10 bg-[#0a0a0a]">
           <div className="flex flex-wrap items-center justify-between gap-3 px-6 py-5 sm:px-8">
             <div>
               <h2 className="text-[15px] font-medium">Your loads</h2>
@@ -1074,13 +1303,23 @@ export default function Dashboard() {
               </p>
             </div>
             <button
-              onClick={() => setRanked(jevRank(jobs))}
+              onClick={() => setRanked(ranked ? null : jevRank(jobs))}
               disabled={jobs.length === 0}
-              className="cursor-pointer rounded-full bg-lime-300 px-6 py-2 text-[13px] font-medium text-black transition hover:bg-lime-200 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-30"
+              title="A quick priority order by urgency, size and flexibility. The real timing comes from Plan live below."
+              className="cursor-pointer rounded-full border border-white/15 px-5 py-2 text-[13px] text-zinc-300 transition hover:border-white/40 hover:text-white active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-30"
             >
-              Rank
+              {ranked ? "Hide ranking" : "Rank by priority"}
             </button>
           </div>
+
+          {loadError && (
+            <div role="alert" className="flex flex-wrap items-center justify-between gap-3 border-t border-white/5 px-6 py-4 sm:px-8">
+              <p className="font-mono text-[12px] text-orange-300">{loadError}</p>
+              <button onClick={() => void loadAll(user)} className="cursor-pointer rounded-full border border-white/15 px-4 py-1.5 text-[12px] text-zinc-300 transition hover:border-white/40 hover:text-white active:scale-[0.97]">
+                Retry
+              </button>
+            </div>
+          )}
 
           {(ranked ? [...ranked, ...jobs.filter((j) => j.shiftable === false)] : jobs).map((item, i) => {
             const j = item as DashboardJob & Partial<RankedJob>;
@@ -1128,8 +1367,21 @@ export default function Dashboard() {
           {/* add */}
           <div className="border-t border-white/10 bg-white/[0.015] px-6 py-6 sm:px-8">
             <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-600">Add a load — name anything</p>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <span className="font-mono text-[11px] text-zinc-600">quick fill</span>
+              {PRESETS.map((p) => (
+                <button
+                  key={p.label}
+                  type="button"
+                  onClick={() => applyPreset(p)}
+                  className="cursor-pointer rounded-full border border-white/15 px-3 py-1 text-[12px] text-zinc-400 transition hover:border-lime-300/60 hover:text-white active:scale-[0.96]"
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
             <div className="mt-3 grid gap-2 sm:grid-cols-2">
-              <input value={fName} onChange={(e) => setFName(e.target.value)} maxLength={40} placeholder="Name — e.g. hostel borewell pump" className={inputCls} />
+              <input aria-label="Load name" value={fName} onChange={(e) => setFName(e.target.value)} maxLength={40} placeholder="Name — e.g. hostel borewell pump" className={inputCls} />
               <div className={`flex items-center px-4 ${inputCls} ${fName.trim() ? "" : "opacity-40"}`}>
                 {(() => {
                   const c = classifyJob(fName.trim() || "…");
@@ -1137,7 +1389,7 @@ export default function Dashboard() {
                     <>
                       <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${c.shiftable ? "bg-lime-300" : "bg-zinc-600"}`} />
                       <span className="ml-2 truncate text-sm text-zinc-200">
-                        {fName.trim() ? `${c.category} · ${c.why}` : "type a name — local rules file it"}
+                        {fName.trim() ? `${c.category} · ${c.why}` : "type a name and we'll work out what kind of load it is"}
                       </span>
                     </>
                   );
@@ -1236,6 +1488,12 @@ export default function Dashboard() {
                 </div>
               );
             })()}
+            {addError && <p role="alert" className="mt-3 font-mono text-[12px] text-orange-300">{addError}</p>}
+            {addErrors.length > 0 && (
+              <p className="mt-3 font-mono text-[11px] text-zinc-500">
+                Complete the missing detail (run length or energy) above to enable “Add load”.
+              </p>
+            )}
             {(addErrors.length > 0 || addWarnings.length > 0) && (
               <div className="mt-3 space-y-1 border-t border-white/5 pt-3">
                 {addErrors.map((m, i) => (
@@ -1276,41 +1534,96 @@ export default function Dashboard() {
             <div>
               <h2 className="text-[15px] font-medium">Live schedule</h2>
               <p className="mt-0.5 font-mono text-[11px] text-zinc-600">
-                {liveState ? `${liveState.lifecycle} · v${liveState.version}` : "plans your loads on the backend, then tracks execution"}
+                {liveState ? `solver ${liveState.solver_status.toLowerCase()} · refreshes every minute` : "plans your loads on the backend, then tracks execution"}
               </p>
             </div>
-            {!liveId && (
-              <div className="flex items-start gap-2">
-                <label className="flex flex-col gap-1 text-[13px] text-zinc-400">
-                  <span className="flex items-center gap-2">
-                    <input value={liveCapacity} aria-label="Live schedule capacity in kilowatts" onChange={(e) => setLiveCapacity(e.target.value.replace(/[^0-9.]/g, ""))} inputMode="decimal" className={`w-20 ${inputCls}`} />
-                    <span className="font-mono text-[11px] text-zinc-600">kW</span>
-                  </span>
-                  {liveCapacityError && (
-                    <span className="font-mono text-[11px] text-orange-300">{liveCapacityError}</span>
-                  )}
-                </label>
-                <button
-                  onClick={() => void planLive()}
-                  disabled={liveBusy || jobs.length === 0}
-                  className="cursor-pointer rounded-full bg-white px-5 py-2 text-[13px] font-medium text-black transition hover:bg-zinc-200 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-30"
-                >
-                  {liveBusy ? "Planning…" : "Plan live"}
-                </button>
-              </div>
-            )}
+            <div className="flex items-start gap-2">
+              <label className="flex flex-col gap-1 text-[13px] text-zinc-400">
+                <span className="flex items-center gap-2">
+                  <input value={liveCapacity} aria-label="Site capacity limit in kilowatts" onChange={(e) => setLiveCapacity(e.target.value.replace(/[^0-9.]/g, ""))} inputMode="decimal" className={`w-20 ${inputCls}`} />
+                  <span className="font-mono text-[11px] text-zinc-600">kW site limit</span>
+                </span>
+                {liveCapacityError && (
+                  <span className="font-mono text-[11px] text-orange-300">{liveCapacityError}</span>
+                )}
+              </label>
+              <button
+                onClick={() => void planLive()}
+                disabled={liveBusy || jobs.length === 0 || backend !== "online"}
+                title={
+                  jobs.length === 0
+                    ? "Add a load first."
+                    : backend !== "online"
+                      ? "Waiting for the compute backend."
+                      : undefined
+                }
+                className={`cursor-pointer rounded-full px-5 py-2 text-[13px] font-medium text-black transition active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-30 ${
+                  !liveId || loadsStale ? "bg-lime-300 hover:bg-lime-200" : "bg-white hover:bg-zinc-200"
+                }`}
+              >
+                {liveBusy ? "Planning…" : liveId ? "Re-plan from my loads" : "Plan live"}
+              </button>
+            </div>
           </div>
           {liveError && <p aria-live="polite" className="mt-3 font-mono text-[12px] text-orange-300">{liveError}</p>}
+          {!liveState && !liveError && (
+            <p className="mt-3 text-[13px] leading-6 text-zinc-500">
+              {jobs.length === 0
+                ? "Add a load above, then plan it here."
+                : "Plan live solves the cleanest start time for every flexible load while keeping each deadline, then lets you track and replan as the day moves."}
+            </p>
+          )}
           {loadsStale && liveState && (
             <p aria-live="polite" className="mt-3 font-mono text-[12px] text-amber-400/90">
-              Loads changed since v{liveState.version} — re-plan to refresh the schedule.
+              Your loads changed since v{liveState.version}. Press “Re-plan from my loads” to include the changes.
             </p>
+          )}
+          {liveState && impact && (
+            <div className="mt-4 rounded-2xl border border-lime-300/20 bg-lime-300/[0.03] p-5">
+              <div className="flex flex-wrap items-end justify-between gap-3">
+                <div>
+                  <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-lime-300/80">Impact vs running everything now</p>
+                  {impact.metrics.co2_saved_percent !== null && impact.metrics.co2_saved_percent > 0.05 ? (
+                    <p className="mt-1.5 text-3xl font-semibold tracking-tight">
+                      −{impact.metrics.co2_saved_percent.toFixed(0)}% CO₂
+                      <span className="ml-2 font-mono text-[13px] font-normal text-zinc-500">
+                        {impact.metrics.co2_saved_kg?.toFixed(2)} kg saved of {((impact.metrics.total_co2_kg ?? 0) + (impact.metrics.co2_saved_kg ?? 0)).toFixed(2)} kg
+                      </span>
+                    </p>
+                  ) : (
+                    <p className="mt-1.5 text-[15px] text-zinc-300">
+                      Starting now is already the cleanest way to meet your deadlines, so nothing was shifted.
+                    </p>
+                  )}
+                </div>
+                <p className="font-mono text-[11px] text-zinc-600">
+                  {impact.signal?.signal_type ? `${impact.signal.signal_type.toLowerCase()} grid signal · ` : ""}
+                  {impact.metrics.deadline_misses === 0 ? "every deadline met" : `${impact.metrics.deadline_misses} deadline(s) missed`}
+                </p>
+              </div>
+              <ul className="mt-4 divide-y divide-white/5">
+                {impact.schedule.map((sj) => {
+                  const ex = impact.explanations.find((e) => e.job_id === sj.job_id);
+                  const wins = runWindows(sj.allocations);
+                  return (
+                    <li key={sj.job_id} className="py-2.5">
+                      <p className="text-[13px] font-medium">{nameOf[sj.job_id] ?? sj.name}</p>
+                      <p className="mt-0.5 font-mono text-[11px] text-zinc-500">
+                        runs {wins.length > 0 ? wins.join(" · ") : "—"}
+                        {ex && ex.co2_saved_kg !== null && ex.co2_saved_kg > 0.005 ? ` · saves ${ex.co2_saved_kg.toFixed(2)} kg` : ""}
+                      </p>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
           )}
           {liveState && (
             <div className="mt-4 border-t border-white/10 pt-4">
               <ExecutionPanel
                 state={liveState}
                 history={liveHistory}
+                names={nameOf}
                 busy={liveBusy}
                 onAdvance={() => void liveAdvance()}
                 onReplan={() => void liveReplan()}
@@ -1413,20 +1726,31 @@ export default function Dashboard() {
 
         <div className="mt-3 grid gap-3 md:grid-cols-3">
           <div className="rounded-2xl border border-white/10 bg-[#0a0a0a] p-6">
-            <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-lime-300/80">Connected</p>
-            <h2 className="mt-2 text-[15px] font-medium">Account</h2>
-            <p className="mt-2 break-all font-mono text-[12px] text-zinc-500">{user.email}</p>
-            <p className="mt-1 font-mono text-[11px] text-zinc-700">{process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID}</p>
+            <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-600">Carbon signal</p>
+            <h2 className="mt-2 text-[15px] font-medium">{signal ? signal.signal_type.toLowerCase() : "—"}</h2>
+            <p className="mt-2 text-sm leading-6 text-zinc-500">
+              {signal
+                ? signal.signal_type === "SYNTHETIC"
+                  ? "A modelled daily curve, not live grid data. Set ELECTRICITY_MAPS_API_KEY on the backend for the real thing."
+                  : `Source: ${signal.source}.`
+                : "Waiting for the backend."}
+            </p>
           </div>
           <div className="rounded-2xl border border-white/10 bg-[#0a0a0a] p-6">
-            <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-600">Not connected</p>
-            <h2 className="mt-2 text-[15px] font-medium">Meters</h2>
-            <p className="mt-2 text-sm leading-6 text-zinc-500">No meter stream yet. First plug meter that reports in appears here.</p>
+            <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-600">Forecast</p>
+            <h2 className="mt-2 text-[15px] font-medium">{forecast ? forecast.provenance.model : "unavailable"}</h2>
+            <p className="mt-2 text-sm leading-6 text-zinc-500">
+              {forecast
+                ? `${Math.round(forecast.provenance.interval_nominal_coverage * 100)}% prediction band from the model's own past errors. Use Expected or Robust in the chart to plan with it.`
+                : "Planning still works against the actual signal."}
+            </p>
           </div>
           <div className="rounded-2xl border border-white/10 bg-[#0a0a0a] p-6">
-            <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-lime-300/80">Active</p>
-            <h2 className="mt-2 text-[15px] font-medium">Coordination</h2>
-            <p className="mt-2 text-sm leading-6 text-zinc-500">Multi-user feeder optimization active above. Feeder ceiling enforced jointly.</p>
+            <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-600">Execution</p>
+            <h2 className="mt-2 text-[15px] font-medium">simulated</h2>
+            <p className="mt-2 text-sm leading-6 text-zinc-500">
+              Start, finish and fail events drive the tracker. No meters or devices are connected, so nothing here is real telemetry.
+            </p>
           </div>
         </div>
       </div>

@@ -22,6 +22,7 @@ function fmtTime(iso: string | null) {
 export default function ExecutionPanel({
   state,
   history,
+  names = {},
   onAdvance,
   onReplan,
   onEvent,
@@ -29,6 +30,8 @@ export default function ExecutionPanel({
 }: {
   state: ExecutionState;
   history: ScheduleHistory | null;
+  /** job_id -> display name; ids are opaque database keys, never show them raw. */
+  names?: Record<string, string>;
   onAdvance: () => void;
   onReplan: () => void;
   onEvent: (jobId: string, type: string) => void;
@@ -47,6 +50,7 @@ export default function ExecutionPanel({
           <button
             onClick={onAdvance}
             disabled={busy}
+            title="Move the simulated clock forward 15 minutes"
             className="cursor-pointer rounded-full border border-white/15 px-4 py-1.5 text-[12px] text-zinc-300 transition hover:border-white/40 hover:text-white active:scale-[0.97] disabled:cursor-wait disabled:opacity-50"
           >
             +15 min
@@ -54,6 +58,7 @@ export default function ExecutionPanel({
           <button
             onClick={onReplan}
             disabled={busy}
+            title="Re-optimise whatever hasn't run yet"
             className="cursor-pointer rounded-full bg-lime-300 px-4 py-1.5 text-[12px] font-medium text-black transition hover:bg-lime-200 active:scale-[0.97] disabled:cursor-wait disabled:opacity-50"
           >
             Replan
@@ -74,7 +79,7 @@ export default function ExecutionPanel({
               <div className="flex items-center gap-3">
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
-                    <p className="truncate text-sm font-medium">{j.job_id}</p>
+                    <p className="truncate text-sm font-medium">{names[j.job_id] ?? j.job_id}</p>
                     <span className={`rounded-full px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${STATUS_STYLE[j.status] ?? "bg-white/5 text-zinc-400"}`}>
                       {j.status.toLowerCase()}
                     </span>
@@ -119,7 +124,7 @@ export default function ExecutionPanel({
               </p>
               {v.changed_jobs.map((c) => (
                 <p key={c.job_id} className="mt-1.5 text-[13px] text-zinc-300">
-                  {c.job_id}: {c.previous_start ? fmtTime(c.previous_start) : "—"} → {c.new_start ? fmtTime(c.new_start) : "—"}
+                  {names[c.job_id] ?? c.job_id}: {c.previous_start ? fmtTime(c.previous_start) : "—"} → {c.new_start ? fmtTime(c.new_start) : "—"}
                   <span className="mt-0.5 block text-[12px] text-zinc-500">{c.reason}</span>
                 </p>
               ))}
