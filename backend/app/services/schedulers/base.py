@@ -165,7 +165,7 @@ class BaseScheduler(ABC):
             result.fail("connection capacity must be greater than zero")
 
         for slot in range(horizon.slot_count):
-            if scheduler_input.baseline.at(slot) > scheduler_input.capacity_w:
+            if scheduler_input.baseline.at(slot) > scheduler_input.capacity_at(slot):
                 result.fail(
                     f"baseline load at slot {slot} exceeds the connection capacity, so the "
                     "site is over capacity before any flexible load is placed"

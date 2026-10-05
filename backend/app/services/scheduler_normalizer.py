@@ -78,6 +78,7 @@ class SchedulerNormalizer:
         risk_weight: float = 0.0,
         uncertainty_upper: Optional[list[int]] = None,
         forecast_provenance: Optional[dict] = None,
+        capacity_profile_kw: Optional[list[float]] = None,
     ) -> tuple[SchedulerInput, NormalizationReport]:
         report = NormalizationReport()
         if not specs:
@@ -106,7 +107,17 @@ class SchedulerNormalizer:
             )
 
         capacity_w = to_power_w(capacity_kw)
-        self._check_baseline_fits(baseline_w, capacity_w)
+        capacity_profile_w: Optional[list[int]] = None
+        if capacity_profile_kw is not None:
+            if len(capacity_profile_kw) != horizon.slot_count:
+                raise NormalizationError(
+                    f"capacity profile has {len(capacity_profile_kw)} entries but the "
+                    f"horizon has {horizon.slot_count} slots"
+                )
+            if any(c < 0 for c in capacity_profile_kw):
+                raise NormalizationError("capacity profile entries must be >= 0")
+            capacity_profile_w = [to_power_w(c) for c in capacity_profile_kw]
+        self._check_baseline_fits(baseline_w, capacity_w, capacity_profile_w)
 
         carbon = self._carbon_profile(carbon_signal, horizon, signal_type)
 
@@ -158,7 +169,9 @@ class SchedulerNormalizer:
             )
 
         max_power_w = max(
-            [to_power_w(capacity_kw)] + [j.max_power_w or j.power_w for j in jobs]
+            [to_power_w(capacity_kw)]
+            + (capacity_profile_w or [])
+            + [j.max_power_w or j.power_w for j in jobs]
         )
         # The objective headroom must cover the WORST case the objective can see,
         # which under ROBUST mode is the risk-adjusted intensity, not the
@@ -187,6 +200,7 @@ class SchedulerNormalizer:
             baseline=BaselineProfile(power_w=baseline_w),
             carbon=carbon,
             capacity_w=capacity_w,
+            capacity_profile_w=capacity_profile_w,
             objective=objective or ObjectiveWeights(),
             tariff=tariff,
             forecast_mode=mode,
@@ -250,12 +264,18 @@ class SchedulerNormalizer:
             )
         report.baseline_sources.append(spec.normalized_name)
 
-    def _check_baseline_fits(self, baseline_w: list[int], capacity_w: int) -> None:
+    def _check_baseline_fits(
+        self,
+        baseline_w: list[int],
+        capacity_w: int,
+        capacity_profile_w: Optional[list[int]] = None,
+    ) -> None:
         for slot, value in enumerate(baseline_w):
-            if value > capacity_w:
+            cap = capacity_profile_w[slot] if capacity_profile_w is not None else capacity_w
+            if value > cap:
                 raise NormalizationError(
                     f"baseline load at slot {slot} is {value / 1000:.2f} kW, which exceeds "
-                    f"the {capacity_w / 1000:.2f} kW connection capacity. The site is "
+                    f"the {cap / 1000:.2f} kW connection capacity. The site is "
                     "already over capacity before any flexible load is scheduled."
                 )
 
@@ -469,6 +489,7 @@ def fingerprint_input(scheduler_input: SchedulerInput) -> str:
             scheduler_input.horizon.slot_count,
         ],
         "capacity_w": scheduler_input.capacity_w,
+        "capacity_profile_w": scheduler_input.capacity_profile_w,
         "baseline": scheduler_input.baseline.power_w,
         "carbon": scheduler_input.carbon.gco2_per_kwh,
         "carbon_signal_type": scheduler_input.carbon.signal_type,

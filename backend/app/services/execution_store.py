@@ -1,15 +1,25 @@
-"""In-memory execution store (Phase 7).
+"""Durable execution store (Phase 7, Milestone 3).
 
 Records live here: schedule versions (immutable, appended), per-job execution
-truth, events, and forecast-vs-actual carbon. Process-local by design for this
-phase; the schemas are the persistence contract a database will adopt later.
+truth, events, and forecast-vs-actual carbon. Every mutation is persisted to a
+SQLite database so records survive process restarts and are shared across
+store instances; the in-memory dict remains as a read-through cache for fast
+lookups.
+
+The database file defaults to ``backend/data/heliotrope_execution.db`` and can
+be overridden with the ``HELIOTROPE_EXECUTION_DB`` environment variable or the
+``db_path`` constructor argument. Connections are opened per operation (each
+FastAPI worker thread gets its own), and the schema is created up front.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import sqlite3
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 from ..domain.execution import (
     JobExecutionState,
@@ -24,14 +34,62 @@ from ..domain.scheduling import SchedulerInput, SchedulerResult
 
 log = logging.getLogger("heliotrope.execution")
 
+#: Environment variable overriding where the durable store lives.
+ENV_DB_PATH = "HELIOTROPE_EXECUTION_DB"
+
+#: backend/app/services/execution_store.py -> backend/data/heliotrope_execution.db
+DEFAULT_DB_PATH = Path(__file__).resolve().parents[2] / "data" / "heliotrope_execution.db"
+
+_SCHEMA = (
+    "CREATE TABLE IF NOT EXISTS schedules ("
+    "schedule_id TEXT PRIMARY KEY, lifecycle TEXT, data TEXT, updated_at TEXT)"
+)
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
 class ExecutionStore:
-    def __init__(self) -> None:
+    def __init__(self, db_path: str | None = None) -> None:
         self._records: dict[str, ScheduleRecord] = {}
+        self._db_path = (
+            db_path or os.environ.get(ENV_DB_PATH) or str(DEFAULT_DB_PATH)
+        )
+        Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(self._db_path) as conn:
+            conn.execute(_SCHEMA)
+        log.info("execution_store_opened db_path=%s", self._db_path)
+
+    # --- persistence ---------------------------------------------------------
+
+    def _persist(self, record: ScheduleRecord) -> None:
+        """Upsert the full serialized record into SQLite."""
+        with sqlite3.connect(self._db_path) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO schedules "
+                "(schedule_id, lifecycle, data, updated_at) VALUES (?, ?, ?, ?)",
+                (
+                    record.schedule_id,
+                    record.lifecycle.value,
+                    record.model_dump_json(),
+                    utcnow().isoformat(),
+                ),
+            )
+
+    def _load(self, schedule_id: str) -> ScheduleRecord | None:
+        """Read one record back from SQLite into the cache, if present."""
+        with sqlite3.connect(self._db_path) as conn:
+            row = conn.execute(
+                "SELECT data FROM schedules WHERE schedule_id = ?", (schedule_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        record = ScheduleRecord.model_validate_json(row[0])
+        self._records[schedule_id] = record
+        return record
+
+    # --- records -------------------------------------------------------------
 
     def create(
         self,
@@ -70,11 +128,15 @@ class ExecutionStore:
         for state in record.execution.values():
             state.participant_id = by_id.get(state.job_id, "")
         self._records[schedule_id] = record
+        self._persist(record)
         log.info("schedule_created schedule_id=%s reason=%s", schedule_id, reason.value)
         return record
 
     def get(self, schedule_id: str) -> ScheduleRecord | None:
-        return self._records.get(schedule_id)
+        record = self._records.get(schedule_id)
+        if record is not None:
+            return record
+        return self._load(schedule_id)
 
     def append_version(
         self,
@@ -111,6 +173,7 @@ class ExecutionStore:
             "schedule_replanned schedule_id=%s v=%d reason=%s changed=%d",
             record.schedule_id, version.version, reason.value, len(changes),
         )
+        self._persist(record)
         return version
 
     def record_event(self, record: ScheduleRecord, event: ScheduleEvent) -> ScheduleEvent:
@@ -121,4 +184,5 @@ class ExecutionStore:
             "schedule_event schedule_id=%s type=%s job=%s",
             record.schedule_id, event.event_type.value, event.job_id,
         )
+        self._persist(record)
         return event

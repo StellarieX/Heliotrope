@@ -24,10 +24,12 @@ checkout. It is disclosed rather than hidden: `provenance.source_signal` says
 
 from __future__ import annotations
 
+import bisect
+import logging
 from datetime import datetime, timedelta
 from typing import Iterable, Optional
 
-from ..domain.carbon import CarbonSignal
+from ..domain.carbon import CarbonPoint, CarbonSignal, Quality, SignalType
 from ..domain.forecasting import CarbonForecast
 from ..utils.time import to_utc
 from .carbon_service import CarbonService, CarbonUnavailable
@@ -44,6 +46,9 @@ from .forecasting import (
     SyntheticCarbonHistory,
     build_forecaster,
 )
+
+
+log = logging.getLogger("heliotrope.forecast")
 
 
 class ForecastServiceError(ValueError):
@@ -77,10 +82,12 @@ class ForecastService:
 
     def history_from_points(
         self,
-        points: Iterable[tuple[datetime | str, float]],
+        points: Iterable,
         source: str = "caller",
+        signal_type: Optional[str | SignalType] = None,
+        quality: Optional[str | Quality] = None,
     ) -> CarbonHistory:
-        """Build a history from caller-supplied `(timestamp, gCO2/kWh)` pairs.
+        """Build a history from caller-supplied observations.
 
         Timestamps may be `datetime` objects or ISO-8601 strings, because the API
         receives JSON. A naive string is refused: a bare timestamp would be read
@@ -90,43 +97,123 @@ class ForecastService:
         arriving out of order are an error, not something to silently sort: an
         unsorted series means whatever produced it is buggy, and sorting would
         hide that behind a plausible-looking forecast.
+
+        Each item may be a `(timestamp, value)` pair, a `CarbonPoint`, or a
+        mapping with `timestamp`/`time` and `gco2_per_kwh`/`value` keys plus
+        optional `source`, `signal_type` and `quality` entries. Labels the
+        caller supplies travel with the point: caller-measured data is never
+        relabelled SYNTHETIC. Bare pairs carry no provenance of their own, so
+        they take the call-level `source`/`signal_type`/`quality`, which default
+        to the historical SYNTHETIC labelling for backward compatibility —
+        pass `quality="MEASURED"` (and the observed `signal_type`) when the
+        pairs are real grid observations. Every point is constructed as an
+        explicit `CarbonPoint`, never by re-invoking the input's own type.
         """
-        from ..domain.carbon import CarbonPoint, Quality, SignalType
+        default_type = (
+            SignalType(signal_type) if signal_type is not None else SignalType.SYNTHETIC
+        )
+        default_quality = (
+            Quality(quality) if quality is not None else Quality.SYNTHETIC
+        )
 
-        parsed = []
-        for moment, value in points:
-            if isinstance(moment, str):
-                try:
-                    moment = datetime.fromisoformat(moment)
-                except ValueError as exc:
-                    raise ForecastServiceError(
-                        f"history timestamp is not ISO-8601: {moment!r}"
-                    ) from exc
-            if getattr(moment, "tzinfo", None) is None:
-                raise ForecastServiceError(
-                    f"history timestamp {moment!r} is timezone-aware-required; a naive "
-                    f"timestamp would be read against the server's local zone and "
-                    f"silently shift the forecast"
+        built: list[CarbonPoint] = []
+        for item in points:
+            if isinstance(item, CarbonPoint):
+                moment, value = item.time, item.gco2_per_kwh
+                point_type, point_quality, point_source = (
+                    item.signal_type,
+                    item.quality,
+                    item.source,
                 )
-            parsed.append((moment, value))
-
-        return CarbonHistory(
-            tuple(
+            elif isinstance(item, dict):
+                raw_moment = item.get("timestamp", item.get("time"))
+                if raw_moment is None:
+                    raise ForecastServiceError(
+                        "history mapping has neither 'timestamp' nor 'time'"
+                    )
+                if "gco2_per_kwh" in item:
+                    value = item["gco2_per_kwh"]
+                elif "value" in item:
+                    value = item["value"]
+                else:
+                    raise ForecastServiceError(
+                        "history mapping has neither 'gco2_per_kwh' nor 'value'"
+                    )
+                moment = self._parse_moment(raw_moment)
+                raw_type = item.get("signal_type", signal_type)
+                raw_quality = item.get("quality", quality)
+                point_type = (
+                    SignalType(raw_type)
+                    if raw_type is not None
+                    else default_type
+                )
+                point_quality = (
+                    Quality(raw_quality)
+                    if raw_quality is not None
+                    else default_quality
+                )
+                point_source = item.get("source", source)
+                built.append(
+                    CarbonPoint(
+                        time=to_utc(moment),
+                        gco2_per_kwh=float(value),
+                        signal_type=point_type,
+                        quality=point_quality,
+                        source=point_source,
+                    )
+                )
+                continue
+            else:
+                moment, value = item
+                point_type, point_quality, point_source = (
+                    default_type,
+                    default_quality,
+                    source,
+                )
+            moment = self._parse_moment(moment)
+            built.append(
                 CarbonPoint(
                     time=to_utc(moment),
                     gco2_per_kwh=float(value),
-                    signal_type=SignalType.SYNTHETIC,
-                    quality=Quality.SYNTHETIC,
-                    source=source,
+                    signal_type=point_type,
+                    quality=point_quality,
+                    source=point_source,
                 )
-                for moment, value in parsed
             )
-        )
+
+        return CarbonHistory(tuple(built))
+
+    @staticmethod
+    def _parse_moment(moment: datetime | str) -> datetime:
+        """An ISO-8601 string or datetime, always timezone-aware."""
+        if isinstance(moment, str):
+            try:
+                moment = datetime.fromisoformat(moment)
+            except ValueError as exc:
+                raise ForecastServiceError(
+                    f"history timestamp is not ISO-8601: {moment!r}"
+                ) from exc
+        if getattr(moment, "tzinfo", None) is None:
+            raise ForecastServiceError(
+                f"history timestamp {moment!r} is timezone-aware-required; a naive "
+                f"timestamp would be read against the server's local zone and "
+                f"silently shift the forecast"
+            )
+        return moment
 
     def history_from_provider(
         self, end: datetime, days: int = DEFAULT_HISTORY_DAYS, resolution_minutes: int = 15
     ) -> CarbonHistory:
-        """Observed history from the configured carbon provider."""
+        """Observed history from the configured carbon provider.
+
+        Every point is constructed as an explicit `CarbonPoint`: the provider
+        response shape (`CarbonPointOut` with `timestamp` /
+        `carbon_intensity_gco2_per_kwh`) is never the history shape (`time` /
+        `gco2_per_kwh`), and rebuilding one via the other's constructor is what
+        made this crash. The response's own `signal_type` and `source` travel
+        with each point; quality is MEASURED for observed signals and SYNTHETIC
+        only when the provider itself says the series is synthetic.
+        """
         if days < 1 or days > self.MAX_HISTORY_DAYS:
             raise ForecastServiceError(
                 f"history window must be between 1 and {self.MAX_HISTORY_DAYS} days; "
@@ -136,12 +223,21 @@ class ForecastService:
         start = end - timedelta(days=days)
         service = self._carbon or CarbonService.default()
         response = service.get_signal(start, end, resolution_minutes)
+        signal_type = response.signal_type
+        quality = (
+            Quality.SYNTHETIC
+            if getattr(signal_type, "value", signal_type) == SignalType.SYNTHETIC.value
+            else Quality.MEASURED
+        )
         return CarbonHistory(
             tuple(
-                type(p)(
-                    time=p.timestamp,
-                    gco2_per_kwh=p.carbon_intensity_gco2_per_kwh,
+                CarbonPoint(
+                    time=to_utc(p.timestamp),
+                    gco2_per_kwh=float(p.carbon_intensity_gco2_per_kwh),
+                    signal_type=signal_type,
+                    quality=quality,
                     source=response.source,
+                    is_forecast=bool(response.quality.is_forecast),
                 )
                 for p in response.points
             )
@@ -153,13 +249,31 @@ class ForecastService:
         days: int = DEFAULT_HISTORY_DAYS,
         resolution_minutes: int = 15,
     ) -> CarbonHistory:
-        """Provider history if obtainable, otherwise the SYNTHETIC fallback."""
+        """Provider history if obtainable, otherwise the SYNTHETIC fallback.
+
+        The fallback is kept — it is what makes forecasting work in a fresh
+        checkout — but it is never silent: a warning names the cause, and the
+        returned history is the labelled `synthetic_history` series, so the
+        forecast provenance built from it says SYNTHETIC and can never be
+        mistaken for grid data.
+        """
         try:
             history = self.history_from_provider(end, days, resolution_minutes)
             if len(history) >= 2:
                 return history
-        except (CarbonUnavailable, ForecastServiceError, ValueError):
-            pass
+            log.warning(
+                "carbon provider returned only %d point(s) for %d day(s) at %d min; "
+                "falling back to SYNTHETIC history (source_signal='synthetic_history')",
+                len(history),
+                days,
+                resolution_minutes,
+            )
+        except (CarbonUnavailable, ForecastServiceError, ValueError) as exc:
+            log.warning(
+                "carbon history unavailable (%s); falling back to SYNTHETIC history "
+                "(source_signal='synthetic_history')",
+                exc,
+            )
         return self._synthetic.history(end, days, resolution_minutes)
 
     # --- forecast (§8) -------------------------------------------------------
@@ -240,51 +354,131 @@ class ForecastService:
     # --- forecast-relative scheduling input (§38) ----------------------------
 
     def uncertainty_over_horizon(
-        self, forecast: CarbonForecast, horizon_start: datetime
+        self,
+        forecast: CarbonForecast,
+        horizon_start: datetime,
+        resolution_minutes: Optional[int] = None,
+        horizon_end: Optional[datetime] = None,
     ) -> list[int]:
-        """Per-slot upper prediction bounds aligned to `horizon_start`.
+        """Per-slot upper prediction bounds aligned to the horizon grid.
 
-        The forecast's own resolution grid is matched against the horizon grid.
-        A horizon slot with no forecast point raises rather than borrowing a
-        neighbouring value — the normalizer refuses to invent carbon, and this
-        is the same rule one layer earlier.
+        The forecast series is resampled onto `[horizon_start, horizon_end)` at
+        `resolution_minutes` (defaults: the forecast's own grid). A horizon slot
+        takes its exact forecast point when one exists; otherwise the nearest
+        point within half a forecast step, linearly interpolated between its two
+        bracketing points when straddled. The normalizer refuses to invent
+        carbon, and so does this: a slot with no forecast point within
+        tolerance — a horizon reaching past what was forecast — raises rather
+        than borrowing a distant value.
         """
         from ..domain.scaling import to_carbon_int
 
-        by_time = {p.timestamp: p for p in forecast.points}
-        step = timedelta(minutes=forecast.resolution_minutes)
-        upper: list[int] = []
-        current = to_utc(horizon_start)
-        while current < forecast.provenance.horizon_end:
-            point = by_time.get(current)
-            if point is None:
-                raise ForecastServiceError(
-                    f"the forecast has no point at {current.isoformat()}, so there is no "
-                    f"uncertainty for that slot. Refusing to borrow a neighbouring value."
-                )
-            upper.append(to_carbon_int(point.upper_gco2_per_kwh))
-            current += step
-        return upper
+        values = self._values_over_horizon(
+            forecast,
+            horizon_start,
+            horizon_end,
+            resolution_minutes,
+            lambda p: p.upper_gco2_per_kwh,
+        )
+        return [to_carbon_int(v) for v in values]
 
     def predicted_over_horizon(
-        self, forecast: CarbonForecast, horizon_start: datetime
+        self,
+        forecast: CarbonForecast,
+        horizon_start: datetime,
+        resolution_minutes: Optional[int] = None,
+        horizon_end: Optional[datetime] = None,
     ) -> list[int]:
-        """Per-slot point forecasts aligned to `horizon_start` (§38, EXPECTED)."""
+        """Per-slot point forecasts aligned to the horizon grid (§38, EXPECTED).
+
+        Same resampling contract as `uncertainty_over_horizon`: nearest within
+        half a forecast step (linearly interpolated when straddled), strict
+        error when the horizon reaches past the forecast.
+        """
         from ..domain.scaling import to_carbon_int
 
-        by_time = {p.timestamp: p for p in forecast.points}
-        step = timedelta(minutes=forecast.resolution_minutes)
-        values: list[int] = []
-        current = to_utc(horizon_start)
-        while current < forecast.provenance.horizon_end:
-            point = by_time.get(current)
-            if point is None:
+        values = self._values_over_horizon(
+            forecast,
+            horizon_start,
+            horizon_end,
+            resolution_minutes,
+            lambda p: p.predicted_gco2_per_kwh,
+        )
+        return [to_carbon_int(v) for v in values]
+
+    def _values_over_horizon(
+        self,
+        forecast: CarbonForecast,
+        horizon_start: datetime,
+        horizon_end: Optional[datetime],
+        resolution_minutes: Optional[int],
+        select,
+    ) -> list[float]:
+        """Resample one forecast field onto an arbitrary horizon grid."""
+        if not forecast.points:
+            raise ForecastServiceError("the forecast has no points to align")
+        step_minutes = resolution_minutes or forecast.resolution_minutes
+        if step_minutes <= 0:
+            raise ForecastServiceError("resolution_minutes must be positive")
+        end = to_utc(horizon_end) if horizon_end is not None else forecast.provenance.horizon_end
+        start = to_utc(horizon_start)
+        if end <= start:
+            raise ForecastServiceError("horizon end must be after horizon start")
+
+        ordered = sorted(forecast.points, key=lambda p: p.timestamp)
+        stamps = [p.timestamp for p in ordered]
+        forecast_step = timedelta(minutes=forecast.resolution_minutes)
+        tolerance = forecast_step / 2
+        cover_end = forecast.provenance.horizon_end
+
+        values: list[float] = []
+        current = start
+        hstep = timedelta(minutes=step_minutes)
+        while current < end:
+            value = self._sample_at(ordered, stamps, current, select, tolerance, cover_end)
+            if value is None:
                 raise ForecastServiceError(
-                    f"the forecast has no point at {current.isoformat()}."
+                    f"the forecast covers "
+                    f"{forecast.provenance.horizon_start.isoformat()} to "
+                    f"{forecast.provenance.horizon_end.isoformat()} but the horizon "
+                    f"needs {current.isoformat()}, which is beyond resampling "
+                    f"tolerance. Refusing to borrow a distant value."
                 )
-            values.append(to_carbon_int(point.predicted_gco2_per_kwh))
-            current += step
+            values.append(value)
+            current += hstep
         return values
+
+    @staticmethod
+    def _sample_at(ordered, stamps, moment, select, tolerance, cover_end) -> Optional[float]:
+        """Exact hit, else linear interpolation between bracketing points.
+
+        Forecast points are interval values: the last point covers up to the
+        forecast horizon end, so a finer-grid slot inside that final interval
+        takes the last point's value. Returns None when `moment` lies beyond
+        the forecast extent plus half a forecast step — genuinely out of
+        range, not merely off-grid.
+        """
+        idx = bisect.bisect_left(stamps, moment)
+        if idx < len(stamps) and stamps[idx] == moment:
+            return float(select(ordered[idx]))
+        before = ordered[idx - 1] if idx > 0 else None
+        after = ordered[idx] if idx < len(ordered) else None
+        if before is None:
+            if after is not None and (stamps[idx] - moment) <= tolerance:
+                return float(select(after))
+            return None
+        if after is None:
+            # Inside the final interval, or a grace of half a step past it.
+            if moment < cover_end or (moment - stamps[-1]) <= tolerance:
+                return float(select(before))
+            return None
+        # Straddled: linear interpolation. Off-grid horizon slots between two
+        # forecast points get the straight-line value, not a stair-step.
+        span = (after.timestamp - before.timestamp).total_seconds()
+        if span <= 0:
+            return float(select(before))
+        frac = (moment - before.timestamp).total_seconds() / span
+        return float(select(before)) * (1.0 - frac) + float(select(after)) * frac
 
     def as_carbon_signal(
         self, forecast: CarbonForecast, values: Optional[list[float]] = None
@@ -295,25 +489,80 @@ class ForecastService:
         `signal_type` is FORECAST, so a schedule built from this carries its own
         provenance and can never be reported as if it had seen real grid data.
         """
-        from ..domain.carbon import CarbonPoint, Quality, SignalType
-
         series = values if values is not None else [
             p.predicted_gco2_per_kwh for p in forecast.points
         ]
+        stamps = [p.timestamp for p in forecast.points]
+        return self._signal_from_series(
+            forecast,
+            stamps,
+            list(series),
+            forecast.resolution_minutes,
+            forecast.provenance.horizon_start,
+            forecast.provenance.horizon_end,
+        )
+
+    def signal_over_horizon(
+        self,
+        forecast: CarbonForecast,
+        start: datetime,
+        end: datetime,
+        resolution_minutes: Optional[int] = None,
+    ) -> CarbonSignal:
+        """A forecast `CarbonSignal` resampled onto an arbitrary horizon grid.
+
+        The point forecasts are interpolated onto
+        `[start, end)` at `resolution_minutes` (same tolerance contract as
+        `uncertainty_over_horizon`), so a forecast built at one resolution can
+        still be scheduled on the canonical horizon grid without the normalizer
+        having to reject it for a missing slot.
+        """
+        step = resolution_minutes or forecast.resolution_minutes
+        values = self._values_over_horizon(
+            forecast, start, end, step, lambda p: p.predicted_gco2_per_kwh
+        )
+        stamps: list[datetime] = []
+        current = to_utc(start)
+        hstep = timedelta(minutes=step)
+        horizon_end = to_utc(end)
+        while current < horizon_end:
+            stamps.append(current)
+            current += hstep
+        return self._signal_from_series(
+            forecast, stamps, values, step, to_utc(start), to_utc(end)
+        )
+
+    @staticmethod
+    def _signal_from_series(
+        forecast: CarbonForecast,
+        stamps: list[datetime],
+        series: list[float],
+        resolution_minutes: int,
+        start: datetime,
+        end: datetime,
+    ) -> CarbonSignal:
+        """Explicit `CarbonSignal` construction from one value per timestamp."""
+        from ..domain.carbon import CarbonPoint, Quality, SignalType
+
+        if len(stamps) != len(series):
+            raise ForecastServiceError(
+                f"cannot build a carbon signal from {len(series)} values for "
+                f"{len(stamps)} timestamps"
+            )
         return CarbonSignal(
-            start=forecast.provenance.horizon_start,
-            end=forecast.provenance.horizon_end,
-            resolution_minutes=forecast.resolution_minutes,
+            start=start,
+            end=end,
+            resolution_minutes=resolution_minutes,
             source=f"forecast:{forecast.provenance.model}",
             points=[
                 CarbonPoint(
-                    time=p.timestamp,
+                    time=stamp,
                     gco2_per_kwh=value,
                     signal_type=SignalType.SYNTHETIC,
                     is_forecast=True,
                     quality=Quality.ESTIMATED,
                     source=f"forecast:{forecast.provenance.model}",
                 )
-                for p, value in zip(forecast.points, series)
+                for stamp, value in zip(stamps, series)
             ],
         )

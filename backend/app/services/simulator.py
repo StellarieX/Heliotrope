@@ -14,7 +14,14 @@ Script action shapes (each item: {"at": iso, "do": ..., ...}):
   {"do": "delay", "job": id, "until": iso}   start held until `until`
   {"do": "miss", "job": id}                  never starts (for missed-path tests)
   {"do": "capacity", "kw": float}            shared capacity changes at `at`
+  {"do": "capacity_profile", "profile": [...]} per-slot shared capacity (kW)
+                                             changes at `at`; length must equal
+                                             the horizon slot count
   {"do": "carbon_actual", "points": [...]}   observed carbon replaces forecast
+
+Capacity accounting is per-slot: draws are checked against the connection's
+per-slot capacity (`capacity_at`), so a time-varying profile is honored rather
+than averaged away. The check is reported, never silently repaired.
 """
 
 from __future__ import annotations
@@ -52,6 +59,7 @@ class ExecutionSimulator:
     ) -> dict:
         applied: list[str] = []
         capacity_kw = None
+        capacity_profile_kw: list[float] | None = None
         for item in sorted(script, key=lambda s: s["at"]):
             at = _at(item)
             action = item.get("do", "")
@@ -62,6 +70,29 @@ class ExecutionSimulator:
                     timestamp=at, payload={"capacity_kw": capacity_kw, "simulated": True},
                 ))
                 applied.append(f"capacity -> {capacity_kw} kW at {at.isoformat()}")
+            elif action == "capacity_profile":
+                from ..domain.scaling import to_power_w
+
+                raw = item.get("profile", item.get("capacity_profile_kw", item.get("kw")))
+                if record.scheduler_input is None or not isinstance(raw, list):
+                    applied.append(f"capacity_profile ignored at {at.isoformat()}: no horizon or no list")
+                elif len(raw) != record.scheduler_input.horizon.slot_count:
+                    applied.append(
+                        f"capacity_profile ignored at {at.isoformat()}: "
+                        f"{len(raw)} entries but the horizon has "
+                        f"{record.scheduler_input.horizon.slot_count} slots"
+                    )
+                else:
+                    capacity_profile_kw = [float(c) for c in raw]
+                    record.scheduler_input = record.scheduler_input.model_copy(
+                        update={"capacity_profile_w": [to_power_w(c) for c in capacity_profile_kw]}
+                    )
+                    record.events.append(ScheduleEvent(
+                        event_type=ScheduleEventType.CAPACITY_CHANGED,
+                        timestamp=at,
+                        payload={"capacity_profile_kw": capacity_profile_kw, "simulated": True},
+                    ))
+                    applied.append(f"capacity_profile -> {len(capacity_profile_kw)} slots at {at.isoformat()}")
             elif action == "miss":
                 state = record.execution.get(item["job"])
                 if state and state.status in (JobStatus.PENDING, JobStatus.READY):
@@ -105,7 +136,35 @@ class ExecutionSimulator:
             final = ScheduleEvent(event_type=ScheduleEventType.CLOCK_ADVANCED, timestamp=to_time)
             record.events.append(final)
             apply_event(record, final)
-        return {"applied": applied, "capacity_kw": capacity_kw, "simulated": True}
+        return {
+            "applied": applied,
+            "capacity_kw": capacity_kw,
+            "capacity_profile_kw": capacity_profile_kw,
+            "capacity_violations": self.capacity_violations(record),
+            "simulated": True,
+        }
+
+    def capacity_violations(self, record: ScheduleRecord) -> int:
+        """Slots where actual delivered draws exceed per-slot capacity.
+
+        Profile-aware: each slot is checked against `capacity_at(slot)`, so a
+        dip in a time-varying profile is enforced rather than averaged away.
+        """
+        if record.scheduler_input is None:
+            return 0
+        horizon = record.scheduler_input.horizon
+        n = horizon.slot_count
+        totals = [0] * n
+        for state in record.execution.values():
+            for slot, power in state.delivered_slots.items():
+                if 0 <= slot < n and power > 0:
+                    totals[slot] += power
+        baseline = [record.scheduler_input.baseline.at(s) for s in range(n)]
+        return sum(
+            1
+            for s in range(n)
+            if totals[s] + baseline[s] > record.scheduler_input.capacity_at(s)
+        )
 
     def _draw_from_plan(self, record: ScheduleRecord, job_id: str, since: datetime) -> None:
         """Record actual draws following the plan from `since` onward, until a

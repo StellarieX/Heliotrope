@@ -151,9 +151,11 @@ class MultiUserCoordinator:
 
         preferred = self._preferred_starts(solve_input)
         target_w = int(solve_input.capacity_w * request.weights.target_utilization)
+        target_profile = self._target_profile(request, solve_input)
         engine = CoordinatedCPSATScheduler(
             preferred_starts=preferred,
             target_w=target_w,
+            target_profile_w=target_profile,
             congestion_weight=request.weights.congestion,
             inconvenience_weight=request.weights.inconvenience,
             fairness_mode=request.fairness_mode,
@@ -167,6 +169,20 @@ class MultiUserCoordinator:
             config=request.solver_config or SchedulerConfig(),
         )
         return engine.schedule(solve_input)
+
+    @staticmethod
+    def _target_profile(request: CoordinationRequest, solve_input: SchedulerInput) -> list[int] | None:
+        """Per-slot congestion target (utilization x per-slot capacity).
+
+        Returns None for the scalar path so the engine uses `target_w`
+        unchanged; with a profile each slot gets its own target.
+        """
+        if solve_input.capacity_profile_w is None:
+            return None
+        return [
+            int(cap * request.weights.target_utilization)
+            for cap in solve_input.capacity_profile_w
+        ]
 
     # --- validation ---------------------------------------------------------
 
@@ -189,19 +205,20 @@ class MultiUserCoordinator:
         if not any(spec.participant_id for spec in request.jobs):
             raise CoordinationError("no job is assigned to a participant")
         if request.shared_resource.capacity_profile_kw is not None:
-            raise CoordinationError(
-                "time-varying shared capacity is not supported in Phase 6; "
-                "supply a constant capacity_kw"
-            )
+            if any(c < 0 for c in request.shared_resource.capacity_profile_kw):
+                raise CoordinationError("capacity profile entries must be >= 0")
+            # Length is checked in _merged_input once the horizon is known.
         if request.baseline_kw and any(b < 0 for b in request.baseline_kw):
             raise CoordinationError("baseline entries must be >= 0")
 
     # --- input construction ---------------------------------------------------
 
     def _merged_input(self, request: CoordinationRequest, signal: CarbonSignal) -> SchedulerInput:
+        profile = request.shared_resource.capacity_profile_kw
         try:
             scheduler_input, _warnings = self.normalizer.normalize(
-                request.jobs, signal, request.shared_resource.capacity_kw
+                request.jobs, signal, request.shared_resource.capacity_kw,
+                capacity_profile_kw=profile,
             )
         except Exception as exc:
             raise CoordinationError(str(exc)) from exc
@@ -289,6 +306,7 @@ class MultiUserCoordinator:
         preferred = self._preferred_starts(merged)
         capacity_w = merged.capacity_w
         target_w = int(capacity_w * request.weights.target_utilization)
+        target_profile = self._target_profile(request, merged)
         participant_of = {j.id: j.participant_id for j in merged.jobs}
         priorities = {p.id: p.priority_weight for p in request.participants}
         caps = {
@@ -302,6 +320,7 @@ class MultiUserCoordinator:
         engine = CoordinatedCPSATScheduler(
             preferred_starts=preferred,
             target_w=target_w,
+            target_profile_w=target_profile,
             congestion_weight=request.weights.congestion,
             inconvenience_weight=request.weights.inconvenience,
             fairness_mode=request.fairness_mode,
@@ -415,6 +434,7 @@ class MultiUserCoordinator:
         n = horizon.slot_count
         slot_minutes = horizon.slot_minutes
         target_w = int(merged.capacity_w * request.weights.target_utilization)
+        target_profile = self._target_profile(request, merged)
 
         agg_flex_w = [0] * n
         for placement in placements.values():
@@ -429,10 +449,15 @@ class MultiUserCoordinator:
         for s in range(n):
             flex_kw = agg_flex_w[s] / 1000.0
             total_kw = baseline_kw[s] + flex_kw
-            cap_kw = merged.capacity_w / 1000.0
+            cap_kw = merged.capacity_at(s) / 1000.0
             util = total_kw / cap_kw if cap_kw else 0.0
-            over = max(0.0, total_kw - target_w / 1000.0)
-            score = over / (target_w / 1000.0) if target_w else 0.0
+            tgt_kw = (
+                target_profile[s] / 1000.0
+                if target_profile is not None
+                else target_w / 1000.0
+            )
+            over = max(0.0, total_kw - tgt_kw)
+            score = over / tgt_kw if tgt_kw else 0.0
             if total_kw - cap_kw > 1e-9:
                 violations += 1
             ts = horizon.slot_start(s)
@@ -446,12 +471,23 @@ class MultiUserCoordinator:
             )
             congestion.append(
                 CongestionPoint(
-                    timestamp=ts, aggregate_load=total_kw, capacity_kw=cap_kw,
+                    timestamp=ts, aggregate_kw=total_kw, capacity_kw=cap_kw,
                     utilization=util, congestion_score=score,
                 )
             )
 
         # Per-job results + participant metrics, all from real accounting.
+        # ONE accounting pass per job: the per-job stats below are the same
+        # numbers the totals are summed from, so the two can never disagree.
+        stats_by_job: dict[str, dict] = {}
+        for job in merged.jobs:
+            placement = placements.get(job.participant_id)
+            if placement is not None:
+                stats_by_job[job.id] = self.accounting.job_accounting(
+                    merged, job.id, placement
+                )
+            else:
+                stats_by_job[job.id] = {"energy_kwh": 0.0, "co2_kg": 0.0}
         jobs_out: list[ParticipantJobResult] = []
         parts: dict[str, ParticipantMetrics] = {}
         total_delay_min = 0.0
@@ -461,7 +497,7 @@ class MultiUserCoordinator:
             placement = placements.get(pid)
             slots = placement.job_slots(job.id) if placement else {}
             active = sorted(s for s, p in slots.items() if p > 0)
-            stats = self.accounting.job_accounting(merged, job.id, placement) if placement else {"energy_kwh": 0.0, "co2_kg": 0.0}
+            stats = stats_by_job[job.id]
             if active:
                 start, end = horizon.slot_start(active[0]), horizon.slot_end(active[-1])
                 energy = stats["energy_kwh"]
@@ -495,17 +531,21 @@ class MultiUserCoordinator:
             m.inconvenience_score = round(m.delay_minutes / slot_minutes * MILLI / nj, 1)
             worst = max(worst, m.inconvenience_score)
 
-        total_co2 = sum(
-            self.accounting.job_accounting(merged, j.id, placements.get(j.participant_id))["co2_kg"]
-            if placements.get(j.participant_id) else 0.0
-            for j in merged.jobs
-        )
-        total_energy = sum(
-            self.accounting.job_accounting(merged, j.id, placements.get(j.participant_id))["energy_kwh"]
-            if placements.get(j.participant_id) else 0.0
-            for j in merged.jobs
-        )
+        total_co2 = sum(stats["co2_kg"] for stats in stats_by_job.values())
+        total_energy = sum(stats["energy_kwh"] for stats in stats_by_job.values())
         peak_kw = max((a.total_kw for a in aggregate), default=0.0)
+        warnings: list[str] = []
+        if violations:
+            # Capacity breaches are DATA, in both modes: the metric counts the
+            # slots and a warning says so. A solver that actually failed
+            # already returned INFEASIBLE further up; reclassifying a produced
+            # schedule as INTERNAL_ERROR here would conflate "the shared
+            # connection is over-subscribed" (a fact about the world) with "the
+            # optimizer broke" (a fact about the code).
+            warnings.append(
+                f"{mode.value} schedule exceeds shared capacity in "
+                f"{violations} slot(s)"
+            )
         result = CoordinationResult(
             status=status,
             coordination_mode=mode,
@@ -517,7 +557,7 @@ class MultiUserCoordinator:
                 total_energy_kwh=round(total_energy, 4),
                 total_co2_kg=round(total_co2, 4),
                 peak_kw=round(peak_kw, 3),
-                capacity_violations=violations if mode is CoordinationMode.INDEPENDENT else 0,
+                capacity_violations=violations,
                 total_delay_minutes=round(total_delay_min, 1),
                 worst_inconvenience=round(worst, 1),
                 participant_count=len(request.participants),
@@ -527,16 +567,13 @@ class MultiUserCoordinator:
             solver_status=solver_status,
             solve_time_ms=solve_ms,
             reason=reason,
+            warnings=warnings,
             signal_provenance={
                 "signal_type": merged.carbon.signal_type,
                 "source": merged.carbon.source,
                 "is_forecast": merged.carbon.is_forecast,
             },
         )
-        if mode is CoordinationMode.COORDINATED and violations:
-            # Belt and braces: the model forbids this, so report, don't hide.
-            result.status = "INTERNAL_ERROR"
-            result.reason = f"coordinated schedule violates shared capacity in {violations} slot(s)"
         return result
 
     def _job_reason(self, request, merged, job, active, pref, aggregate, target_w) -> str:

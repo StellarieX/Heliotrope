@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { updateProfile, type User } from "firebase/auth";
-import { addDoc, collection, doc, setDoc } from "firebase/firestore";
+import { addDoc, collection, doc, getDoc, setDoc } from "firebase/firestore";
 import { getDb } from "../../lib/firebase";
 import { claimUsername, validUsername } from "../../lib/username";
 import { jevRank, classifyJob, type JobInput } from "../../lib/prioritize";
@@ -64,7 +64,14 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
     try {
       const vName = name.trim();
       if (vName !== user.displayName) await updateProfile(user, { displayName: vName });
-      const claimed = await claimUsername(db, user.uid, username, null, {
+      let prev: string | null = null;
+      try {
+        const existing = await getDoc(doc(db, "users", user.uid));
+        if (existing.exists()) prev = (existing.data().username as string | undefined) ?? null;
+      } catch {
+        /* profile unreadable — claim without releasing a prev name */
+      }
+      const claimed = await claimUsername(db, user.uid, username, prev, {
         displayName: vName,
         email: user.email ?? null,
         photoURL: user.photoURL ?? null,

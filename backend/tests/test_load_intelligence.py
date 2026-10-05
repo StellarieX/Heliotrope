@@ -36,10 +36,30 @@ def test_default_provider_works_with_no_api_key(monkeypatch):
     assert provider.classify("EV").job_type is LoadType.DEFERRABLE_INTERRUPTIBLE
 
 
-def test_requesting_jev_still_returns_the_rules_based_provider(monkeypatch):
-    """Having a key is not the same as having a verified contract, so Phase 3
-    never routes to Jev — and never fails because it did not."""
+def test_requesting_jev_with_key_returns_jev_that_falls_back_per_call(monkeypatch):
+    """With a key, "jev" routes to the Jev provider; without network it falls
+    back per call, so the user still gets a rule-based-quality answer."""
+    import httpx
+
+    def boom(*args, **kwargs):
+        raise httpx.ConnectError("offline")
+
+    monkeypatch.setattr(httpx, "post", boom)
     monkeypatch.setattr("app.services.load_intelligence.config.JEV_API_KEY", "secret-key")
+    monkeypatch.setattr("app.services.load_intelligence.config.GEMINI_API_KEY", None)
+    monkeypatch.setattr(
+        "app.services.load_intelligence.config.LOAD_INTELLIGENCE_PROVIDER", "jev"
+    )
+    provider = get_load_intelligence()
+    assert isinstance(provider, JevLoadIntelligence)
+    assert provider.name == "jev"
+    assert provider.classify("EV").job_type is LoadType.DEFERRABLE_INTERRUPTIBLE
+
+
+def test_requesting_jev_without_key_returns_rules_based(monkeypatch):
+    """Unconfigured: the default is preserved, no exception, no network."""
+    monkeypatch.setattr("app.services.load_intelligence.config.JEV_API_KEY", None)
+    monkeypatch.setattr("app.services.load_intelligence.config.GEMINI_API_KEY", None)
     monkeypatch.setattr(
         "app.services.load_intelligence.config.LOAD_INTELLIGENCE_PROVIDER", "jev"
     )
@@ -63,28 +83,102 @@ def test_provider_satisfies_the_protocol_shape():
     assert spec.window_minutes() == pytest.approx(600.0)
 
 
-# --- Jev refuses rather than invents (§26) ---------------------------------
+# --- Jev falls back honestly, never fabricates (§26, M4) ---------------------
 
 
-def test_jev_without_a_key_is_unconfigured():
-    with pytest.raises(IntelligenceNotConfigured, match="no API key"):
-        JevLoadIntelligence(None).classify("EV")
+def test_jev_without_a_key_falls_back_to_rules():
+    """No key -> rule-based fallback with the fallback recorded, never an error."""
+    result = JevLoadIntelligence(None).classify("EV")
+    assert result.job_type is LoadType.DEFERRABLE_INTERRUPTIBLE
+    assert any(
+        a.field == "classifier" and "rule-based fallback" in a.detail
+        for a in result.assumptions
+    )
 
 
-def test_jev_with_a_key_is_not_integrated():
-    with pytest.raises(IntelligenceNotIntegrated, match="no verified API contract"):
-        JevLoadIntelligence("secret").classify("EV")
+def test_jev_with_http_error_falls_back_to_rules(monkeypatch):
+    """A dead upstream is a fallback, not a user-visible error (no network)."""
+    import httpx
+
+    def boom(*args, **kwargs):
+        raise httpx.ConnectError("offline")
+
+    monkeypatch.setattr(httpx, "post", boom)
+    result = JevLoadIntelligence("secret").classify("EV")
+    assert result.job_type is LoadType.DEFERRABLE_INTERRUPTIBLE
+    assert any(a.field == "classifier" for a in result.assumptions)
 
 
-def test_jev_never_reports_itself_available():
-    """Until a contract exists, availability is False with or without a key."""
+def test_jev_with_bad_json_falls_back_to_rules(monkeypatch):
+    import httpx
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"candidates": [{"content": {"parts": [{"text": "not json {"}]}}]}
+
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _FakeResponse())
+    result = JevLoadIntelligence("secret").classify("washing machine")
+    assert result.matched_rule == "washing_machine"
+
+
+def test_jev_with_unknown_enum_falls_back_to_rules(monkeypatch):
+    import httpx
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "candidates": [
+                    {"content": {"parts": [{"text": '{"job_type": "WARP", "category": "Unknown"}'}]}}
+                ]
+            }
+
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _FakeResponse())
+    result = JevLoadIntelligence("secret").classify("EV")
+    assert result.job_type is LoadType.DEFERRABLE_INTERRUPTIBLE
+
+
+def test_jev_success_uses_gemini_labels(monkeypatch):
+    import httpx
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {"text": '{"job_type": "DEFERRABLE_ATOMIC", "category": "Laundry"}'}
+                            ]
+                        }
+                    }
+                ]
+            }
+
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _FakeResponse())
+    result = JevLoadIntelligence("secret").classify("laundry")
+    assert result.matched_rule == "gemini"
+    assert result.job_type is LoadType.DEFERRABLE_ATOMIC
+    assert any(a.origin.value == "estimated" for a in result.assumptions)
+
+
+def test_jev_available_means_key_present():
+    """available() is True when a key is configured, False without one."""
     assert JevLoadIntelligence(None).available() is False
-    assert JevLoadIntelligence("secret").available() is False
+    assert JevLoadIntelligence("secret").available() is True
 
 
-def test_jev_normalize_also_refuses():
-    with pytest.raises(IntelligenceNotIntegrated):
-        JevLoadIntelligence("secret").normalize(LoadRequest(name="EV"))
+def test_jev_normalize_falls_back_offline():
+    spec = JevLoadIntelligence(None).normalize(LoadRequest(name="EV"))
+    assert spec.job_type is LoadType.DEFERRABLE_INTERRUPTIBLE
 
 
 def test_the_app_never_breaks_when_jev_is_absent():

@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { deleteUser, onAuthStateChanged, reauthenticateWithPopup, signOut, updateProfile, type User } from "firebase/auth";
-import { deleteDoc, doc, getDoc, runTransaction, serverTimestamp, setDoc } from "firebase/firestore";
+import { deleteDoc, doc, getDoc, getDocs, collection, runTransaction, serverTimestamp, setDoc } from "firebase/firestore";
 import { getDb, getFirebaseAuth, getGoogleProvider } from "../../lib/firebase";
 
 type Status = { kind: "idle" | "ok" | "err"; text: string };
@@ -139,6 +139,19 @@ export default function Account() {
     if (!auth?.currentUser) return;
     setDeleting(true);
     try {
+      // Delete Firestore docs while still authenticated — deleting the auth
+      // user first would leave these orphaned behind permission-denied rules.
+      const uid = auth.currentUser.uid;
+      if (db) {
+        try {
+          const js = await getDocs(collection(db, "users", uid, "jobs"));
+          await Promise.all(js.docs.map((d) => deleteDoc(d.ref).catch(() => {})));
+        } catch {
+          /* best-effort job cleanup */
+        }
+        if (currentUsername) await deleteDoc(doc(db, "usernames", currentUsername)).catch(() => {});
+        await deleteDoc(doc(db, "users", uid)).catch(() => {});
+      }
       try {
         await deleteUser(auth.currentUser);
       } catch (e: unknown) {
@@ -146,10 +159,6 @@ export default function Account() {
           await reauthenticateWithPopup(auth.currentUser, getGoogleProvider());
           await deleteUser(auth.currentUser);
         } else throw e;
-      }
-      if (db) {
-        if (currentUsername) await deleteDoc(doc(db, "usernames", currentUsername)).catch(() => {});
-        await deleteDoc(doc(db, "users", auth.currentUser?.uid ?? user!.uid)).catch(() => {});
       }
       router.push("/");
     } catch {

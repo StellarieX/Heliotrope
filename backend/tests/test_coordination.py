@@ -72,16 +72,30 @@ def test_duplicate_job_ids_rejected():
         )
 
 
-def test_time_varying_capacity_rejected_honestly():
+def test_time_varying_capacity_accepted_when_length_matches():
+    from app.domain.scheduling import SchedulerInput
+
     jobs = [ev_job(id="e1", participant_id="u1")]
-    with pytest.raises(CoordinationError, match="time-varying"):
-        MultiUserCoordinator()._validate_request(
-            CoordinationRequest(
-                participants=[Participant(id="u1")],
-                shared_resource=SharedResource(capacity_kw=10, capacity_profile_kw=[10.0] * 4),
-                jobs=jobs,
-            )
-        )
+    base = CoordinationRequest(
+        participants=[Participant(id="u1")],
+        shared_resource=SharedResource(capacity_kw=10),
+        jobs=jobs,
+    )
+    n = MultiUserCoordinator().build_merged(base, make_signal()).horizon.slot_count
+    req = base.model_copy(
+        update={"shared_resource": SharedResource(capacity_kw=10, capacity_profile_kw=[10.0] * n)}
+    )
+    # Validation alone cannot check the length (the horizon is not known yet);
+    # the merged input must accept a matching profile and reject a mismatch.
+    merged = MultiUserCoordinator().build_merged(req, make_signal())
+    assert isinstance(merged, SchedulerInput)
+    assert merged.capacity_profile_w == [10000] * n
+    assert all(merged.headroom_w(s) == 10000 - merged.baseline.at(s) for s in range(n))
+    bad = base.model_copy(
+        update={"shared_resource": SharedResource(capacity_kw=10, capacity_profile_kw=[10.0] * (n - 1))}
+    )
+    with pytest.raises(CoordinationError, match="capacity profile has"):
+        MultiUserCoordinator().build_merged(bad, make_signal())
 
 
 # --- two-user conflict -------------------------------------------------------

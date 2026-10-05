@@ -23,17 +23,23 @@ def get_carbon(
     resolution_minutes: int = 15,
     provider: str | None = None,
 ) -> JSONResponse:
+    # `provider` passes straight through to the service, which owns the
+    # provider allowlist and the configured default: an omitted provider uses
+    # CARBON_PROVIDER via `CarbonService.default()`, and an unknown name is a
+    # 422 from the service. The query object below validates only the window;
+    # it never decides which provider serves, so there is exactly one place
+    # where provider names are accepted or rejected.
     try:
         query = CarbonQuery(
             start=datetime.fromisoformat(start),
             end=datetime.fromisoformat(end),
             resolution_minutes=resolution_minutes,
-            provider=provider or "synthetic",
+            provider="synthetic",
         )
     except ValueError as exc:
         return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_request"})
     try:
-        service = CarbonService.default() if provider is None else CarbonService(provider_name=query.provider)
+        service = CarbonService.default() if provider is None else CarbonService(provider_name=provider)
         response = service.get_signal(query.start, query.end, query.resolution_minutes)
     except CarbonBadRequest as exc:
         return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_request"})

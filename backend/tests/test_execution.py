@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi.testclient import TestClient
 
+from app.domain.execution import RescheduleReason, ScheduleEvent, ScheduleEventType
 from app.main import app
+from app.services.execution_store import ExecutionStore
+from app.services.scheduler_service import SchedulerService
+from app.services.schedulers import SchedulerName
 
-from .fixtures import ev_job, geyser_job, washing_machine_job
+from .fixtures import ev_job, geyser_job, make_signal, washing_machine_job
 
 client = TestClient(app)
 DAY = "2026-10-05"
@@ -244,4 +250,176 @@ def test_end_to_end_mixed_scenario():
     # v1 preserved; every version carries solver truth.
     assert all(v["solver_status"] in ("OPTIMAL", "FEASIBLE", "UNKNOWN") for v in hist["versions"])
     assert starts["e1"] is not None
+
+
+def test_execution_store_durable_across_instances(tmp_path):
+    """A record written by one store instance is readable from SQLite by a
+    brand-new instance with an empty in-memory cache."""
+    service = SchedulerService()
+    jobs = [ev_job(energy_required_kwh=7.2), washing_machine_job()]
+    scheduler_input, _warnings = service.build_input(jobs, make_signal(), capacity_kw=20.0)
+    result = service.run(scheduler_input, SchedulerName.CPSAT, explain=False)
+    assert result.schedule, "fixture jobs must produce a real schedule"
+
+    db_path = str(tmp_path / "exec.db")
+    store = ExecutionStore(db_path=db_path)
+    record = store.create(scheduler_input, result, reason=RescheduleReason.MANUAL)
+    store.record_event(
+        record,
+        ScheduleEvent(
+            event_type=ScheduleEventType.JOB_STARTED,
+            timestamp=datetime(2026, 10, 5, 19, 0, tzinfo=timezone.utc),
+            job_id="ev-1",
+        ),
+    )
+    store.append_version(
+        record, result, RescheduleReason.CAPACITY_CHANGE, [], ["durability check"]
+    )
+    assert len(record.versions) == 2
+
+    # A brand-new instance at the same db file serves the record from SQLite.
+    reloaded_store = ExecutionStore(db_path=db_path)
+    loaded = reloaded_store.get(record.schedule_id)
+    assert loaded is not None
+    assert loaded.schedule_id == record.schedule_id
+    assert loaded.lifecycle == record.lifecycle
+    assert len(loaded.versions) == len(record.versions) == 2
+    assert set(loaded.execution) == set(record.execution)
+    for job_id, state in record.execution.items():
+        restored = loaded.execution[job_id]
+        assert restored.job_id == state.job_id
+        assert restored.status == state.status
+        assert restored.scheduled_start == state.scheduled_start
+        assert restored.scheduled_end == state.scheduled_end
+    assert [(e.event_type, e.job_id) for e in loaded.events] == [
+        (ScheduleEventType.JOB_STARTED, "ev-1")
+    ]
+    # Full round-trip: serialization lost nothing.
+    assert loaded == record
+
+
+def test_replan_preserves_completed_history():
+    from app.api.routes import execution as ex_routes
+
+    sid = plan(
+        [ev_job(id="e1", energy_required_kwh=3.6), ev_job(id="e2", energy_required_kwh=3.6)]
+    )
+    state = client.get(f"/api/v1/schedules/{sid}/state").json()
+    starts = {j["job_id"]: j["scheduled_start"] for j in state["jobs"]}
+    client.post(f"/api/v1/schedules/{sid}/events", json={
+        "event_type": "JOB_STARTED", "timestamp": starts["e1"], "job_id": "e1"})
+    client.post(f"/api/v1/schedules/{sid}/events", json={
+        "event_type": "JOB_COMPLETED", "timestamp": starts["e1"], "job_id": "e1"})
+    res = client.post(
+        f"/api/v1/schedules/{sid}/replan",
+        json={"now": f"{DAY}T19:00:00+00:00", "reason": "CAPACITY_CHANGE", "capacity_kw": 5.0},
+    )
+    assert res.status_code == 200
+    record = ex_routes.store.get(sid)
+    assert record is not None
+    assert "original_input" in record.context
+    assert "e1" in record.context.get("completed_job_ids", [])
+    assert sorted(j.id for j in record.scheduler_input.jobs) == ["e1", "e2"]
+
+
+def test_realized_co2_never_mixes_forecast():
+    sid = plan([ev_job(energy_required_kwh=7.2)])
+    res = client.post(
+        f"/api/v1/simulation/{sid}/advance",
+        json={
+            "to_time": f"{DAY}T22:00:00+00:00",
+            "script": [{"at": f"{DAY}T19:00:00+00:00", "do": "start", "job": "ev-1"}],
+            "carbon_actual": [],
+        },
+    )
+    assert res.status_code == 200
+    metrics = res.json()["metrics"]
+    # No actual observations: nothing scored, never backfilled from forecast.
+    assert metrics["realized_co2_kg"] is None
+    assert metrics["realized_co2_slots_scored"] == 0
+    assert metrics["realized_co2_slots_total"] > 0
+    assert metrics["realized_co2_coverage"] == 0.0
+
+
+def test_event_energy_side_channel_validated():
+    sid = plan([ev_job(energy_required_kwh=7.2)])
+    res = client.post(
+        f"/api/v1/schedules/{sid}/events",
+        json={"event_type": "JOB_STARTED", "timestamp": f"{DAY}T19:00:00+00:00",
+              "job_id": "ev-1", "payload": {"energy_delivered_kwh": -5}},
+    )
+    assert res.status_code == 422
+    res = client.post(
+        f"/api/v1/schedules/{sid}/events",
+        json={"event_type": "JOB_STARTED", "timestamp": f"{DAY}T19:00:00+00:00",
+              "job_id": "ev-1", "payload": {"delivered_slots": {"3": -100}}},
+    )
+    assert res.status_code == 422
+
+
+def test_override_move_empty_skips_replan():
+    sid = plan([washing_machine_job()])
+    before = len(client.get(f"/api/v1/schedules/{sid}/history").json()["versions"])
+    res = client.post(
+        f"/api/v1/schedules/{sid}/override", json={"job_id": "wm-1", "command": "MOVE"})
+    assert res.status_code == 200
+    assert res.json()["replanned"] is False
+    assert len(client.get(f"/api/v1/schedules/{sid}/history").json()["versions"]) == before
+
+
+def test_removed_completed_returns_invalid_transition():
+    sid = plan([washing_machine_job()])
+    state = client.get(f"/api/v1/schedules/{sid}/state").json()
+    start = state["jobs"][0]["scheduled_start"]
+    client.post(f"/api/v1/schedules/{sid}/events", json={
+        "event_type": "JOB_STARTED", "timestamp": start, "job_id": "wm-1"})
+    client.post(f"/api/v1/schedules/{sid}/events", json={
+        "event_type": "JOB_COMPLETED", "timestamp": start, "job_id": "wm-1"})
+    res = client.post(
+        f"/api/v1/schedules/{sid}/replan",
+        json={"now": f"{DAY}T20:00:00+00:00", "reason": "MANUAL",
+              "removed_job_ids": ["wm-1"]},
+    )
+    assert res.status_code == 422
+    assert res.json()["code"] == "invalid_transition"
+
+
+def test_simulation_advance_persists():
+    from app.api.routes import execution as ex_routes
+    from app.services.execution_store import ExecutionStore
+
+    sid = plan([washing_machine_job()])
+    res = client.post(
+        f"/api/v1/simulation/{sid}/advance",
+        json={"to_time": "2026-10-05T23:30:00+00:00", "script": []},
+    )
+    assert res.status_code == 200
+    reloaded = ExecutionStore(db_path=ex_routes.store._db_path).get(sid)
+    assert reloaded is not None
+    assert any(e.event_type == ScheduleEventType.CLOCK_ADVANCED for e in reloaded.events)
+
+
+def test_start_now_checks_contiguous_slots():
+    from app.api.routes import execution as ex_routes
+    from app.domain.execution import OverrideCommand
+    from app.services.execution_events import check_override
+    from app.services.receding import now_slot
+
+    sid = plan([washing_machine_job()])
+    record = ex_routes.store.get(sid)
+    assert record is not None
+    slot = now_slot(
+        record.scheduler_input.horizon,
+        __import__("datetime").datetime.fromisoformat(f"{DAY}T18:00:00+00:00"),
+    )
+    job = next(j for j in record.scheduler_input.jobs if j.id == "wm-1")
+    duration = job.duration_slots or 1
+    assert duration > 1
+
+    def gap(s: int) -> float:
+        return 20.0 if s == slot else 0.0
+
+    allowed, detail = check_override(record, "wm-1", OverrideCommand.START_NOW, slot, gap)
+    assert allowed is False
+    assert "slot" in detail
 

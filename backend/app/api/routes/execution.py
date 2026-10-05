@@ -6,6 +6,7 @@
   GET  /api/v1/schedules/{id}/history         immutable versions + diffs
   POST /api/v1/schedules/{id}/events          apply an event (policy may auto-replan)
   POST /api/v1/schedules/{id}/replan          manual/periodic replan over remainders
+  POST /api/v1/schedules/{id}/tick            time-driven clock advance + periodic auto-replan
   POST /api/v1/schedules/{id}/override         guarded user override
   POST /api/v1/simulation/advance             deterministic simulated execution
 
@@ -15,7 +16,7 @@ worth keeping; otherwise the current version stands and the response says so.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter
@@ -41,6 +42,7 @@ from ...services.carbon_service import CarbonBadRequest, CarbonUnavailable
 from ...services.coordinator import CoordinationError, MultiUserCoordinator
 from ...services.execution_events import apply_event, check_override, transition
 from ...services.execution_store import ExecutionStore, utcnow
+from ...services.meter_provider import InMemoryMeterProvider
 from ...services.receding import RecedingHorizon, RemainingInfeasible, now_slot
 from ...services.scheduler_normalizer import NormalizationError
 from ...services.scheduler_service import SchedulerService
@@ -53,6 +55,7 @@ store = ExecutionStore()
 service = SchedulerService()
 coordinator = MultiUserCoordinator()
 simulator = ExecutionSimulator()
+meters = InMemoryMeterProvider()
 
 
 # --- helpers --------------------------------------------------------------
@@ -116,6 +119,7 @@ def _state_payload(record: ScheduleRecord) -> dict:
                 "energy_delivered_kwh": s.energy_delivered_kwh,
                 "expected_energy_kwh": s.expected_energy_kwh,
                 "note": s.note,
+                "source": s.telemetry_source,
             }
             for s in record.execution.values()
         ],
@@ -238,29 +242,149 @@ def _maybe_auto_replan(record: ScheduleRecord, advised: bool) -> dict:
     return {"replanned": False}
 
 
+def _ensure_aware(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _last_replan_at(record: ScheduleRecord) -> datetime:
+    raw = record.context.get("last_replan_at")
+    if raw:
+        try:
+            return _ensure_aware(datetime.fromisoformat(str(raw)))
+        except ValueError:
+            pass
+    if record.versions:
+        return _ensure_aware(record.current_version().created_at)
+    return utcnow()
+
+
+def _periodic_due(record: ScheduleRecord, now: datetime) -> bool:
+    try:
+        cfg = ExecutionConfig(**record.context.get("execution", {}))
+    except Exception:
+        cfg = ExecutionConfig()
+    policy = cfg.policy
+    if policy not in (ReschedulePolicy.PERIODIC, ReschedulePolicy.HYBRID):
+        return False
+    last = _last_replan_at(record)
+    elapsed_s = (_ensure_aware(now) - last).total_seconds()
+    return elapsed_s >= cfg.reoptimization_interval_minutes * 60
+
+
+class TickBody(BaseModel):
+    now: Optional[datetime] = None
+
+
+@router.post("/schedules/{schedule_id}/tick")
+def post_tick(schedule_id: str, body: TickBody) -> JSONResponse:
+    """Time-driven clock advance (daemon contract: client calls every N min).
+
+    Records CLOCK_ADVANCED, refreshes lifecycle, and runs the same
+    _do_replan path with reason PERIODIC when the policy is
+    PERIODIC/HYBRID and the reoptimization interval has elapsed since
+    last_replan_at (or version created_at on first tick). No in-process
+    threads/cron; the caller owns the cadence.
+    """
+    record, error = _record_or_404(schedule_id)
+    if error is not None:
+        return error
+    assert record is not None
+    now = _ensure_aware(body.now or utcnow())
+    event = ScheduleEvent(
+        event_type=ScheduleEventType.CLOCK_ADVANCED, timestamp=now,
+    )
+    store.record_event(record, event)
+    try:
+        _advised, notes = apply_event(record, event)
+    except ValueError as exc:
+        return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_transition"})
+    _refresh_lifecycle(record, now)
+    due = _periodic_due(record, now)
+    out: dict = {
+        "ticked": True,
+        "now": now.isoformat(),
+        "periodic_due": due,
+        "replan_advised": due,
+        "notes": notes,
+    }
+    if due:
+        auto = _do_replan(record, now, RescheduleReason.PERIODIC, auto=True)
+        out.update(auto)
+        # Interval is measured between attempts (simulated time), so record
+        # it even when the candidate was gated and no version was appended.
+        record.context["last_replan_at"] = now.isoformat()
+    out["state"] = _state_payload(record)
+    store._persist(record)
+    return JSONResponse(status_code=200, content=out)
+
+
 @router.post("/schedules/{schedule_id}/events")
 def post_event(schedule_id: str, body: EventBody) -> JSONResponse:
     record, error = _record_or_404(schedule_id)
     if error is not None:
         return error
     assert record is not None
+    ts = body.timestamp or utcnow()
+    # Energy actuals ride on events so manual telemetry stays truthful.
+    # They go through the same meter validation as /telemetry so negative
+    # or absurd values are rejected instead of silently stored.
+    if body.job_id and isinstance(body.payload, dict):
+        state = record.execution.get(body.job_id)
+        if state is not None:
+            has_energy = "energy_delivered_kwh" in body.payload
+            delivered = body.payload.get("delivered_slots")
+            has_slots = isinstance(delivered, dict)
+            if has_energy or has_slots:
+                try:
+                    energy_val = (
+                        float(body.payload["energy_delivered_kwh"])
+                        if has_energy else None
+                    )
+                    slot_updates: dict[int, int] = {}
+                    if has_slots:
+                        assert isinstance(delivered, dict)
+                        for k, v in delivered.items():
+                            si = int(k)
+                            pw = int(v)
+                            if pw < 0:
+                                raise ValueError("delivered_slots power must be >= 0")
+                            if pw / 1000.0 > meters.MAX_POWER_KW:
+                                raise ValueError(
+                                    f"delivered_slots power {pw}W exceeds plausible maximum"
+                                )
+                            slot_updates[si] = pw
+                    if energy_val is not None or slot_updates:
+                        meters.push_reading(
+                            schedule_id, body.job_id, ts,
+                            energy_kwh=energy_val,
+                            power_kw=(
+                                max(slot_updates.values()) / 1000.0
+                                if slot_updates and energy_val is None else None
+                            ),
+                            source="EVENT",
+                        )
+                except (ValueError, TypeError) as exc:
+                    return JSONResponse(
+                        status_code=422,
+                        content={"detail": str(exc), "code": "invalid_request"},
+                    )
+                if has_energy:
+                    state.energy_delivered_kwh = float(
+                        body.payload["energy_delivered_kwh"]
+                    )
+                if has_slots:
+                    assert isinstance(delivered, dict)
+                    for k, v in delivered.items():
+                        state.delivered_slots[int(k)] = int(v)
     event = ScheduleEvent(
         event_type=body.event_type,
-        timestamp=body.timestamp or utcnow(),
+        timestamp=ts,
         participant_id=body.participant_id,
         job_id=body.job_id,
         payload=body.payload,
     )
-    # Energy actuals ride on events so manual telemetry stays truthful.
-    if body.job_id and isinstance(body.payload, dict):
-        state = record.execution.get(body.job_id)
-        if state is not None:
-            if "energy_delivered_kwh" in body.payload:
-                state.energy_delivered_kwh = float(body.payload["energy_delivered_kwh"])
-            delivered = body.payload.get("delivered_slots")
-            if isinstance(delivered, dict):
-                for k, v in delivered.items():
-                    state.delivered_slots[int(k)] = int(v)
     store.record_event(record, event)
     try:
         advised, notes = apply_event(record, event)
@@ -273,13 +397,120 @@ def post_event(schedule_id: str, body: EventBody) -> JSONResponse:
     return JSONResponse(status_code=200, content=out)
 
 
+# --- real telemetry ---------------------------------------------------------------
+
+
+class TelemetryBody(BaseModel):
+    job_id: str
+    timestamp: Optional[datetime] = None
+    energy_kwh: Optional[float] = Field(default=None, ge=0)
+    power_kw: Optional[float] = Field(default=None, ge=0)
+    source: str = "MEASURED"
+
+
+@router.post("/schedules/{schedule_id}/telemetry")
+def post_telemetry(schedule_id: str, body: TelemetryBody) -> JSONResponse:
+    """Ingest one validated meter reading (real hardware, not simulation).
+
+    Validates via InMemoryMeterProvider, folds the reading into execution
+    truth, and reuses the existing event path: JOB_STARTED (+JOB_COMPLETED
+    when cumulative energy meets the expected target), each carrying
+    energy_delivered_kwh with source MEASURED. No new state machine; the
+    job's provenance flips to MEASURED and shows up as `source` per job in
+    the state payload (SIMULATED otherwise).
+    """
+    record, error = _record_or_404(schedule_id)
+    if error is not None:
+        return error
+    assert record is not None
+    state = record.execution.get(body.job_id)
+    if state is None:
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"unknown job {body.job_id}", "code": "not_found"},
+        )
+    if body.energy_kwh is None and body.power_kw is None:
+        return JSONResponse(
+            status_code=422,
+            content={"detail": "at least one of energy_kwh or power_kw is required", "code": "invalid_request"},
+        )
+    ts = body.timestamp or utcnow()
+    try:
+        meters.push_reading(
+            schedule_id, body.job_id, ts,
+            energy_kwh=body.energy_kwh, power_kw=body.power_kw, source="MEASURED",
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_request"})
+    if body.energy_kwh is not None:
+        state.energy_delivered_kwh = float(body.energy_kwh)
+    state.telemetry_source = "MEASURED"
+    state.last_updated = ts
+    payload: dict = {
+        "energy_delivered_kwh": state.energy_delivered_kwh,
+        "source": "MEASURED",
+        "measured": True,
+    }
+    if body.power_kw is not None:
+        payload["power_kw"] = float(body.power_kw)
+    target = state.expected_energy_kwh
+    complete = target > 0 and state.energy_delivered_kwh + 1e-9 >= target
+    terminal = state.status in (JobStatus.COMPLETED, JobStatus.CANCELLED)
+    applied: list[str] = []
+    notes: list[str] = []
+    advised = False
+
+    def _emit(event_type: ScheduleEventType) -> tuple[bool, list[str]]:
+        event = ScheduleEvent(
+            event_type=event_type, timestamp=ts, job_id=body.job_id, payload=dict(payload),
+        )
+        store.record_event(record, event)
+        return apply_event(record, event)
+
+    try:
+        if terminal:
+            notes.append("reading recorded on terminal job; no transition emitted")
+        elif complete:
+            if state.status is not JobStatus.RUNNING:
+                # PENDING has no direct edge to COMPLETED; start first.
+                a, n = _emit(ScheduleEventType.JOB_STARTED)
+                applied.append(ScheduleEventType.JOB_STARTED.value)
+                advised, notes = a, notes + n
+            a, n = _emit(ScheduleEventType.JOB_COMPLETED)
+            applied.append(ScheduleEventType.JOB_COMPLETED.value)
+            advised, notes = advised or a, notes + n
+        else:
+            # Progress note: bring the job to RUNNING, or record a
+            # same-state measured heartbeat when already running.
+            a, n = _emit(ScheduleEventType.JOB_STARTED)
+            applied.append(ScheduleEventType.JOB_STARTED.value)
+            advised, notes = a, notes + n
+    except ValueError as exc:
+        return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_transition"})
+    _refresh_lifecycle(record, ts)
+    store._persist(record)
+    out: dict = {
+        "accepted": True,
+        "source": "MEASURED",
+        "event_types": applied,
+        "completed": complete,
+        "notes": notes,
+        "replan_advised": advised,
+        "state": _state_payload(record),
+    }
+    auto = _maybe_auto_replan(record, advised)
+    out.update(auto)
+    return JSONResponse(status_code=200, content=out)
+
+
 # --- replan -------------------------------------------------------------------------
-
-
 class ReplanBody(BaseModel):
     now: Optional[datetime] = None
     reason: RescheduleReason = RescheduleReason.MANUAL
     capacity_kw: Optional[float] = Field(default=None, gt=0)
+    #: optional per-slot capacity in kW; length must equal the horizon slot
+    #: count. Overrides the scalar per slot; the scalar remains the default.
+    capacity_profile_kw: Optional[list[float]] = None
     added_jobs: list[LoadSpec] = Field(default_factory=list)
     removed_job_ids: list[str] = Field(default_factory=list)
 
@@ -326,8 +557,29 @@ def _do_replan(record: ScheduleRecord, now: datetime, reason: RescheduleReason, 
         return {"replanned": False, "error": result.reason, "status": result.status.value}
     if not changes:
         return {"replanned": False, "notes": notes + notes2, "status": result.status.value}
+    # Archive the full pre-replan input once so completed-job history is never
+    # lost when the live input is narrowed to remaining work.
+    if "original_input" not in record.context:
+        try:
+            record.context["original_input"] = base_input.model_dump(mode="json")
+        except Exception:
+            pass
+    terminal = (JobStatus.COMPLETED, JobStatus.CANCELLED, JobStatus.FAILED)
+    done_ids = sorted(jid for jid, st in states.items() if st in terminal)
+    if done_ids:
+        record.context["completed_job_ids"] = sorted(
+            set(record.context.get("completed_job_ids", [])) | set(done_ids)
+        )
     version = store.append_version(record, result, reason, changes, notes + notes2)
-    record.scheduler_input = solve_input
+    # Keep the full horizon view: re-attach terminal job specs so the live
+    # input never shrinks to remaining-only. The solver only saw solve_input.
+    done_specs = [j for j in base_input.jobs if states.get(j.id) in terminal]
+    if done_specs:
+        remaining_ids = {j.id for j in solve_input.jobs}
+        merged_jobs = [*solve_input.jobs, *[j for j in done_specs if j.id not in remaining_ids]]
+        record.scheduler_input = solve_input.model_copy(update={"jobs": merged_jobs})
+    else:
+        record.scheduler_input = solve_input
     _refresh_lifecycle(record, now)
     return {
         "replanned": True,
@@ -356,12 +608,37 @@ def post_replan(schedule_id: str, body: ReplanBody) -> JSONResponse:
     assert record is not None and record.scheduler_input is not None
     now = body.now or utcnow()
     # Capacity change and job add/remove reshape the problem before solving.
-    if body.capacity_kw is not None:
+    # Scalar remains the default; a per-slot profile overrides it per slot.
+    if body.capacity_kw is not None or body.capacity_profile_kw is not None:
         from ...domain.scaling import to_power_w
 
-        record.scheduler_input = record.scheduler_input.model_copy(
-            update={"capacity_w": to_power_w(body.capacity_kw)}
-        )
+        n = record.scheduler_input.horizon.slot_count
+        update: dict = {}
+        if body.capacity_kw is not None:
+            update["capacity_w"] = to_power_w(body.capacity_kw)
+        if body.capacity_profile_kw is not None:
+            if len(body.capacity_profile_kw) != n:
+                return JSONResponse(status_code=422, content={
+                    "detail": (
+                        f"capacity profile has {len(body.capacity_profile_kw)} entries "
+                        f"but the horizon has {n} slots"
+                    ),
+                    "code": "invalid_request",
+                })
+            if any(c < 0 for c in body.capacity_profile_kw):
+                return JSONResponse(status_code=422, content={
+                    "detail": "capacity profile entries must be >= 0",
+                    "code": "invalid_request",
+                })
+            update["capacity_profile_w"] = [to_power_w(c) for c in body.capacity_profile_kw]
+        elif body.capacity_kw is not None:
+            # A scalar-only replan clears any previous profile so the new
+            # scalar actually takes effect instead of being overridden.
+            update["capacity_profile_w"] = None
+        try:
+            record.scheduler_input = record.scheduler_input.model_copy(update=update)
+        except ValueError as exc:
+            return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_request"})
     if body.removed_job_ids:
         record.scheduler_input = record.scheduler_input.model_copy(
             update={"jobs": [j for j in record.scheduler_input.jobs if j.id not in body.removed_job_ids]}
@@ -371,8 +648,11 @@ def post_replan(schedule_id: str, body: ReplanBody) -> JSONResponse:
             if state is not None:
                 try:
                     transition(state, JobStatus.CANCELLED, "removed by replan request")
-                except ValueError:
-                    pass
+                except ValueError as exc:
+                    return JSONResponse(
+                        status_code=422,
+                        content={"detail": str(exc), "code": "invalid_transition"},
+                    )
     if body.added_jobs:
         try:
             added, _ = _normalize_added(record, body.added_jobs)
@@ -449,8 +729,27 @@ def post_override(schedule_id: str, body: OverrideBody) -> JSONResponse:
                 transition(state, JobStatus.RUNNING, "user override")
             else:
                 transition(state, JobStatus.READY, "user override: start now")
-        except ValueError:
-            pass
+        except ValueError as exc:
+            return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_transition"})
+    # MOVE with no window change is a no-op: don't reshape or replan spuriously.
+    if body.command is OverrideCommand.MOVE and not body.new_release_at and not body.new_deadline_at:
+        store.record_event(
+            record,
+            ScheduleEvent(
+                event_type=ScheduleEventType.USER_OVERRIDE, timestamp=now,
+                job_id=body.job_id, payload={"command": body.command.value, "noop": True},
+            ),
+        )
+        return JSONResponse(
+            status_code=200,
+            content={
+                "accepted": True,
+                "replanned": False,
+                "note": "empty MOVE window: no change, replan skipped",
+                "explanation": explanation,
+                "state": _state_payload(record),
+            },
+        )
     # MOVE / START_NOW / RUN_ASAP reshape the window, then replan.
     if body.command in (OverrideCommand.MOVE, OverrideCommand.START_NOW, OverrideCommand.RUN_ASAP):
         horizon = record.scheduler_input.horizon
@@ -504,6 +803,7 @@ def simulation_advance(schedule_id: str, body: AdvanceBody) -> JSONResponse:
     trace = simulator.run(record, body.script, body.carbon_actual or None, body.to_time)
     _refresh_lifecycle(record, body.to_time)
     metrics = _execution_metrics(record)
+    store._persist(record)
     return JSONResponse(
         status_code=200,
         content={"simulated": True, "trace": trace, "state": _state_payload(record), "metrics": metrics},
@@ -518,22 +818,35 @@ def _execution_metrics(record: ScheduleRecord) -> dict:
         counts[s.status.value] = counts.get(s.status.value, 0) + 1
     planned_co2 = record.versions[0].carbon_estimate_kg if record.versions else None
     realized_co2 = None
+    slots_scored = 0
+    slots_total = 0
     if record.scheduler_input is not None and record.actual_carbon:
-        # Score actual draws against ACTUAL carbon, never against the forecast.
+        # Score actual draws against ACTUAL carbon only; slots without an
+        # actual observation are excluded, never filled from the forecast.
         horizon = record.scheduler_input.horizon
-        carbon = record.scheduler_input.carbon.gco2_per_kwh
         total = 0.0
         for s in record.execution.values():
             for slot, power in s.delivered_slots.items():
+                slots_total += 1
                 key = horizon.slot_start(slot).isoformat()
-                ci = record.actual_carbon.get(key, carbon[slot] if slot < len(carbon) else 0)
-                total += power * record.scheduler_input.horizon.slot_minutes * ci / 60_000_000
-        realized_co2 = round(total, 4)
+                ci = record.actual_carbon.get(key)
+                if ci is None:
+                    continue
+                slots_scored += 1
+                total += power * record.scheduler_input.horizon.slot_minutes * float(ci) / 60_000_000
+        if slots_scored:
+            realized_co2 = round(total, 4)
+    else:
+        if record.scheduler_input is not None:
+            slots_total = sum(len(s.delivered_slots) for s in record.execution.values())
     return {
         "planned_energy_kwh": round(planned_energy, 4),
         "actual_energy_kwh": actual_energy,
         "planned_co2_kg": planned_co2,
         "realized_co2_kg": realized_co2,
+        "realized_co2_slots_scored": slots_scored,
+        "realized_co2_slots_total": slots_total,
+        "realized_co2_coverage": (slots_scored / slots_total if slots_total else 0.0),
         "job_counts": counts,
         "versions": len(record.versions),
     }

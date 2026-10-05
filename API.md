@@ -1,0 +1,91 @@
+# Heliotrope API
+
+Base URL: `process.env.NEXT_PUBLIC_BACKEND_URL` (default `http://localhost:8000`). All paths below are prefixed with `/api/v1` except `GET /`. No auth, no token. Interactive docs at `GET /docs`.
+
+Error shape: `{detail: string, code: string}` where code is one of `invalid_scheduler`, `unknown_model`, `invalid_request`, `invalid_transition`, `override_rejected`, `provider_unavailable`, `not_found`. Validation failures (FastAPI request models) are 422 `invalid_request`. `INFEASIBLE` results are HTTP 200 with `status: "INFEASIBLE"`.
+
+| # | Method + Path | Request | Response | Errors |
+|---|---|---|---|---|
+| 1 | `GET /` | — | `{service, docs}` | — |
+| 2 | `GET /api/v1/health` | — | `{status: "ok", service, env}` | — |
+| 3 | `GET /api/v1/carbon?start&end&resolution_minutes&provider` | query: `start`, `end` (ISO-8601), `resolution_minutes` (5–60, default 15), `provider` (default `synthetic`) | `CarbonSignalResponse{start, end, resolution_minutes, signal_type: MARGINAL\|AVERAGE\|PROXY\|SYNTHETIC, source, points[{timestamp, carbon_intensity_gco2_per_kwh}], quality{complete, missing_points, interpolated_points, source, signal_type, is_forecast}}` | 422 `invalid_request`, 503 `provider_unavailable` |
+| 4 | `POST /api/v1/carbon/forecast` | `{start, end, resolution_minutes?, model: "seasonal"\|"persistence", lookback_days?, coverage?, history_days?}` (tz-aware ISO) | `{signal_type: "FORECAST", resolution_minutes, points[{timestamp, predicted_gco2_per_kwh, lower_gco2_per_kwh, upper_gco2_per_kwh}], provenance{model, generated_at, training_window_start/end, training_points, source_signal, source_signal_type, horizon_start/end, resolution_minutes, interval_nominal_coverage, uncertainty_method, configuration?}}` | 400 `unknown_model`, 422 `invalid_request` |
+| 5 | `POST /api/v1/carbon/forecast/evaluate` | `{forecast? (inline forecast object), start?, end?, resolution_minutes?, model?, lookback_days?, coverage?, actual: [{timestamp, gco2_per_kwh}]}` — inline `forecast` or `start`+`end` required | `{mae, rmse, coverage, interval_width, ...}` (evaluation metrics dict) | 422 `invalid_request` |
+| 6 | `POST /api/v1/carbon/forecast/backtest` | `{history? [{timestamp, gco2_per_kwh}], model?, horizon_hours? (≤168), step_hours? (≤168), resolution_minutes?, lookback_days?, coverage?, max_steps? (≤32), max_history_days? (≤60), variant?, compare_models?}` (defaults to deterministic SYNTHETIC history; bounded) | backtest result dict (per-step metrics + runtime; `compare_models: true` returns both baselines) | 400 `unknown_model`, 422 `invalid_request` |
+| 7 | `POST /api/v1/loads/classify` | `LoadRequest{name, power_kw?, max_power_kw?, duration_minutes?, energy_required_kwh?, min_chunk_minutes?, release_wall?, deadline_wall?, timezone?, job_type?}` | `{provider, classification{name, input, category, job_type, shiftable, confidence, ambiguous, reason, matched_rule, alternatives, required_fields, thermal_example, assumptions}, confidence, ambiguous, assumptions, normalized_load_spec: LoadSpec, feasibility: FeasibilityReport}` | 422 `invalid_request`, 503 `provider_unavailable` |
+| 8 | `POST /api/v1/loads/validate` | `LoadSpec` (+ optional `power_profile: number[]` validation aid) | `{feasible, checks_run, errors, warnings, semantics{load_type, shiftable, decision_variable, primary_requirement, constraints, notes}, explanation, summary, metric_inputs}` | 422 `invalid_request` |
+| 9 | `POST /api/v1/schedule` | `{jobs: LoadSpec[] (≥1), capacity_kw (>0), capacity_profile_kw?: number[] (per-slot kW, len == horizon slots; overrides scalar per slot), scheduler: "ASAP"\|"GREEDY"\|"CPSAT" (case-insensitive), objective?, horizon?, tariff?, solver_config?, carbon_provider?, carbon_start?, carbon_end?, carbon_resolution_minutes?, carbon?: {mode, forecast_model, forecast_mode: ACTUAL\|EXPECTED\|ROBUST, risk_weight, deadline_buffer_minutes, lookback_days, coverage, history_days, actual_signal?}, explain?}` | `SchedulerResult` + `warnings[]` + `forecast{mode, ...provenance}` + optional `realized{realized_co2_kg, forecast_expected_co2_kg, forecast_error_kg, ...}`; `status` FEASIBLE/OPTIMAL or INFEASIBLE (200) | 400 `invalid_scheduler`, 422 `invalid_request`, 503 `provider_unavailable` |
+| 10 | `POST /api/v1/schedule/compare` | same as #9 + `schedulers?: string[]` | `{results: {ASAP, GREEDY, CPSAT} SchedulerResult, warnings[]}` | same as #9 |
+| 11 | `POST /api/v1/coordination/schedule` | `CoordinationRequest{jobs: LoadSpec[] (with participant_id), capacity_kw, capacity_profile_kw?: number[] (per-slot kW, len == horizon slots; overrides scalar per slot), coordination_mode?, fairness_mode?, horizon?, carbon_provider?, carbon_start?, carbon_end?, carbon_resolution_minutes?, ...}` — mismatched profile length is 422 `invalid_request` | `CoordinationResult{status, coordination_mode, participants[{participant_id, inconvenience_score, delay_minutes, jobs_shifted, job_count, co2_kg}], jobs[{participant_id, job_id, name, scheduled_start/end, energy_kwh, power_kw, delay_minutes, carbon_kg, reason}], aggregate_profile[] (capacity_kw is per-slot when a profile is given), congestion_profile[], metrics{total_energy_kwh, total_co2_kg, peak_kw, capacity_violations, total_delay_minutes, worst_inconvenience, participant_count, job_count, solve_time_ms}, fairness_mode, solver_status, reason, signal_provenance}` | 422 `invalid_request`, 503 `provider_unavailable` |
+| 12 | `POST /api/v1/coordination/compare` | same as #11 | `{independent: CoordinationResult, coordinated: CoordinationResult}` | same as #11 |
+| 13 | `POST /api/v1/schedules/plan` | #9 shape + `execution?: {policy: MANUAL\|PERIODIC\|EVENT_DRIVEN\|HYBRID, horizon_minutes?, reoptimization_interval_minutes?, commitment_window_minutes?, min_shift_minutes?, change_penalty_weight?, improvement_threshold_percent?}` | `ExecutionState{schedule_id (12 hex), lifecycle, version: 1, solver_status, jobs[{job_id, participant_id, status, scheduled_start/end, energy_delivered_kwh, expected_energy_kwh, note}]}` + `warnings` | same as #9 |
+| 14 | `POST /api/v1/schedules/plan-coordinated` | #11 shape + `execution?` (as #13) | `ExecutionState` + `coordination: CoordinationResult`; INFEASIBLE building returns the coordination result (200) without creating a record | 422 `invalid_request`, 503 `provider_unavailable` |
+| 15 | `GET /api/v1/schedules/{id}/state` | path `schedule_id` | `ExecutionState` (live truth) | 404 `not_found` |
+| 16 | `GET /api/v1/schedules/{id}/history` | path `schedule_id` | `{schedule_id, lifecycle, versions[{version, created_at, reason, solver_status, carbon_estimate_kg, peak_kw, changed_jobs[{job_id, previous_start, new_start, previous_end, new_end, change_minutes, reason}]}]}` | 404 `not_found` |
+| 17 | `POST /api/v1/schedules/{id}/events` | `{event_type: CARBON_FORECAST_UPDATED\|JOB_ADDED\|JOB_REMOVED\|JOB_STARTED\|JOB_COMPLETED\|JOB_MISSED\|JOB_FAILED\|JOB_PAUSED\|JOB_RESUMED\|CAPACITY_CHANGED\|USER_OVERRIDE\|CLOCK_ADVANCED, timestamp?, job_id?, participant_id?, payload? (energy_delivered_kwh, delivered_slots)}` | `{state: ExecutionState, replan_advised, notes[], replanned? (auto-replan under EVENT_DRIVEN/HYBRID)}` | 404 `not_found`, 422 `invalid_transition` |
+| 18 | `POST /api/v1/schedules/{id}/replan` | `{now?, reason?, capacity_kw?, capacity_profile_kw?: number[] (per-slot kW, len == horizon slots; overrides scalar per slot; scalar-only clears a previous profile), added_jobs?: LoadSpec[], removed_job_ids?: string[]}` | `{replanned, version?, changes?, notes[], frozen_lifted?, status?, error?, state: ExecutionState}` | 404 `not_found`, 422 `invalid_request` |
+| 19 | `POST /api/v1/schedules/{id}/override` | `{job_id, command: START_NOW\|PAUSE\|CANCEL\|MOVE\|RUN_ASAP, new_release_at?, new_deadline_at?}` | `{accepted: true, explanation, replanned?, ..., state: ExecutionState}` (PAUSE/CANCEL short-circuit without replan) | 404 `not_found`, 422 `override_rejected` / `invalid_transition` |
+| 20 | `POST /api/v1/simulation/{id}/advance` | `{to_time, script?: [], carbon_actual?: []}` | `{simulated: true, trace, state: ExecutionState, metrics{planned_energy_kwh, actual_energy_kwh, planned_co2_kg, realized_co2_kg, job_counts, versions}}` | 404 `not_found` |
+| 21 | `POST /api/v1/schedules/{id}/tick` | `{now?}` (daemon calls every N min; no in-process cron) | `{ticked: true, now, periodic_due, replan_advised, replanned?, version?, changes?, notes[], state: ExecutionState}` — records `CLOCK_ADVANCED`, marks overdue starts `MISSED`, auto-replans with reason `PERIODIC` when policy is `PERIODIC`/`HYBRID` and `reoptimization_interval_minutes` elapsed since `last_replan_at` (else version `created_at`); `MANUAL` never auto-replans | 404 `not_found` |
+| 22 | `POST /api/v1/schedules/{id}/telemetry` | `{job_id, timestamp?, energy_kwh? (≥0), power_kw? (≥0), source?}` (at least one of `energy_kwh`/`power_kw`; real meter reading, not simulation) | `{accepted: true, source: "MEASURED", event_types[], completed, notes[], replan_advised, state: ExecutionState}` — emits `JOB_STARTED` (+`JOB_COMPLETED` when cumulative energy meets the expected target) via the existing event path; job `source` in state is `MEASURED`, `SIMULATED` otherwise | 404 `not_found`, 422 `invalid_request` / `invalid_transition` |
+
+## Examples
+
+Health:
+
+```bash
+curl http://localhost:8000/api/v1/health
+# {"status":"ok","service":"heliotrope-backend","env":"..."}
+```
+
+Carbon signal:
+
+```bash
+curl "http://localhost:8000/api/v1/carbon?start=2026-10-01T00:00:00%2B00:00&end=2026-10-02T00:00:00%2B00:00&resolution_minutes=15&provider=synthetic"
+```
+
+Carbon forecast:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/carbon/forecast \
+  -H 'Content-Type: application/json' \
+  -d '{"start":"2026-10-05T00:00:00+00:00","end":"2026-10-06T00:00:00+00:00","resolution_minutes":15,"model":"seasonal","lookback_days":14,"coverage":0.9,"history_days":14}'
+```
+
+Classify a load:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/loads/classify \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"run dishwasher tonight"}'
+# {"provider":"...","classification":{...},"normalized_load_spec":{...},"feasibility":{...}}
+```
+
+Plan (live schedule):
+
+```bash
+curl -X POST http://localhost:8000/api/v1/schedules/plan \
+  -H 'Content-Type: application/json' \
+  -d '{"jobs":[{...LoadSpec...}],"capacity_kw":5,"scheduler":"CPSAT","execution":{"policy":"HYBRID"}}'
+# {"schedule_id":"...","lifecycle":"SCHEDULED","version":1,"solver_status":"...","jobs":[...]}
+```
+
+State / history / events:
+
+```bash
+curl http://localhost:8000/api/v1/schedules/<id>/state
+curl http://localhost:8000/api/v1/schedules/<id>/history
+curl -X POST http://localhost:8000/api/v1/schedules/<id>/events \
+  -H 'Content-Type: application/json' \
+  -d '{"event_type":"JOB_STARTED","job_id":"dishwasher-1","timestamp":"2026-10-05T20:00:00+00:00"}'
+```
+
+Coordination:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/coordination/schedule \
+  -H 'Content-Type: application/json' \
+  -d '{"jobs":[{...LoadSpec with participant_id...}],"capacity_kw":10,"coordination_mode":"COORDINATED"}'
+```
+
+Notes: `LoadSpec` unknown fields are `null` (never 0). Forecast `coverage` is in (0,1). `resolution_minutes` 5–60. Frontend calls wrap these via `lib/api/client.ts` (`getHealth`, `getCarbonSignal`, `getCarbonForecast`, `classifyLoad`, `validateLoad`, `scheduleJobs`, `planSchedule`, `getScheduleState`, `getScheduleHistory`, `postScheduleEvent`, `replanSchedule`, `advanceSimulation`, `coordinateBuilding`, `compareCoordination`).

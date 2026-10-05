@@ -1,0 +1,9 @@
+# Pinned backend dependencies (tested 2026-10-05, Python 3.11.9).
+# Canonical install remains: python -m pip install -e "./backend[dev]"
+fastapi==0.141.1
+uvicorn==0.53.0
+pydantic==2.13.5
+httpx==0.28.1
+ortools==9.15.6755
+pytest==9.1.1
+hypothesis==6.100.0

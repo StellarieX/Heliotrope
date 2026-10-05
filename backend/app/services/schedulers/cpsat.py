@@ -449,7 +449,10 @@ class CPSATScheduler(BaseScheduler):
         comparable with the carbon term instead of dwarfing it.
         """
         mean_carbon = int(round(scheduler_input.carbon.mean()))
-        peak = model.NewIntVar(0, scheduler_input.capacity_w, "P_peak")
+        peak_cap = scheduler_input.capacity_w
+        if scheduler_input.capacity_profile_w:
+            peak_cap = max(peak_cap, max(scheduler_input.capacity_profile_w))
+        peak = model.NewIntVar(0, peak_cap, "P_peak")
         for slot in range(n):
             terms = []
             total = scheduler_input.baseline.at(slot)

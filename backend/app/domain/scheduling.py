@@ -24,7 +24,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .forecasting import ForecastMode
 from .horizon import SchedulingHorizon
@@ -288,6 +288,10 @@ class SchedulerInput(BaseModel):
     baseline: BaselineProfile
     carbon: CarbonProfile
     capacity_w: int = Field(gt=0)
+    #: optional per-slot connection capacity in watts. When present, length
+    #: must equal the horizon slot count and each entry overrides `capacity_w`
+    #: at that slot; `capacity_w` remains the default/fallback.
+    capacity_profile_w: Optional[list[int]] = None
     objective: ObjectiveWeights = Field(default_factory=ObjectiveWeights)
     tariff: Optional[TimeOfUseTariff] = None
     #: §16, §23: how the objective carbon numbers were derived
@@ -336,8 +340,30 @@ class SchedulerInput(BaseModel):
         return [j for j in self.jobs if j.job_type is not LoadType.FIXED]
 
     def headroom_w(self, slot: int) -> int:
-        """Power available to flexible loads at `slot` (§5)."""
-        return self.capacity_w - self.baseline.at(slot)
+        """Power available to flexible loads at `slot` (§5).
+
+        With a per-slot capacity profile the headroom is per-slot too:
+        `capacity_at(slot) - baseline.at(slot)`. Without a profile this is
+        exactly the old scalar computation.
+        """
+        return self.capacity_at(slot) - self.baseline.at(slot)
+
+    def capacity_at(self, slot: int) -> int:
+        """Connection capacity in watts at `slot` (profile override or scalar)."""
+        if self.capacity_profile_w is not None and 0 <= slot < len(self.capacity_profile_w):
+            return self.capacity_profile_w[slot]
+        return self.capacity_w
+
+    @model_validator(mode="after")
+    def _profile_length_matches_horizon(self) -> "SchedulerInput":
+        if self.capacity_profile_w is not None and len(self.capacity_profile_w) != self.horizon.slot_count:
+            raise ValueError(
+                f"capacity profile has {len(self.capacity_profile_w)} entries but the "
+                f"horizon has {self.horizon.slot_count} slots"
+            )
+        if self.capacity_profile_w is not None and any(c < 0 for c in self.capacity_profile_w):
+            raise ValueError("capacity profile entries must be >= 0")
+        return self
 
     def signal_provenance(self) -> dict:
         return {

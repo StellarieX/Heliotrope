@@ -60,11 +60,13 @@ class CoordinatedCPSATScheduler(CPSATScheduler):
         participant_of: dict[str, str] | None = None,
         priority_weight: dict[str, float] | None = None,
         max_inconvenience_millislots: dict[str, float] | None = None,
+        target_profile_w: list[int] | None = None,
         config=None,
     ) -> None:
         super().__init__(config=config)
         self.preferred_starts = preferred_starts
         self.target_w = target_w
+        self.target_profile_w = list(target_profile_w) if target_profile_w is not None else None
         self.congestion_weight = congestion_weight
         self.inconvenience_weight = inconvenience_weight
         self.fairness_mode = fairness_mode
@@ -106,10 +108,15 @@ class CoordinatedCPSATScheduler(CPSATScheduler):
 
     # -- hooks ---------------------------------------------------------------
 
+    def _target_at(self, slot: int) -> int:
+        """Per-slot congestion target: profile entry when given, else scalar."""
+        if self.target_profile_w is not None and 0 <= slot < len(self.target_profile_w):
+            return self.target_profile_w[slot]
+        return self.target_w
+
     def _extra_constraints(self, model, scheduler_input, ctx) -> None:
         n = ctx["n"]
         over = {}
-        cap = max(1, scheduler_input.capacity_w)
         for slot in range(n):
             terms = self._flex_load_terms(
                 scheduler_input,
@@ -119,9 +126,10 @@ class CoordinatedCPSATScheduler(CPSATScheduler):
                 ctx["pw_thermal"],
             )
             total = scheduler_input.baseline.at(slot) + (sum(terms) if terms else 0)
+            cap = max(1, scheduler_input.capacity_at(slot))
             var = model.NewIntVar(0, cap, f"over_{slot}")
             # over >= total - target AND over >= 0: minimization pins it exact.
-            model.Add(var >= total - self.target_w)
+            model.Add(var >= total - self._target_at(slot))
             over[slot] = var
         self._over_vars = over
 
@@ -156,7 +164,12 @@ class CoordinatedCPSATScheduler(CPSATScheduler):
         if self.congestion_weight > 0 and self._over_vars:
             # One watt over target for one slot costs what that watt-slot would
             # at mean carbon, divided by capacity so the weight is unit-free.
-            capacity = max(1, scheduler_input.capacity_w)
+            # With a time-varying profile the mean per-slot capacity keeps the
+            # same normalization instead of any single slot's value.
+            if scheduler_input.capacity_profile_w:
+                capacity = max(1, int(round(sum(scheduler_input.capacity_profile_w) / len(scheduler_input.capacity_profile_w))))
+            else:
+                capacity = max(1, scheduler_input.capacity_w)
             coef = max(
                 1,
                 to_objective_weight(self.congestion_weight)

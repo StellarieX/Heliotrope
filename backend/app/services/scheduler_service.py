@@ -73,12 +73,16 @@ class SchedulerService:
         forecast_config: Optional[ForecastConfig] = None,
         uncertainty_upper: Optional[list[int]] = None,
         forecast_provenance: Optional[dict] = None,
+        capacity_profile_kw: Optional[list[float]] = None,
     ) -> tuple[SchedulerInput, list[str]]:
         """Normalize jobs + a carbon signal into the one shared `SchedulerInput`.
 
         §38: `forecast_config` defaults to ACTUAL, so every existing caller — and
         every Phase 4 test — gets exactly the deterministic behaviour it had
         before. Forecast uncertainty only enters when a caller asks for it.
+
+        `capacity_profile_kw`, when given, overrides the scalar capacity slot by
+        slot; a length mismatch is a `NormalizationError` (a 422 at the route).
         """
         config = forecast_config or ForecastConfig()
         scheduler_input, report = self.normalizer.normalize(
@@ -93,6 +97,7 @@ class SchedulerService:
             uncertainty_upper=uncertainty_upper,
             forecast_provenance=forecast_provenance,
             deadline_buffer_minutes=config.deadline_buffer_minutes,
+            capacity_profile_kw=capacity_profile_kw,
         )
         return scheduler_input, report.warnings
 

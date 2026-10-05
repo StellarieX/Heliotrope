@@ -107,6 +107,10 @@ class JobExecutionState(BaseModel):
     delivered_slots: dict[int, int] = Field(default_factory=dict)  # slot -> power_w actually drawn
     last_updated: Optional[datetime] = None
     note: str = ""
+    #: Provenance of the energy numbers: "SIMULATED" (deterministic replay in
+    #: services/simulator.py) or "MEASURED" (real meter via telemetry push).
+    #: Defaults to SIMULATED so stored records without the field still read.
+    telemetry_source: str = "SIMULATED"
 
 
 class ScheduleEvent(BaseModel):

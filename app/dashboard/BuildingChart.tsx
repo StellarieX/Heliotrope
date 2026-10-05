@@ -8,15 +8,17 @@ import type { CoordinationAggregatePoint } from "../../lib/api/types";
 export default function BuildingChart({ points }: { points: CoordinationAggregatePoint[] }) {
   const W = 600;
   const H = 150;
+  const safePoints = useMemo(() => points ?? [], [points]);
   const maxY = useMemo(
-    () => Math.max(1, ...points.map((p) => Math.max(p.total_kw, p.capacity_kw))),
-    [points]
+    () => Math.max(1, ...safePoints.map((p) => Math.max(p.total_kw, p.capacity_kw))),
+    [safePoints]
   );
   const { cap, total, flex } = useMemo(() => {
-    const x = (i: number) => (i / Math.max(points.length - 1, 1)) * W;
+    if (safePoints.length === 0) return { cap: "", total: "", flex: "" };
+    const x = (i: number) => (i / Math.max(safePoints.length - 1, 1)) * W;
     const y = (v: number) => H - (v / maxY) * (H - 12) - 6;
     const line = (pick: (p: CoordinationAggregatePoint) => number) =>
-      points
+      safePoints
         .map((p, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)},${y(pick(p)).toFixed(1)}`)
         .join(" ");
     return {
@@ -24,8 +26,19 @@ export default function BuildingChart({ points }: { points: CoordinationAggregat
       total: line((p) => p.total_kw),
       flex: line((p) => p.flexible_kw),
     };
-  }, [points, maxY]);
-  const peak = useMemo(() => Math.max(0, ...points.map((p) => p.total_kw)), [points]);
+  }, [safePoints, maxY]);
+  const peak = useMemo(() => Math.max(0, ...safePoints.map((p) => p.total_kw)), [safePoints]);
+
+  if (safePoints.length === 0) {
+    return (
+      <div>
+        <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-500">
+          Building load · kW
+        </p>
+        <p className="mt-4 font-mono text-[12px] text-zinc-600">No building coordination profile computed yet.</p>
+      </div>
+    );
+  }
 
   return (
     <div>

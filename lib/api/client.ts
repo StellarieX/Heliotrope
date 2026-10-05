@@ -59,6 +59,67 @@ export async function getCarbonSignal(params: {
   return read<CarbonSignalResponse>(res);
 }
 
+export type ForecastMode = "ACTUAL" | "EXPECTED" | "ROBUST";
+
+export interface CarbonForecastPoint {
+  timestamp: string;
+  predicted_gco2_per_kwh: number;
+  lower_gco2_per_kwh: number;
+  upper_gco2_per_kwh: number;
+}
+
+export interface CarbonForecastResponse {
+  signal_type: "FORECAST";
+  resolution_minutes: number;
+  points: CarbonForecastPoint[];
+  provenance: {
+    model: string;
+    model_description?: string;
+    generated_at: string;
+    training_window_start: string;
+    training_window_end: string;
+    training_points: number;
+    source_signal: string;
+    source_signal_type: string;
+    horizon_start: string;
+    horizon_end: string;
+    resolution_minutes: number;
+    interval_nominal_coverage: number;
+    uncertainty_method: string;
+    configuration?: Record<string, unknown>;
+  };
+}
+
+export interface ForecastRequestParams {
+  start: string;
+  end: string;
+  resolution_minutes?: number;
+  model?: "seasonal" | "persistence" | string;
+  lookback_days?: number;
+  coverage?: number;
+  history_days?: number;
+}
+
+/** Phase 5: carbon forecast with empirical prediction interval and provenance. */
+export async function getCarbonForecast(
+  params: ForecastRequestParams
+): Promise<CarbonForecastResponse> {
+  const res = await fetch(`${BASE}/api/v1/carbon/forecast`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      start: params.start,
+      end: params.end,
+      resolution_minutes: params.resolution_minutes ?? 15,
+      model: params.model ?? "seasonal",
+      lookback_days: params.lookback_days ?? 14,
+      coverage: params.coverage ?? 0.9,
+      history_days: params.history_days ?? 14,
+    }),
+  });
+  return read<CarbonForecastResponse>(res);
+}
+
 /** Phase 3: free text -> classification + canonical LoadSpec + feasibility.
  *  Runs against the rules-first backend classifier, so it works offline and
  *  returns the same answer for the same input. */
@@ -138,6 +199,18 @@ export async function advanceSimulation(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+  });
+  return read<Record<string, unknown>>(res);
+}
+/** Phase 7: advance wall-clock time for a schedule (polling tick). */
+export async function tickSchedule(
+  scheduleId: string,
+  nowIso: string
+): Promise<Record<string, unknown>> {
+  const res = await fetch(`${BASE}/api/v1/schedules/${scheduleId}/tick`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ now: nowIso }),
   });
   return read<Record<string, unknown>>(res);
 }

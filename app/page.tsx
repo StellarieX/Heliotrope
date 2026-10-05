@@ -99,11 +99,10 @@ export default function Home() {
   useEffect(() => {
     if (!auth) return;
     return onAuthStateChanged(auth, (u) => {
+      setUser(u);
       if (u) {
         router.push("/dashboard");
-        return;
       }
-      setUser(u);
     });
   }, [auth, router]);
 

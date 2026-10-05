@@ -316,9 +316,6 @@ class RecedingHorizon:
         if not changes:
             return False
         max_shift = max(c.change_minutes for c in changes)
-        if max_shift < self.min_shift_minutes:
-            # Trivial movement is still worth it if the carbon gain is real.
-            pass
         before = future_carbon_cost(scheduler_input, previous, current_slot)
         after = future_carbon_cost(scheduler_input, current, current_slot)
         if before <= 0:

@@ -76,6 +76,10 @@ class CarbonForecastOptions(BaseModel):
 class ScheduleRequest(BaseModel):
     jobs: list[LoadSpec] = Field(min_length=1)
     capacity_kw: float = Field(gt=0)
+    #: optional per-slot connection capacity in kW. Overrides the scalar
+    #: `capacity_kw` slot by slot when given; the length must equal the
+    #: horizon slot count or normalization refuses it with a 422 (§5).
+    capacity_profile_kw: Optional[list[float]] = None
     #: requested engine. Case-insensitive; an unknown name is a 400 (§34)
     scheduler: str = "CPSAT"
     objective: ObjectiveWeights = Field(default_factory=ObjectiveWeights)
@@ -150,13 +154,28 @@ def _prepare(request: ScheduleRequest):
 
     forecast = None
     uncertainty_upper = None
+    grid_horizon = None
     if request.carbon is not None and request.carbon.mode.upper() == "FORECAST":
         try:
-            forecast = _forecast_for(request)
+            # The schedule is built on the canonical horizon grid, which may be
+            # finer (or offset) relative to the forecast grid. Uncertainty and
+            # the forecast signal are resampled onto that exact grid, so a
+            # resolution or alignment difference is interpolated within
+            # tolerance instead of rejected as a missing point.
+            grid_horizon = _schedule_horizon(request)
+            forecast = _forecast_for(request, end=grid_horizon.end)
             uncertainty_upper = forecast_service.uncertainty_over_horizon(
-                forecast, _horizon_start(request)
+                forecast,
+                grid_horizon.start,
+                resolution_minutes=grid_horizon.slot_minutes,
+                horizon_end=grid_horizon.end,
             )
-            signal = forecast_service.as_carbon_signal(forecast)
+            signal = forecast_service.signal_over_horizon(
+                forecast,
+                grid_horizon.start,
+                grid_horizon.end,
+                resolution_minutes=grid_horizon.slot_minutes,
+            )
         except (ForecastServiceError, ForecastError, ValueError) as exc:
             return None, JSONResponse(
                 status_code=422, content={"detail": str(exc), "code": "invalid_request"}
@@ -202,13 +221,14 @@ def _prepare(request: ScheduleRequest):
             signal,
             request.capacity_kw,
             objective=request.objective,
-            horizon=request.horizon,
+            horizon=grid_horizon if grid_horizon is not None else request.horizon,
             tariff=request.tariff,
             forecast_config=forecast_config,
             uncertainty_upper=uncertainty_upper,
             forecast_provenance=(
                 forecast.provenance.model_dump(mode="json") if forecast is not None else None
             ),
+            capacity_profile_kw=request.capacity_profile_kw,
         )
     except NormalizationError as exc:
         return None, JSONResponse(
@@ -227,6 +247,24 @@ def _horizon_start(request: ScheduleRequest) -> datetime:
     return min(moments)
 
 
+def _schedule_horizon(request: ScheduleRequest):
+    """The exact horizon `build_input` will normalize against.
+
+    When the caller pins one it is used verbatim; otherwise this replicates the
+    normalizer's derived horizon (`spanning` with the same arguments), so the
+    grid the forecast is resampled onto is byte-identical to the grid the
+    scheduler sees. Kept in sync with `SchedulerNormalizer._horizon_from`.
+    """
+    if request.horizon is not None:
+        return request.horizon
+    from ...domain.horizon import SchedulingHorizon
+
+    moments = [m for job in request.jobs for m in (job.release_at, job.deadline_at) if m]
+    if not moments:
+        raise NormalizationError("no job has a release or deadline to derive a signal range")
+    return SchedulingHorizon.spanning(moments, slot_minutes=15, pad_slots=1)
+
+
 def _horizon_end(request: ScheduleRequest) -> datetime:
     from datetime import timedelta
 
@@ -238,11 +276,18 @@ def _horizon_end(request: ScheduleRequest) -> datetime:
     return max(moments) + timedelta(minutes=request.carbon_resolution_minutes)
 
 
-def _forecast_for(request: ScheduleRequest):
+def _forecast_for(request: ScheduleRequest, end=None):
+    from ...utils.time import to_utc
+
     options = request.carbon
+    window_end = end if end is not None else _horizon_end(request)
+    # The forecast must cover the whole schedule horizon; the resampler refuses
+    # to invent values past the forecast, so the window is extended (never
+    # shrunk) to the horizon end up front.
+    window_end = max(to_utc(window_end), to_utc(_horizon_end(request)))
     return forecast_service.forecast(
         _horizon_start(request),
-        _horizon_end(request),
+        window_end,
         resolution_minutes=request.carbon_resolution_minutes,
         model=options.forecast_model,
         lookback_days=options.lookback_days,

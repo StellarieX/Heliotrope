@@ -118,16 +118,45 @@ def check_override(
         if state.status in (JobStatus.COMPLETED, JobStatus.CANCELLED):
             return False, f"{state.job_id} is already {state.status.value.lower()}"
         need_kw = 0.0
+        target_job = None
         if record.scheduler_input:
             for job in record.scheduler_input.jobs:
                 if job.id == job_id:
+                    target_job = job
                     need_kw = job.max_power_w / 1000.0
+                    break
         free_kw = headroom_fn(now_slot) if headroom_fn else float("inf")
         if need_kw > free_kw + 1e-9:
             return False, (
                 f"cannot start this load immediately: it needs {need_kw:.2f} kW "
                 f"but only {free_kw:.2f} kW of shared capacity is free right now"
             )
+        if target_job is not None and headroom_fn is not None:
+            from ..domain.loads import LoadType as _LT
+
+            duration = 1
+            if target_job.job_type is _LT.DEFERRABLE_ATOMIC:
+                duration = target_job.duration_slots or 1
+            elif target_job.job_type is _LT.DEFERRABLE_INTERRUPTIBLE:
+                duration = max(1, target_job.minimum_slots())
+            else:
+                duration = 1
+            # Atomic runs must fit contiguously from now; reject if the
+            # window is too short or any slot in the run lacks headroom.
+            if target_job.deadline_slot < now_slot + duration:
+                return False, (
+                    f"cannot start {state.job_id} now: needs {duration} contiguous "
+                    f"slot(s) but the deadline leaves only "
+                    f"{max(0, target_job.deadline_slot - now_slot)}"
+                )
+            for s in range(now_slot, now_slot + duration):
+                free_s = headroom_fn(s)
+                if need_kw > free_s + 1e-9:
+                    return False, (
+                        f"cannot start {state.job_id} now: slot {s} has only "
+                        f"{free_s:.2f} kW free but {need_kw:.2f} kW is needed "
+                        f"for the {duration}-slot run"
+                    )
         return True, "override accepted"
     if command is OverrideCommand.CANCEL:
         if state.status in (JobStatus.COMPLETED,):

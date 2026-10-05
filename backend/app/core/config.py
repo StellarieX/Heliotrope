@@ -25,8 +25,15 @@ CORS_ALLOW_ORIGINS = [
 CORS_ALLOW_LOCALHOST_IN_DEVELOPMENT = HELIOTROPE_ENV != "production"
 
 # Optional: never required to boot, never sent to the browser.
+# Precedence for the Gemini/Jev classifier key: GEMINI_API_KEY wins when set;
+# JEV_API_KEY is honored as a legacy alias so existing deployments keep working.
+# Resolve via `GEMINI_API_KEY or JEV_API_KEY` at the use site (see
+# services/load_intelligence.py) rather than baking the fallback in here, so
+# tests and callers can distinguish "new key set" from "legacy alias set".
 JEV_API_KEY = os.environ.get("JEV_API_KEY")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 ELECTRICITY_MAPS_API_KEY = os.environ.get("ELECTRICITY_MAPS_API_KEY")
+ELECTRICITY_MAPS_ZONE = _get("ELECTRICITY_MAPS_ZONE", "US-CAL-CISO")
 
 # Carbon Intelligence (Phase 2)
 CARBON_PROVIDER = _get("CARBON_PROVIDER", "synthetic")

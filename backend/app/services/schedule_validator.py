@@ -105,12 +105,13 @@ class ScheduleValidator:
         for slot in range(n):
             flexible = flexible_by_slot[slot]
             total = flexible + scheduler_input.baseline.at(slot)
-            if total > scheduler_input.capacity_w:
+            cap = scheduler_input.capacity_at(slot)
+            if total > cap:
                 result.add(
                     f"capacity: slot {slot} draws {total / 1000:.3f} kW "
                     f"({flexible / 1000:.3f} kW flexible + "
                     f"{scheduler_input.baseline.at(slot) / 1000:.3f} kW baseline) but the "
-                    f"connection is limited to {scheduler_input.capacity_w / 1000:.3f} kW"
+                    f"connection is limited to {cap / 1000:.3f} kW"
                 )
 
     # --- per job type -------------------------------------------------------
