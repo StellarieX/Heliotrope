@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.3.0 — Scheduler: honest optimality, fast solves, warm-started replans
+
+- **Review and fix of the warm-start proposal** (CP-SAT hints). As submitted it was inert (nothing passed hints), claimed to hint "all" variables but skipped the minimum-chunk starts, could emit a self-contradictory hint, and would have persisted a copy of the previous schedule inside every stored problem. Measured on a household with a water heater, warm-starting did not change solve time or the schedule, because the bottleneck is proving optimality, not finding a schedule.
+- **Now:** hints are wired into replans (`receding.hints_from_previous`), keyed by timestamp, advisory only (proved by tests: a terrible or impossible hint cannot change the optimum or feasibility), excluded from serialization, with `repair_hint` so a hint that no longer fits after a horizon shift is repaired instead of discarded.
+- **Honest optimality.** CP-SAT reports OPTIMAL even when it merely stops at a gap tolerance. A result is now `OPTIMAL` only when proved; otherwise `FEASIBLE` with the real `solver.relative_gap` and `optimality_gap` (previously `None`).
+- **Fast solves.** The same household was within 0.0015% of the proven bound after 2 seconds but ran the full 12. `SOLVER_RELATIVE_GAP` (production: 0.0001) returns a schedule within 0.01% of optimal in 0.17s, about 70x faster, for 0.0001 kg of CO₂. Library default stays strict (0).
+- `backend/bench_solver.py` reproduces the measurements.
+
+
 ## v0.2.1 — Jev, done properly
 
 - **Correction.** v0.2.0 treated Jev as a Gemini wrapper. Jev is TypeSafe AI's System One model, a different provider with a different API. v0.2.0's code would have sent a `JEV_API_KEY` to Google. That Gemini code path is removed entirely; the Jev key can only reach `api.typesafe.ai`.

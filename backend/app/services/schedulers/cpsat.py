@@ -52,6 +52,10 @@ _STATUS_MAP = {
 }
 
 
+#: a relative gap at or below this counts as "proved optimal" (floating-point noise)
+_PROVEN_GAP = 1e-9
+
+
 class CPSATScheduler(BaseScheduler):
     """Exact optimization over the canonical Phase 3 model."""
 
@@ -145,12 +149,24 @@ class CPSATScheduler(BaseScheduler):
         model.Minimize(sum(terms))
         self._last_model = model
 
+        # --- warm start (advisory; see `_apply_hints`) -----------------------
+        hinted = self._apply_hints(
+            model, scheduler_input, run_atomic, start_atomic,
+            pw_interruptible, on_interruptible, pw_thermal,
+        )
+
         # --- solve (§21, §22) ------------------------------------------------
         solver = cp_model.CpSolver()
         solver.parameters.max_time_in_seconds = self.config.time_limit_seconds
         solver.parameters.num_workers = self.config.num_workers
         solver.parameters.random_seed = self.config.random_seed
         solver.parameters.relative_gap_limit = self.config.relative_gap_limit
+        if hinted:
+            # After a rolling-horizon shift part of the old schedule no longer fits
+            # (its early slots are in the past). Let the solver repair the hint
+            # instead of discarding it.
+            solver.parameters.repair_hint = True
+            solver.parameters.hint_conflict_limit = 50
         status_code = solver.Solve(model)
 
         status = _STATUS_MAP.get(status_code, SolverStatus.UNKNOWN)
@@ -185,6 +201,11 @@ class CPSATScheduler(BaseScheduler):
                 status=result_status,
             )
 
+        # CP-SAT also answers OPTIMAL when it stops at `relative_gap_limit`. This engine
+        # only calls a schedule OPTIMAL when optimality was PROVED: a result that stopped
+        # inside the tolerance is FEASIBLE, with the real gap reported on the result.
+        if status is SolverStatus.OPTIMAL and self._relative_gap(solver) > _PROVEN_GAP:
+            status = SolverStatus.FEASIBLE
         self._status = status
         return self._extract(scheduler_input, run_atomic, pw_interruptible, pw_thermal)
 
@@ -216,6 +237,95 @@ class CPSATScheduler(BaseScheduler):
     def _extra_terms(self, model, scheduler_input, ctx) -> list:
         """Phase 6 hook. Single-user path: no extra objective terms."""
         return []
+
+    def _apply_hints(
+        self,
+        model,
+        scheduler_input,
+        run_atomic,
+        start_atomic,
+        pw_interruptible,
+        on_interruptible,
+        pw_thermal,
+    ) -> int:
+        """Warm-start CP-SAT from an earlier schedule. Returns how many variables were hinted.
+
+        Hints are ADVISORY. They add no constraint, so they cannot change which
+        schedules are feasible or which one is optimal; they only tell the search where
+        to start. A hint that no longer fits (the usual case after a rolling-horizon
+        shift) is repaired by the solver (`repair_hint`), never trusted.
+
+        Hints are keyed by TIMESTAMP, not slot index, and mapped onto the current
+        horizon here, so they survive the horizon moving. Placements that now fall
+        outside the horizon, and jobs that are not in this problem, are ignored.
+
+        A job is hinted only if the hint tells us something about it: a hint of "no
+        start at all" for an atomic job would contradict the model's own "exactly one
+        start", so such a job is skipped rather than given a self-contradictory hint.
+        """
+        hints = scheduler_input.hints
+        if not hints:
+            return 0
+        horizon = scheduler_input.horizon
+        hinted = 0
+
+        for job in scheduler_input.jobs:
+            history = hints.get(job.id)
+            if not history:
+                continue
+            power_by_slot: dict[int, int] = {}
+            for timestamp, power in history:
+                slot = horizon.index_of(timestamp)
+                if 0 <= slot < horizon.slot_count:
+                    power_by_slot[slot] = int(power)
+
+            window = range(job.release_slot, job.deadline_slot)
+            active = [t for t in window if power_by_slot.get(t, 0) > 0]
+
+            if job.job_type is LoadType.DEFERRABLE_ATOMIC:
+                if not active:
+                    continue
+                first = active[0]
+                for t, var in start_atomic.get(job.id, {}).items():
+                    model.AddHint(var, 1 if t == first else 0)
+                    hinted += 1
+                for t, var in run_atomic.get(job.id, {}).items():
+                    model.AddHint(var, 1 if power_by_slot.get(t, 0) > 0 else 0)
+                    hinted += 1
+
+            elif job.job_type is LoadType.DEFERRABLE_INTERRUPTIBLE:
+                if not active:
+                    continue
+                for t, var in on_interruptible.get(job.id, {}).items():
+                    model.AddHint(var, 1 if power_by_slot.get(t, 0) > 0 else 0)
+                    hinted += 1
+                for t, var in pw_interruptible.get(job.id, {}).items():
+                    model.AddHint(var, min(power_by_slot.get(t, 0), job.max_power_w))
+                    hinted += 1
+                # Minimum-chunk start flags: a start is "on now, off just before".
+                for t, var in start_atomic.get(job.id, {}).items():
+                    now_on = power_by_slot.get(t, 0) > 0
+                    was_on = power_by_slot.get(t - 1, 0) > 0
+                    model.AddHint(var, 1 if now_on and not was_on else 0)
+                    hinted += 1
+
+            elif job.job_type is LoadType.THERMAL:
+                if not active:
+                    continue
+                for t, var in pw_thermal.get(job.id, {}).items():
+                    model.AddHint(var, power_by_slot.get(t, 0))
+                    hinted += 1
+
+        return hinted
+
+    @staticmethod
+    def _relative_gap(solver) -> float:
+        """(objective - best bound) / |objective|; 0 when the bound is tight."""
+        objective = solver.ObjectiveValue()
+        bound = solver.BestObjectiveBound()
+        if objective == 0:
+            return 0.0 if bound == 0 else float("inf")
+        return max(0.0, (objective - bound) / abs(objective))
 
     def _model_atomic(self, model, job, run_atomic, start_atomic) -> None:
         """§10: exactly one binary start, then a contiguous run.
@@ -587,11 +697,8 @@ class CPSATScheduler(BaseScheduler):
                 solve_time_ms=result.metrics.solve_time_ms,
                 objective_value=round(solver.ObjectiveValue(), 6),
                 best_bound=round(solver.BestObjectiveBound(), 6),
-                optimality_gap=(
-                    round(solver.ObjectiveValue() - solver.BestObjectiveBound(), 6)
-                    if status is SolverStatus.OPTIMAL
-                    else None
-                ),
+                optimality_gap=round(max(0.0, solver.ObjectiveValue() - solver.BestObjectiveBound()), 6),
+                relative_gap=round(self._relative_gap(solver), 9),
                 num_workers=self.config.num_workers,
                 random_seed=self.config.random_seed,
                 time_limit_seconds=self.config.time_limit_seconds,

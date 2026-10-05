@@ -105,4 +105,12 @@ JEV_BASE_URL = _get("JEV_BASE_URL", "https://api.typesafe.ai").rstrip("/")
 # without it anyone could burn the key's quota; over the limit the built-in rules
 # answer instead (and say so).
 JEV_MAX_CALLS_PER_MIN = _get_int("JEV_MAX_CALLS_PER_MIN", "120")
+# Scheduling. 0 (the default) means the solver works until it PROVES optimality,
+# which is what tests and the library want. Interactive deployments can allow a tiny
+# tolerance, for example 0.0001 (0.01%): a schedule within 0.01% of the proven
+# optimum arrives in a fraction of a second instead of after the full time limit
+# (measured: 0.17s versus 12s on a household with a water heater). A schedule
+# that stops inside the tolerance is reported FEASIBLE with its real gap, never
+# OPTIMAL. A request that sets `solver_config.relative_gap_limit` itself wins.
+SOLVER_RELATIVE_GAP = _get_float("SOLVER_RELATIVE_GAP", "0")
 DEFAULT_LOAD_TIMEZONE = _get("DEFAULT_LOAD_TIMEZONE", "UTC")

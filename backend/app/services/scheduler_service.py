@@ -24,6 +24,7 @@ from ..domain.carbon import CarbonSignal
 from ..domain.forecasting import ForecastConfig
 from ..domain.horizon import SchedulingHorizon
 from ..domain.loads import LoadSpec, LoadType
+from ..core import config as app_config
 from ..domain.scheduling import (
     ObjectiveWeights,
     ReasonCode,
@@ -53,6 +54,18 @@ def _scoped_config(engine, config: Optional[SchedulerConfig]) -> Iterator[None]:
         engine.config = previous
 
 
+def with_default_gap(config: Optional[SchedulerConfig]) -> Optional[SchedulerConfig]:
+    """Apply the deployment's gap tolerance (SOLVER_RELATIVE_GAP) unless the caller chose one."""
+    gap = app_config.SOLVER_RELATIVE_GAP
+    if gap <= 0:
+        return config
+    if config is None:
+        return SchedulerConfig(relative_gap_limit=gap)
+    if "relative_gap_limit" in config.model_fields_set:
+        return config
+    return config.model_copy(update={"relative_gap_limit": gap})
+
+
 class SchedulerService:
     """One entry point for scheduling, comparison and explanation."""
 
@@ -74,6 +87,7 @@ class SchedulerService:
         uncertainty_upper: Optional[list[int]] = None,
         forecast_provenance: Optional[dict] = None,
         capacity_profile_kw: Optional[list[float]] = None,
+        hints: Optional[dict[str, list[tuple[datetime, int]]]] = None,
     ) -> tuple[SchedulerInput, list[str]]:
         """Normalize jobs + a carbon signal into the one shared `SchedulerInput`.
 
@@ -98,6 +112,7 @@ class SchedulerService:
             forecast_provenance=forecast_provenance,
             deadline_buffer_minutes=config.deadline_buffer_minutes,
             capacity_profile_kw=capacity_profile_kw,
+            hints=hints,
         )
         return scheduler_input, report.warnings
 
@@ -112,6 +127,7 @@ class SchedulerService:
     ) -> SchedulerResult:
         """Run one scheduler and, optionally, attach counterfactual explanations."""
         engine = SCHEDULERS[scheduler]
+        config = with_default_gap(config)
         # `SCHEDULERS` holds process-wide singletons, and the engines read
         # `self.config` deep inside the shared template. Assigning to it without
         # restoring would let one caller's `time_limit_seconds` leak into every
@@ -123,6 +139,17 @@ class SchedulerService:
         if explain:
             self.attach_explanations(scheduler_input, result)
         return result
+
+    def extract_hints_from_result(self, result: SchedulerResult) -> dict[str, list[tuple[datetime, int]]]:
+        """Solver hints from a finished schedule, for warm-starting the next run.
+
+        Keyed by timestamp rather than slot index so the hints still mean the same
+        thing when the horizon has moved (rolling-horizon replanning).
+        """
+        return {
+            scheduled.job_id: [(a.timestamp, a.power_w) for a in scheduled.allocations]
+            for scheduled in result.schedule
+        }
 
     # --- comparison (§24) ---------------------------------------------------
 

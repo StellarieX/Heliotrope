@@ -137,6 +137,30 @@ def remaining_job(
     return job.model_copy(update=patch)  # FIXED passes through (baseline source)
 
 
+def hints_from_previous(
+    scheduler_input: SchedulerInput,
+    previous_slots: dict[str, dict[int, int]],
+    job_ids,
+    from_slot: int,
+) -> dict[str, list[tuple[datetime, int]]]:
+    """Warm-start hints for a replan: where each job was placed in the last version.
+
+    Only placements from `from_slot` on are kept (the past is already done), and they
+    are keyed by timestamp so they stay meaningful if the next horizon has moved.
+    """
+    horizon = scheduler_input.horizon
+    hints: dict[str, list[tuple[datetime, int]]] = {}
+    for job_id in job_ids:
+        placed = [
+            (horizon.slot_start(slot), power)
+            for slot, power in sorted(previous_slots.get(job_id, {}).items())
+            if power > 0 and slot >= from_slot and 0 <= slot < horizon.slot_count
+        ]
+        if placed:
+            hints[job_id] = placed
+    return hints
+
+
 def freeze_commitment(
     scheduler_input: SchedulerInput,
     placement_slots: dict[str, dict[int, int]],
@@ -281,7 +305,10 @@ class RecedingHorizon:
             solve_input, previous_slots, current_slot, self.commitment_slots
         )
         frozen_lifted = False
-        attempt = solve_input.model_copy(update={"jobs": kept})
+        # The last schedule is the best guess for the next one: hand it to the solver
+        # as an advisory warm start (it never constrains the answer).
+        hints = hints_from_previous(solve_input, previous_slots, [j.id for j in kept], current_slot)
+        attempt = solve_input.model_copy(update={"jobs": kept, "hints": hints or None})
         if frozen_add and any(frozen_add):
             base = list(solve_input.baseline.power_w)
             attempt = attempt.model_copy(
@@ -295,7 +322,7 @@ class RecedingHorizon:
             # The freeze manufactured the infeasibility; lift it and say so.
             notes.append("commitment freeze lifted: it made the remainder infeasible")
             frozen_lifted = True
-            result = self.solve_fn(solve_input)
+            result = self.solve_fn(solve_input.model_copy(update={"hints": hints or None}))
 
         if result.status not in (ScheduleStatus.FEASIBLE, ScheduleStatus.OPTIMAL):
             return result, [], notes, frozen_lifted

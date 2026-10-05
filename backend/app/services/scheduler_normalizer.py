@@ -79,6 +79,7 @@ class SchedulerNormalizer:
         uncertainty_upper: Optional[list[int]] = None,
         forecast_provenance: Optional[dict] = None,
         capacity_profile_kw: Optional[list[float]] = None,
+        hints: Optional[dict[str, list[tuple[datetime, int]]]] = None,
     ) -> tuple[SchedulerInput, NormalizationReport]:
         report = NormalizationReport()
         if not specs:
@@ -207,6 +208,7 @@ class SchedulerNormalizer:
             risk_weight=risk_weight,
             uncertainty=uncertainty,
             forecast_provenance=forecast_provenance,
+            hints=hints,
         )
         return scheduler_input, report
 

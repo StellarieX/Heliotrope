@@ -301,6 +301,10 @@ class SchedulerInput(BaseModel):
     uncertainty: Optional[UncertaintyProfile] = None
     #: the forecast these objective numbers came from, for explanations (§34)
     forecast_provenance: Optional[dict] = None
+    #: optional solver hints for warm-starting: job_id -> [(timestamp, power_w)].
+    #: Advisory only (they add no constraint) and excluded from serialization, so a
+    #: stored schedule never carries a copy of the previous schedule inside it.
+    hints: Optional[dict[str, list[tuple[datetime, int]]]] = Field(default=None, exclude=True, repr=False)
 
     def objective_carbon(self) -> "CarbonProfile":
         """The per-slot gCO2/kWh a scheduler minimizes against (§15, §16).
@@ -487,7 +491,10 @@ class SolverInfo(BaseModel):
     solve_time_ms: Optional[int] = None
     objective_value: Optional[float] = None
     best_bound: Optional[float] = None
+    #: objective - best bound, in objective units (0 when proven optimal)
     optimality_gap: Optional[float] = None
+    #: (objective - best bound) / objective: how far from proven optimal this schedule can be
+    relative_gap: Optional[float] = None
     num_workers: Optional[int] = None
     random_seed: Optional[int] = None
     time_limit_seconds: Optional[float] = None

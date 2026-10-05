@@ -30,6 +30,12 @@ services:
       # back to the built-in rules if Jev is unreachable.
       - key: LOAD_INTELLIGENCE_PROVIDER
         value: auto
+      # Solve to within 0.01% of the proven optimum instead of chasing the last
+      # fraction for the full time limit (0.17s vs 12s on a household with a water
+      # heater). Results that stop inside the tolerance are reported FEASIBLE with
+      # their real gap, never OPTIMAL. Set to 0 to always prove optimality.
+      - key: SOLVER_RELATIVE_GAP
+        value: "0.0001"
       # Your TypeSafe / Jev API key (the one from console.typesafe.ai/keys). It is only
       # ever sent to api.typesafe.ai. Leave blank to run on the built-in rules.
       - key: JEV_API_KEY

@@ -91,6 +91,8 @@ Provider hardening: CSV rejects non-finite values, caps files at 5MB / 100k rows
 
 Unknown name -> 400 `invalid_scheduler`, never substituted. `POST /schedule/compare` runs ASAP/GREEDY/CPSAT (or a requested subset) over unchanged input.
 
+Solver honesty and speed: a CP-SAT result is `OPTIMAL` only when optimality was proved; one that stopped inside `relative_gap_limit` is `FEASIBLE` and carries `solver.relative_gap` / `optimality_gap`. `SOLVER_RELATIVE_GAP` sets a deployment-wide tolerance (default 0 = strict). Replans pass the previous schedule to CP-SAT as advisory hints (`SchedulerInput.hints`, keyed by timestamp, excluded from serialization, `repair_hint` on): hints cannot change the optimum, only where the search starts. Measured on a household with a water heater, hints alone and extra workers did not help (the bottleneck is the optimality proof, not the search), while a 0.01% tolerance cut solve time from 12s to 0.17s; see `backend/bench_solver.py`.
+
 Scheduler internals: base `_simulate_thermal` steps idle slots; `place_thermal_control` is contention-aware; `allocate_interruptible` takes a contiguous prefix with min-chunk repair; CP-SAT uses a non-negative delay term, forbids tail-start, and maps timeout to `UNKNOWN`/`INTERNAL_ERROR` with `_last_solver` reset; deadline-at-horizon-end is handled; robust carbon is clamped `>= 0`.
 
 Timezone rule: naive datetimes are rejected with 422. Schedule `carbon_start`/`carbon_end` must be both-or-neither; a `Z` suffix is coerced to an offset. Finite checks (`math.isfinite`) apply to capacity, `resolution_minutes` (allowed set `5|15|30|60`), `LoadSpec`/`Job`/`PlacedJob` numerics, and `PlacedJob` requires `end >= start`.
