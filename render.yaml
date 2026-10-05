@@ -20,6 +20,16 @@ services:
     envVars:
       - key: HELIOTROPE_ENV
         value: production
-      # Optional live classifier; rule-based fallback when unset.
+      # Live grid signal: a carbon-intensity estimate built from real solar/wind
+      # forecasts (Open-Meteo, no key). Set CARBON_LAT / CARBON_LON to your site
+      # (defaults to Bhopal, India) and tune CARBON_WEATHER_* in docs/DEPLOYMENT.md.
+      - key: CARBON_PROVIDER
+        value: weather
+      # Jev, the AI load classifier: used whenever a key is present, and it falls
+      # back to the built-in rules per request if Gemini is unreachable.
+      - key: LOAD_INTELLIGENCE_PROVIDER
+        value: auto
+      # Paste the same key you already use as JEV_API_KEY on Vercel (either name
+      # works on the backend). Leave blank to run on the built-in rules.
       - key: GEMINI_API_KEY
         sync: false

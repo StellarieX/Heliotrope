@@ -65,11 +65,15 @@ Environment:
 | `PORT` | no (`8000`) | Fail-fast: non-integer values raise at import |
 | `LOG_LEVEL` | no (`info`) | |
 | `CORS_ALLOW_ORIGINS` | only for direct cross-origin mode | Comma-separated, slashes stripped; `"*"` gets a credential-less middleware (credentials + wildcard is rejected by browsers) |
-| `CARBON_PROVIDER` / `CARBON_CSV_PATH` / `CARBON_MAX_RANGE_DAYS` / `CARBON_CACHE_TTL_S` / `CARBON_SYNTHETIC_SEED` | no | Defaults `synthetic` / empty / `7` / `300` / `7` |
-| `LOAD_INTELLIGENCE_PROVIDER` | no (`rule_based`) | |
+| `CARBON_PROVIDER` | **set to `weather` in production** | Library default is `synthetic` (deterministic, for tests); `render.yaml` sets `weather` |
+| `CARBON_LAT` / `CARBON_LON` / `CARBON_UTC_OFFSET_HOURS` | no | Site for the weather proxy; defaults to Bhopal, India (`23.2599`, `77.4126`, `5.5`) |
+| `CARBON_WEATHER_BASE_GCO2` / `CARBON_WEATHER_SOLAR_SHARE` / `CARBON_WEATHER_WIND_SHARE` | no | Proxy calibration: intensity with no renewables (`700`) and the largest share full sun (`0.20`) / wind (`0.10`) can displace |
+| `CARBON_CSV_PATH` / `CARBON_MAX_RANGE_DAYS` / `CARBON_CACHE_TTL_S` / `CARBON_SYNTHETIC_SEED` | no | Defaults empty / `7` / `300` / `7` |
+| `LOAD_INTELLIGENCE_PROVIDER` | `auto` in `render.yaml` | `auto`/`jev`: Jev AI classifier when a key is set, else rules. `rule_based` never calls the model |
 | `DEFAULT_LOAD_TIMEZONE` | no (`UTC`) | |
-| `ELECTRICITY_MAPS_API_KEY` / `ELECTRICITY_MAPS_ZONE` | no | Live carbon; synthetic fallback when unset |
-| `GEMINI_API_KEY` (`JEV_API_KEY` legacy alias, `GEMINI_API_KEY` wins) | no | Live classification; rule-based fallback when unset |
+| `ELECTRICITY_MAPS_API_KEY` / `ELECTRICITY_MAPS_ZONE` | no | Only for `CARBON_PROVIDER=external`; that adapter returns the past 24h, so it cannot drive planning on its own |
+| `GEMINI_API_KEY` (`JEV_API_KEY` legacy alias, `GEMINI_API_KEY` wins) | for Jev | Paste your existing Jev key here (set on **Render**, not Vercel). Falls back to the rules per request on any failure |
+| `GEMINI_MODEL` / `GEMINI_MAX_CALLS_PER_MIN` / `GEMINI_BASE_URL` | no | Default `gemini-2.5-flash` / `30` model calls per minute for the whole process (the API is public; over the cap the rules answer) / Google endpoint. If classifications show "rules" with a Gemini error, check the model name first |
 
 `config.py` auto-trusts Vercel's own `VERCEL_URL` /
 `VERCEL_PROJECT_PRODUCTION_URL` hosts, so per-deployment URLs do not need manual

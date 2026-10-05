@@ -8,10 +8,10 @@ Heliotrope is a carbon-aware scheduler. You describe your loads (EV charging, wa
 
 - **Plain-words load intake** — `/loads/classify` turns "geyser at night" into a typed `LoadSpec` (FIXED, ATOMIC, INTERRUPTIBLE, THERMAL) with confidence, ambiguity flags, and recorded assumptions.
 - **Three solvers** — ASAP (carbon-blind baseline), greedy (cheapest-first heuristic), and exact OR-Tools CP-SAT. Integer-scaled arithmetic with overflow guards and an independent post-solve validator; `INFEASIBLE` is an explicit 200 response, never a silent guess.
-- **Carbon-aware planning** — synthetic duck-curve by default, CSV upload, or live Electricity Maps. Forecasts in EXPECTED or ROBUST (`predicted + λ·(upper − predicted)`) modes, with planned-vs-realized CO₂ scoring.
+- **Carbon-aware planning on a live signal** — the default `weather` provider estimates grid intensity from real solar and wind forecasts (Open-Meteo, no key), labelled `PROXY`/`ESTIMATED`; CSV upload, Electricity Maps history and a fixed test curve are also selectable. Forecasts in EXPECTED or ROBUST (`predicted + λ·(upper − predicted)`) modes, with planned-vs-realized CO₂ scoring and a "vs running now" comparison for every plan.
 - **Multi-tenant coordination** — joint scheduling under one shared capacity with congestion pricing and AVG/MAX fairness, plus independent-vs-coordinated comparison.
-- **Live execution tracking** — versioned schedules in SQLite, rolling-horizon replans with frozen past, event/override guardrails, client-driven tick for periodic replan, and meter telemetry (`MEASURED`) alongside deterministic simulation (`SIMULATED`).
-- **Honesty by design** — synthetic or simulated data is always labeled; unknown values stay `null`, never zero; unconfigured providers refuse instead of inventing output.
+- **Live execution tracking** — versioned schedules in SQLite, rolling-horizon replans with frozen past, event/override guardrails and a client-driven tick on the real clock. Progress is what the user reports (Start / Done); a meter-telemetry endpoint exists for real hardware. The product UI uses no simulation.
+- **Honesty by design** — estimates are always labelled as estimates; unknown values stay `null`, never zero (an energy or run length the user did not give is asked for, not assumed); unconfigured providers refuse instead of inventing output.
 
 ## How it works
 
@@ -39,8 +39,8 @@ The frontend (`app/`, `lib/`) owns identity, load CRUD, and charts. It reaches F
 |---|---|
 | Frontend | Next.js 16, React 19, Tailwind CSS v4, TypeScript, Firebase Auth (Google) + Firestore, Vercel hosting |
 | Backend | Python 3.11, FastAPI + Pydantic, OR-Tools CP-SAT, SQLite execution store, pytest + hypothesis |
-| Carbon | Synthetic provider (default), CSV provider, Electricity Maps adapter (live, key-gated) |
-| Intelligence | Rule-based classifier (live), Gemini adapter (live, key-gated, rule-based fallback) |
+| Carbon | Weather-derived proxy from Open-Meteo (production default, keyless), CSV, Electricity Maps history (key-gated), synthetic test curve |
+| Intelligence | Jev: Gemini-based classifier (auto-enabled when a key is set, cached and rate-limited), falling back per request to the built-in rules |
 
 ## Quickstart
 
@@ -68,10 +68,12 @@ Full environment table and troubleshooting: `docs/SETUP.md`.
 | `NEXT_PUBLIC_FIREBASE_API_KEY` (+ `_AUTH_DOMAIN`, `_PROJECT_ID`, `_APP_ID`) | Frontend (`.env.local`) | Firebase web config; all four required or the app runs unconfigured |
 | `NEXT_PUBLIC_BACKEND_URL` | Frontend | Backend base URL (`http://localhost:8000` in dev). Leave it **unset** in production: the app then calls same-origin `/api/v1/*` |
 | `BACKEND_URL` | Frontend server-only (Vercel dashboard) | Rewrite target proxying `/api/v1/*` to the FastAPI backend |
-| `ELECTRICITY_MAPS_API_KEY` / `ELECTRICITY_MAPS_ZONE` | Backend env | Live carbon signal (default zone `US-CAL-CISO`); synthetic when unset |
-| `GEMINI_API_KEY` (legacy alias `JEV_API_KEY`) | Backend env | Live load classification; rule-based when unset |
+| `CARBON_PROVIDER` | Backend env | `weather` (live proxy; set this in production), `synthetic` (library default, for tests), `csv`, `external` |
+| `CARBON_LAT` / `CARBON_LON` / `CARBON_UTC_OFFSET_HOURS` / `CARBON_WEATHER_*` | Backend env | Site location and the proxy's estimation parameters (default: Bhopal, a coal-heavy grid) |
+| `ELECTRICITY_MAPS_API_KEY` / `ELECTRICITY_MAPS_ZONE` | Backend env | Electricity Maps adapter for `CARBON_PROVIDER=external` (past 24h only) |
+| `GEMINI_API_KEY` (legacy alias `JEV_API_KEY`) / `LOAD_INTELLIGENCE_PROVIDER` / `GEMINI_MODEL` / `GEMINI_MAX_CALLS_PER_MIN` | Backend env | Jev AI classification: `auto` uses it when a key exists (default model `gemini-2.5-flash`, 30 calls/min cap), else the rules |
 | `CORS_ALLOW_ORIGINS` | Backend env | Allowed browser origins for direct cross-origin mode; unneeded in same-origin mode |
-| `LOG_LEVEL` / `CARBON_*` / `LOAD_INTELLIGENCE_PROVIDER` / `DEFAULT_LOAD_TIMEZONE` | Backend env | `info` / `synthetic`, `7/300/7` tuning / `rule_based` / `UTC` |
+| `LOG_LEVEL` / `CARBON_MAX_RANGE_DAYS` / `CARBON_CACHE_TTL_S` / `DEFAULT_LOAD_TIMEZONE` | Backend env | `info` / `7` / `300` / `UTC` |
 | `HELIOTROPE_EXECUTION_DB` | Backend env | SQLite path override (default `backend/data/heliotrope_execution.db`) |
 
 Deploy recipe (Vercel frontend + Docker backend on Render): `docs/DEPLOYMENT.md`. To run everything locally with no Firebase project, see the emulator section in `docs/SETUP.md`.
@@ -110,7 +112,9 @@ render.yaml           backend blueprint (Render, Docker)
 - Backend has no auth; anyone with the URL can call it. CORS is the only browser-side gate. Do not expose publicly without auth (see `SECURITY.md`).
 - Naive datetimes are rejected with 422; callers must send tz-aware ISO-8601.
 - Error `detail` may be a string or an array (FastAPI 422 lists); clients must handle both.
-- No live device control — execution is tracked via events, meter readings, and simulation.
+- No live device control — there are no smart-meter or device integrations: progress is reported by the user (a telemetry endpoint exists for future meters).
+- The carbon signal is an estimate built from weather, not metered grid data, and says so in the UI. Calibrate `CARBON_WEATHER_*` for your grid.
+- "Ready by" plus "may finish up to +Nh later" defines the latest finish time handed to the solver as a hard deadline.
 - The UI plans with a scalar capacity default; per-slot `capacity_profile_kw` is API-level.
 - Single SQLite file: multiple backend instances must share one DB file.
 - Unconfigured providers refuse or fall back instead of inventing output; CSV inputs are capped (5MB / 100k rows).

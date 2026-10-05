@@ -24,10 +24,10 @@ All from environment (`app/core/config.py:1`):
 | `PORT` | `8000` | non-integer values fail fast at import |
 | `LOG_LEVEL` | `info` | |
 | `CORS_ALLOW_ORIGINS` | empty | comma-separated, slashes stripped; `"*"` gets credential-less middleware; Vercel hosts auto-trusted |
-| `CARBON_PROVIDER` | `synthetic` | synthetic seed 7 unless overridden |
+| `CARBON_PROVIDER` | `synthetic` | `weather` = live PROXY from Open-Meteo solar/wind (keyless; `CARBON_LAT/LON`); `synthetic` is a fixed test curve |
 | `CARBON_CSV_PATH` | empty | required for csv provider (regular file, ≤5MB / ≤100k rows, finite values) |
 | `CARBON_MAX_RANGE_DAYS` / `CARBON_CACHE_TTL_S` / `CARBON_SYNTHETIC_SEED` | `7` / `300` / `7` | tuning |
-| `LOAD_INTELLIGENCE_PROVIDER` | `rule_based` | `jev` honored only with a verified contract; LLM confidence < 0.6 is `ambiguous: True` |
+| `LOAD_INTELLIGENCE_PROVIDER` | `rule_based` | `jev`/`auto` use the Gemini classifier when a key is set (cached, `GEMINI_MAX_CALLS_PER_MIN` cap, per-request fallback to rules); LLM confidence is fixed at 0.6 and `ambiguous: True` |
 | `DEFAULT_LOAD_TIMEZONE` | `UTC` | naive datetimes in load normalization map to UTC with a warning |
 | `JEV_API_KEY` / `GEMINI_API_KEY` / `ELECTRICITY_MAPS_API_KEY` / `ELECTRICITY_MAPS_ZONE` | unset / unset / unset / `US-CAL-CISO` | reserved, never sent to the browser; `GEMINI_API_KEY` wins over `JEV_API_KEY` |
 

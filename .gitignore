@@ -58,10 +58,6 @@ backend/data/
 # vercel
 .vercel
 
-# next.js generated agent files (recreated by `next dev`)
-AGENTS.md
-CLAUDE.md
-
 # internal notes (never tracked)
 .agents/
 

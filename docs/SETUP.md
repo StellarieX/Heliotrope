@@ -26,16 +26,16 @@ cp .env.example .env.local   # fill Firebase keys + backend URL
 | `PORT` | backend | no | default `8000`; non-integer values fail fast at import |
 | `LOG_LEVEL` | backend | no | default `info` |
 | `CORS_ALLOW_ORIGINS` | backend | prod direct-mode only | comma-separated, slashes stripped; `"*"` gets credential-less middleware; Vercel hosts auto-trusted |
-| `CARBON_PROVIDER` | backend | no | default `synthetic` |
+| `CARBON_PROVIDER` | backend | no | library default `synthetic`; use `weather` for the live signal (keyless; set `CARBON_LAT` / `CARBON_LON`) |
 | `CARBON_CSV_PATH` | backend | for csv provider | path to carbon CSV (regular file, ≤5MB / ≤100k rows, finite values only) |
 | `CARBON_MAX_RANGE_DAYS` | backend | no | default `7` |
 | `CARBON_CACHE_TTL_S` | backend | no | default `300` |
 | `CARBON_SYNTHETIC_SEED` | backend | no | default `7` |
-| `LOAD_INTELLIGENCE_PROVIDER` | backend | no | default `rule_based` |
+| `LOAD_INTELLIGENCE_PROVIDER` | backend | no | default `rule_based`; `auto` enables the Jev AI classifier whenever a key is set |
 | `DEFAULT_LOAD_TIMEZONE` | backend | no | default `UTC` |
 | `JEV_API_KEY` | backend | no | legacy alias for `GEMINI_API_KEY`; `GEMINI_API_KEY` wins when both are set (`backend/app/core/config.py:33`) |
-| `GEMINI_API_KEY` | backend | no | live Gemini classifier adapter via `httpx`; falls back to local rules when unset or on error |
-| `ELECTRICITY_MAPS_API_KEY` | backend | no | live Electricity Maps adapter via `httpx` (zone `ELECTRICITY_MAPS_ZONE`, default `US-CAL-CISO`); falls back to synthetic signal when unset or on error |
+| `GEMINI_API_KEY` | backend | no | Jev (Gemini) classifier via `httpx`; model `GEMINI_MODEL` (default `gemini-2.5-flash`), capped at `GEMINI_MAX_CALLS_PER_MIN` (30); falls back to local rules when unset, over the cap, or on error |
+| `ELECTRICITY_MAPS_API_KEY` | backend | no | live Electricity Maps adapter via `httpx` (zone `ELECTRICITY_MAPS_ZONE`, default `US-CAL-CISO`); only used with `CARBON_PROVIDER=external` (returns the past 24h) |
 
 Never prefix secrets with `NEXT_PUBLIC_` — those are bundled into browser JS.
 

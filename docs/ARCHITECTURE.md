@@ -24,8 +24,8 @@ Three planes:
 
 | Route | Purpose |
 |---|---|
-| `app/page.tsx` (`/`) | Landing + simulator (calls `scheduleJobs`, `getCarbonSignal`/`getCarbonForecast`, `classifyLoad`). |
-| `app/dashboard/page.tsx` (`/dashboard`) | Auth-gated CRUD on `users/{uid}/jobs`, jevRank, `CarbonChart`, `BuildingChart`, `ExecutionPanel` (plan/state/history/events/replan/simulate), `Onboarding`. |
+| `app/page.tsx` (`/`) + `app/LivePlan.tsx` | Landing with a live demo: real carbon signal (`getCarbonSignal`) and an ASAP-vs-CP-SAT comparison (`compareSchedulers`) on example loads, recomputed as the flexibility slider moves. No hand-drawn numbers. |
+| `app/dashboard/page.tsx` (`/dashboard`) | Auth-gated CRUD on `users/{uid}/jobs`, jevRank, `CarbonChart`, `BuildingChart`, `ExecutionPanel` (plan/state/history/events/replan; progress is user-reported), `Onboarding`. Shared logic: `lib/loads/specs.ts` (load -> LoadSpec; latest finish = ready-by + flexibility; missing energy/duration is asked for, never assumed) and `lib/loads/useClassification.ts` (backend classification, AI or rules). |
 | `app/account/page.tsx` (`/account`) | Profile edit (`Profile{username,occupation,place,rooms,onboarded}`). |
 | `app/[username]/page.tsx` (`/[username]`) | Public profile: `usernames/{name}` -> `users/{uid}` -> public fields + jobs summary. |
 
@@ -53,7 +53,7 @@ Layering:
 routes/ -> services/ -> domain/
   schedule.py      scheduler_service, scheduler_normalizer, carbon_service,
                    forecast_service, schedule_realization
-  carbon.py        carbon_service -> providers (synthetic CSV default, Electricity Maps live adapter w/ fallback)
+  carbon.py        carbon_service -> providers (weather proxy [live, keyless], csv, external [Electricity Maps history], synthetic [test curve])
   forecast.py      forecast_service, forecast_backtest
   loads.py         load_intelligence (rule-based, live/offline) + classification,
                    load_normalizer, core/feasibility (validator)
@@ -122,7 +122,7 @@ Forecast affects only which feasible schedule is preferred, never feasibility. `
 ## Honesty invariants
 
 - `None`/`null` is unknown, never 0; Heliotrope does not guess physical values.
-- Synthetic carbon/forecast output is always labeled `SYNTHETIC`/`signal_type`, never grid data. Simulation responses carry `simulated: true`.
+- Carbon output is always labelled by `signal_type`: the weather provider is `PROXY` (an estimate from real weather), the test curve `SYNTHETIC`. Forecast history is read in windows under `CARBON_MAX_RANGE_DAYS`; if the provider is down it falls back to a labelled synthetic history. The `/simulation` endpoint is a developer/test tool and is not used by the app; its responses carry `simulated: true`.
 - `INFEASIBLE` is HTTP 200 with `status: "INFEASIBLE"` + reason (valid answer, not malformed input).
 - Error codes: 400 `invalid_scheduler` / `unknown_model`, 422 `invalid_request` / `invalid_transition` / `override_rejected`, 503 `provider_unavailable`, 404 `not_found` (unknown `schedule_id`).
 - Carbon accounting is single-pathed (`carbon_accounting`); forecast uncertainty changes preference, not feasibility; realized CO2 is scored against actuals, never the forecast.

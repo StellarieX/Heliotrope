@@ -1,6 +1,17 @@
 # Changelog
 
-## Demo hardening: privacy, rules, onboarding and dashboard UX
+## v0.2.0 — Live data, Jev, no simulation, mobile (2026-10-05)
+
+- **Live carbon signal:** new `weather` provider builds an estimated intensity from real solar and wind forecasts (Open-Meteo, no key), labelled `PROXY`/`ESTIMATED`. `render.yaml` selects it. The default test curve is no longer what the app shows.
+- **Forecast bug fixed:** the forecast always trained on SYNTHETIC history because it asked for 14 days and a single query is capped at 7. History is now read in windows, so the forecast uses the real provider's data.
+- **Jev enabled:** `LOAD_INTELLIGENCE_PROVIDER=auto` uses the Gemini classifier whenever a key is set, with a configurable model, a per-process call cap, a result cache, JSON-mode output, and per-request fallback to the rules. The UI shows an AI/rules badge.
+- **No simulation in the product:** removed the simulated clock (`+15 min`), the demo building data, and the landing page's hand-drawn simulator, invented "pilot" results and fixed-time timeline. The landing page now shows live solver output. The backend `/simulation` endpoint remains as a developer tool.
+- **Real inputs:** "+Nh flexible" now sets the latest finish time (it was stored but never reached the planner). Energy for interruptible loads and run length for atomic loads are asked for instead of assumed; loads missing them are left out of the plan with a prompt on the row.
+- **Shared capacity** now schedules the user's own loads (each its own participant) and refreshes automatically.
+- **Mobile:** 16px gutters, 44px tap targets, no horizontal overflow, wrapping tracker rows, accessible onboarding on small screens.
+- **Fixed:** a server/client hydration mismatch on `/dashboard`, `/account` and `/[username]` that flashed the sign-in screen for signed-in users.
+
+## v0.1.1 — Demo hardening: privacy, rules, onboarding and dashboard UX (2026-10-05)
 
 - **Privacy:** profile documents are world-readable, so they no longer store the user's email. Existing profiles are cleaned automatically the next time the owner opens the dashboard or account page (`lib/profile.ts`).
 - **Firestore rules:** profile writes are validated against a field allow-list (name, photo, username, occupation, place, rooms, onboarded). Usernames must match `^[a-z0-9_]{3,20}$` and cannot be a reserved route name, enforced server-side instead of only in the browser. Verified in the real Firestore emulator (`tests/rules/rules.test.mjs`, 33 cases), not just the Python rule models.
