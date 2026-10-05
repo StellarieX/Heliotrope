@@ -5,7 +5,8 @@ import type { NextConfig } from "next";
  *
  * - The browser bundle calls `${NEXT_PUBLIC_BACKEND_URL}/api/v1/...`
  *   (see lib/api/client.ts, default http://localhost:8000).
- * - In Vercel production, set NEXT_PUBLIC_BACKEND_URL="" (empty string) so
+ * - In Vercel production, leave NEXT_PUBLIC_BACKEND_URL unset (Vercel cannot store
+ *   an empty value; unset means same-origin in a production build) so
  *   the bundle uses same-origin relative URLs (`/api/v1/...`), and the
  *   rewrite below proxies them server-side to the real backend. Same-origin
  *   calls need no CORS and expose no backend host to the browser.

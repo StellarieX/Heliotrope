@@ -21,7 +21,7 @@ so an unset backend never proxies to localhost in production. `vercel.json`:
 
 1. Connect the repo to Vercel (build `npm run build`, install `npm install`).
 2. Production environment variables (Vercel dashboard, per environment):
-   - `NEXT_PUBLIC_BACKEND_URL` = empty (same-origin mode).
+   - Do **not** set `NEXT_PUBLIC_BACKEND_URL` (Vercel cannot store an empty value; unset = same-origin mode in a production build).
    - `BACKEND_URL` = `https://<your-backend-host>` (server-only; no `NEXT_PUBLIC_` prefix).
    - Four `NEXT_PUBLIC_FIREBASE_*` keys.
    - `HELIOTROPE_ENV=production` is not a frontend var; set it on the backend.
@@ -33,7 +33,7 @@ so an unset backend never proxies to localhost in production. `vercel.json`:
 `render.yaml` at the repo root is a Render Blueprint for the Docker image
 below: Render dashboard → New → Blueprint → this repo. Then, in Vercel,
 set `BACKEND_URL=https://<service>.onrender.com` and
-`NEXT_PUBLIC_BACKEND_URL=` (empty), and redeploy. Free-plan caveats: the
+leave `NEXT_PUBLIC_BACKEND_URL` unset, and redeploy (env changes only apply to new builds). Free-plan caveats: the
 service sleeps after ~15 min idle (first request takes ~50s, longer than the
 client's 30s timeout), so open `/api/v1/health` before a demo. There is no disk,
 so execution records reset on restart; the dashboard drops a lost schedule and

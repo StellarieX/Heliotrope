@@ -1,6 +1,6 @@
 # Render Blueprint: Heliotrope FastAPI backend (Docker).
 # Render dashboard > New > Blueprint > pick this repo. Then set the Vercel
-# project's BACKEND_URL to the service URL and NEXT_PUBLIC_BACKEND_URL to ""
+# project's BACKEND_URL to the service URL and leave NEXT_PUBLIC_BACKEND_URL unset
 # (same-origin mode, see docs/DEPLOYMENT.md).
 #
 # Free plan: the service sleeps after ~15 min idle and cold-starts in ~50s.

@@ -20,7 +20,7 @@ cp .env.example .env.local   # fill Firebase keys + backend URL
 | `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN` | frontend | for auth/DB | Firebase web config |
 | `NEXT_PUBLIC_FIREBASE_PROJECT_ID` | frontend | for auth/DB | Firebase web config |
 | `NEXT_PUBLIC_FIREBASE_APP_ID` | frontend | for auth/DB | Firebase web config |
-| `NEXT_PUBLIC_BACKEND_URL` | frontend | no | `http://localhost:8000` in dev (`lib/api/client.ts:18`); empty string in Vercel production for same-origin mode (see `docs/DEPLOYMENT.md`) |
+| `NEXT_PUBLIC_BACKEND_URL` | frontend | no | `http://localhost:8000` in dev (`lib/api/client.ts:18`); leave unset in Vercel production for same-origin mode (see `docs/DEPLOYMENT.md`) |
 | `BACKEND_URL` | frontend server-only (Vercel dashboard, never `NEXT_PUBLIC_`) | prod same-origin only | rewrite target for `/api/v1/:path*` (`next.config.ts:17`); falls back to `NEXT_PUBLIC_BACKEND_URL`, then localhost |
 | `HELIOTROPE_ENV` | backend | no | default `development`; controls dev CORS (`backend/app/core/config.py:58`) |
 | `PORT` | backend | no | default `8000`; non-integer values fail fast at import |

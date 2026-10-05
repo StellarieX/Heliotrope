@@ -15,7 +15,12 @@ import type {
 
 // NEXT_PUBLIC_BACKEND_URL may carry a trailing slash (e.g. ".../8000/").
 // Without trimming, every URL below becomes "...//api/v1/...".
-const BASE = (process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000").replace(/\/+$/, "");
+// When NEXT_PUBLIC_BACKEND_URL is unset: local dev talks to the backend directly,
+// while a production build uses same-origin relative URLs (/api/v1/...) that
+// next.config.ts proxies to BACKEND_URL. Vercel cannot store an empty variable,
+// so "unset" must mean same-origin in production rather than localhost.
+const DEFAULT_BASE = process.env.NODE_ENV === "production" ? "" : "http://localhost:8000";
+const BASE = (process.env.NEXT_PUBLIC_BACKEND_URL ?? DEFAULT_BASE).replace(/\/+$/, "");
 
 const TIMEOUT_MS = 30_000;
 

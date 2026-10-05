@@ -66,7 +66,7 @@ Full environment table and troubleshooting: `docs/SETUP.md`.
 | Variable | Where | Purpose |
 |---|---|---|
 | `NEXT_PUBLIC_FIREBASE_API_KEY` (+ `_AUTH_DOMAIN`, `_PROJECT_ID`, `_APP_ID`) | Frontend (`.env.local`) | Firebase web config; all four required or the app runs unconfigured |
-| `NEXT_PUBLIC_BACKEND_URL` | Frontend | Backend base URL (`http://localhost:8000` in dev); empty string in Vercel production for same-origin mode |
+| `NEXT_PUBLIC_BACKEND_URL` | Frontend | Backend base URL (`http://localhost:8000` in dev). Leave it **unset** in production: the app then calls same-origin `/api/v1/*` |
 | `BACKEND_URL` | Frontend server-only (Vercel dashboard) | Rewrite target proxying `/api/v1/*` to the FastAPI backend |
 | `ELECTRICITY_MAPS_API_KEY` / `ELECTRICITY_MAPS_ZONE` | Backend env | Live carbon signal (default zone `US-CAL-CISO`); synthetic when unset |
 | `GEMINI_API_KEY` (legacy alias `JEV_API_KEY`) | Backend env | Live load classification; rule-based when unset |
