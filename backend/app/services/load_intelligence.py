@@ -21,6 +21,9 @@ Assumption (ParameterOrigin.ESTIMATED), so the response always says what it is.
 from __future__ import annotations
 
 import json
+import threading
+import time
+from collections import deque
 from typing import Any, Optional
 
 import httpx
@@ -43,8 +46,28 @@ from .classification import (
 from .load_normalizer import LoadIntelligenceService, LoadRequest, normalize_request
 from ..domain.loads import LoadSpec
 
-GEMINI_MODEL = "gemini-2.0-flash"
 GEMINI_TIMEOUT_S = 10.0
+
+
+# A load description classifies the same way every time (temperature 0), and one
+# request asks twice (classify + normalize), so remember answers. Only successes are
+# kept: a fallback is often transient and must not stick.
+_CACHE_MAX = 256
+_cache: "dict[tuple[str, str], tuple[Classification, dict[str, Any]]]" = {}
+_cache_lock = threading.Lock()
+_call_times: "deque[float]" = deque()
+
+
+def _within_rate_limit() -> bool:
+    """Sliding one-minute window over actual model calls."""
+    now = time.monotonic()
+    with _cache_lock:
+        while _call_times and now - _call_times[0] > 60.0:
+            _call_times.popleft()
+        if len(_call_times) >= max(1, config.GEMINI_MAX_CALLS_PER_MIN):
+            return False
+        _call_times.append(now)
+        return True
 
 
 class IntelligenceUnavailable(RuntimeError):
@@ -157,8 +180,12 @@ def _validate_gemini_data(data: dict) -> tuple[LoadType, LoadCategory, Optional[
 
 
 def _gemini_classify_raw(text: str, api_key: str) -> tuple[LoadType, LoadCategory, Optional[float], Optional[int]]:
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-    body = {"contents": [{"parts": [{"text": _gemini_prompt(text)}]}]}
+    url = f"{config.GEMINI_BASE_URL}/models/{config.GEMINI_MODEL}:generateContent"
+    body = {
+        "contents": [{"parts": [{"text": _gemini_prompt(text)}]}],
+        # Ask for raw JSON and no sampling noise: the reply is parsed strictly.
+        "generationConfig": {"responseMimeType": "application/json", "temperature": 0},
+    }
     try:
         response = httpx.post(
             url, params={"key": api_key}, json=body, timeout=GEMINI_TIMEOUT_S
@@ -260,6 +287,13 @@ class JevLoadIntelligence:
         key = resolve_api_key(self._explicit_key)
         if not key:
             return _fallback_classification(text, "no API key configured"), {}
+        cache_key = (config.GEMINI_MODEL, normalize_text(text))
+        with _cache_lock:
+            hit = _cache.get(cache_key)
+        if hit is not None:
+            return hit[0], dict(hit[1])
+        if not _within_rate_limit():
+            return _fallback_classification(text, "AI call limit reached; try again in a minute"), {}
         try:
             job_type, category, power_kw, duration = _gemini_classify_raw(text, key)
         except _GeminiUnusable as exc:
@@ -271,6 +305,10 @@ class JevLoadIntelligence:
         if duration is not None:
             hints["duration_minutes"] = duration
         hints["_classification"] = classification
+        with _cache_lock:
+            if len(_cache) >= _CACHE_MAX:
+                _cache.pop(next(iter(_cache)))
+            _cache[cache_key] = (classification, dict(hints))
         return classification, hints
 
     def classify(self, text: str) -> Classification:
@@ -324,7 +362,7 @@ def get_load_intelligence() -> LoadIntelligenceProvider:
     per call, so callers never see an exception for a missing model.
     """
     requested = (config.LOAD_INTELLIGENCE_PROVIDER or "rule_based").lower()
-    if requested == "jev":
+    if requested in ("jev", "auto"):
         jev = JevLoadIntelligence(resolve_api_key())
         if jev.available():
             return jev  # type: ignore[return-value]

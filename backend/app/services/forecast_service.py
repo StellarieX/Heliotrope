@@ -222,26 +222,48 @@ class ForecastService:
         end = to_utc(end)
         start = end - timedelta(days=days)
         service = self._carbon or CarbonService.default()
-        response = service.get_signal(start, end, resolution_minutes)
+        # The carbon service caps a single query (CARBON_MAX_RANGE_DAYS). A longer
+        # history is read as consecutive windows, otherwise every default request
+        # (14 days) would exceed the cap and silently train on SYNTHETIC history.
+        cap_days = getattr(service, "max_range_days", None)
+        if isinstance(cap_days, int) and cap_days >= 1 and days > cap_days:
+            responses = []
+            cursor = start
+            while cursor < end:
+                nxt = min(cursor + timedelta(days=cap_days), end)
+                responses.append(service.get_signal(cursor, nxt, resolution_minutes))
+                cursor = nxt
+        else:
+            responses = [service.get_signal(start, end, resolution_minutes)]
+        response = responses[0]
         signal_type = response.signal_type
+        kind = getattr(signal_type, "value", signal_type)
         quality = (
             Quality.SYNTHETIC
-            if getattr(signal_type, "value", signal_type) == SignalType.SYNTHETIC.value
+            if kind == SignalType.SYNTHETIC.value
+            else Quality.ESTIMATED
+            if kind == SignalType.PROXY.value
             else Quality.MEASURED
         )
-        return CarbonHistory(
-            tuple(
-                CarbonPoint(
-                    time=to_utc(p.timestamp),
-                    gco2_per_kwh=float(p.carbon_intensity_gco2_per_kwh),
-                    signal_type=signal_type,
-                    quality=quality,
-                    source=response.source,
-                    is_forecast=bool(response.quality.is_forecast),
+        seen: set = set()
+        history_points = []
+        for resp in responses:
+            for p in resp.points:
+                t = to_utc(p.timestamp)
+                if t in seen:  # window boundaries can share one slot
+                    continue
+                seen.add(t)
+                history_points.append(
+                    CarbonPoint(
+                        time=t,
+                        gco2_per_kwh=float(p.carbon_intensity_gco2_per_kwh),
+                        signal_type=signal_type,
+                        quality=quality,
+                        source=response.source,
+                        is_forecast=bool(resp.quality.is_forecast),
+                    )
                 )
-                for p in response.points
-            )
-        )
+        return CarbonHistory(tuple(history_points))
 
     def resolve_history(
         self,

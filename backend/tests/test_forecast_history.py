@@ -99,8 +99,19 @@ def test_history_from_provider_preserves_type_and_source():
 # --- the fallback is loud -----------------------------------------------------
 
 
+class _ProviderDown:
+    """A carbon source that is unreachable: the one real reason to fall back."""
+
+    max_range_days = 7
+
+    def get_signal(self, *args, **kwargs):
+        from app.services.carbon_service import CarbonUnavailable
+
+        raise CarbonUnavailable("upstream down")
+
+
 def test_resolve_history_fallback_logs_a_warning(caplog):
-    service = ForecastService()
+    service = ForecastService(carbon_service=_ProviderDown())
     with caplog.at_level(logging.WARNING, logger="heliotrope.forecast"):
         history = service.resolve_history(ORIGIN, days=60, resolution_minutes=15)
     assert len(history) > 0

@@ -7,6 +7,14 @@ def _get(name: str, default: str) -> str:
     return os.environ.get(name, default)
 
 
+def _get_float(name: str, default: str) -> float:
+    raw = _get(name, default)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"Invalid {name}={raw!r}: expected a number")
+
+
 def _get_int(name: str, default: str) -> int:
     raw = _get(name, default)
     try:
@@ -75,8 +83,27 @@ CARBON_MAX_RANGE_DAYS = _get_int("CARBON_MAX_RANGE_DAYS", "7")
 CARBON_CACHE_TTL_S = _get_int("CARBON_CACHE_TTL_S", "300")
 CARBON_SYNTHETIC_SEED = _get_int("CARBON_SYNTHETIC_SEED", "7")
 
-# Load Intelligence (Phase 3). The default must stay "rule_based": no external
-# classifier is required for the backend to work, and no external response is
-# ever fabricated. "jev" is honored only once a verified contract exists.
+# Weather-derived proxy provider (CARBON_PROVIDER=weather): live solar/wind from
+# Open-Meteo, no key. The defaults describe a coal-heavy grid at Bhopal, India;
+# set the location and the shares to match your grid. These are estimation
+# parameters, not measurements (see services/providers/weather.py).
+CARBON_LAT = _get_float("CARBON_LAT", "23.2599")
+CARBON_LON = _get_float("CARBON_LON", "77.4126")
+CARBON_UTC_OFFSET_HOURS = _get_float("CARBON_UTC_OFFSET_HOURS", "5.5")
+CARBON_WEATHER_BASE_GCO2 = _get_float("CARBON_WEATHER_BASE_GCO2", "700")
+CARBON_WEATHER_SOLAR_SHARE = _get_float("CARBON_WEATHER_SOLAR_SHARE", "0.20")
+CARBON_WEATHER_WIND_SHARE = _get_float("CARBON_WEATHER_WIND_SHARE", "0.10")
+
+# Load Intelligence. "rule_based" never leaves the process (the library default,
+# so tests and offline runs are deterministic). "jev" uses the Gemini-backed
+# classifier and still falls back to the rules per call, recording why.
+# "auto" means: jev when a key is configured, otherwise rule_based.
 LOAD_INTELLIGENCE_PROVIDER = _get("LOAD_INTELLIGENCE_PROVIDER", "rule_based")
+GEMINI_MODEL = _get("GEMINI_MODEL", "gemini-2.5-flash")
+# Override only to route through a proxy or a local stand-in for tests.
+# Hard ceiling on model calls per minute for the whole process. The API is public,
+# so without it anyone could burn the key's quota; over the limit, requests are
+# answered by the built-in rules instead (and say so).
+GEMINI_MAX_CALLS_PER_MIN = _get_int("GEMINI_MAX_CALLS_PER_MIN", "30")
+GEMINI_BASE_URL = _get("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
 DEFAULT_LOAD_TIMEZONE = _get("DEFAULT_LOAD_TIMEZONE", "UTC")

@@ -21,6 +21,7 @@ from ..utils.time import generate_slots, to_utc, validate_range
 from .providers.csv_provider import CSVConfig, CSVProvider, ProviderDataInvalid
 from .providers.external import ExternalProvider, ProviderNotConfigured, ProviderNotIntegrated
 from .providers.synthetic import SyntheticConfig, SyntheticDuckCurveProvider
+from .providers.weather import WeatherProxyConfig, WeatherProxyProvider
 
 log = logging.getLogger("heliotrope.carbon")
 
@@ -55,7 +56,7 @@ class CarbonService:
     def __post_init__(self) -> None:
         self.provider_name = (self.provider_name or config.CARBON_PROVIDER or "synthetic").lower()
         self.csv_path = self.csv_path or config.CARBON_CSV_PATH
-        if self.provider_name not in ("synthetic", "csv", "external"):
+        if self.provider_name not in ("synthetic", "csv", "external", "weather"):
             raise CarbonBadRequest(f"unknown provider {self.provider_name!r}")
 
     @classmethod
@@ -72,6 +73,17 @@ class CarbonService:
             if not self.csv_path:
                 raise CarbonUnavailable("csv provider selected but no CSV path configured")
             return CSVProvider(CSVConfig(path=self.csv_path))
+        if self.provider_name == "weather":
+            return WeatherProxyProvider(
+                WeatherProxyConfig(
+                    latitude=config.CARBON_LAT,
+                    longitude=config.CARBON_LON,
+                    utc_offset_hours=config.CARBON_UTC_OFFSET_HOURS,
+                    base_gco2=config.CARBON_WEATHER_BASE_GCO2,
+                    solar_max_share=config.CARBON_WEATHER_SOLAR_SHARE,
+                    wind_max_share=config.CARBON_WEATHER_WIND_SHARE,
+                )
+            )
         return ExternalProvider(config.ELECTRICITY_MAPS_API_KEY)
 
     def get_signal(self, start: datetime, end: datetime, resolution_minutes: int) -> CarbonSignalResponse:

@@ -27,7 +27,7 @@ def test_resolve_scheduler_case_insensitive():
 
 
 def test_provider_names_known():
-    assert {p.value for p in ProviderName} == {"synthetic", "csv", "external"}
+    assert {p.value for p in ProviderName} == {"synthetic", "csv", "external", "weather"}
 
 
 def test_synthetic_provider_serves_labeled_signal(window):

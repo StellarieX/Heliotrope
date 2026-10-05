@@ -18,6 +18,7 @@ class ProviderName(str, Enum):
     SYNTHETIC = "synthetic"
     CSV = "csv"
     EXTERNAL = "external"
+    WEATHER = "weather"
 
 
 class CarbonProvider(Protocol):

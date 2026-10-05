@@ -201,7 +201,18 @@ def test_tier2_f03_negative_capacity_rejected(client: TestClient):
 
 def test_tier2_f04_coverage_probability_boundaries(client: TestClient):
     """F4.B1: Requesting 0.95 coverage produces wider intervals than 0.50 coverage."""
-    svc = ForecastService()
+    # The default synthetic provider is perfectly periodic (zero forecast error), so
+    # intervals would be degenerate. Use the noisy labelled fallback history, which
+    # is what a real provider outage produces.
+    class _Down:
+        max_range_days = 7
+
+        def get_signal(self, *a, **k):
+            from app.services.carbon_service import CarbonUnavailable
+
+            raise CarbonUnavailable("upstream down")
+
+    svc = ForecastService(carbon_service=_Down())
     start = BASE_TIME
     end = BASE_TIME + timedelta(hours=6)
     fc_50 = svc.forecast(start, end, coverage=0.50)
