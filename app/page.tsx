@@ -95,6 +95,29 @@ export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
   const [signingIn, setSigningIn] = useState(false);
+  const [navigating, setNavigating] = useState(false);
+  const navTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function scrollToSection(hash: string) {
+    return (e: React.MouseEvent<HTMLAnchorElement>) => {
+      e.preventDefault();
+      const el = document.querySelector(hash);
+      if (!el) return;
+      if (navTimer.current) clearTimeout(navTimer.current);
+      setNavigating(false);
+      // Force reflow so the motion-blur pulse replays on repeat clicks.
+      void document.body.offsetHeight;
+      setNavigating(true);
+      el.scrollIntoView({ behavior: "smooth", block: "start" });
+      navTimer.current = setTimeout(() => setNavigating(false), 600);
+    };
+  }
+
+  useEffect(() => {
+    return () => {
+      if (navTimer.current) clearTimeout(navTimer.current);
+    };
+  }, []);
 
   useEffect(() => {
     if (!auth) return;
@@ -189,16 +212,16 @@ export default function Home() {
           WebkitMaskImage: "radial-gradient(ellipse 80% 55% at 50% 0%, black 25%, transparent 75%)",
         }}
       />
-      <div className="relative">
+      <div className={`relative${navigating ? " nav-motion" : ""}`}>
         {/* nav */}
         <header className="mx-auto flex max-w-7xl items-center justify-between px-6 py-6 sm:px-10 lg:px-16">
           <div className="flex items-center gap-2.5">
             <span className="text-[13px] font-semibold uppercase tracking-[0.28em]">Heliotrope</span>
           </div>
           <nav className="hidden items-center gap-8 text-[13px] text-zinc-500 md:flex">
-            <a href="#how" className="transition hover:text-white">How it works</a>
-            <a href="#loads" className="transition hover:text-white">Loads</a>
-            <a href="#week" className="transition hover:text-white">A week</a>
+            <a href="#how" onClick={scrollToSection("#how")} className="transition hover:text-white">How it works</a>
+            <a href="#loads" onClick={scrollToSection("#loads")} className="transition hover:text-white">Loads</a>
+            <a href="#week" onClick={scrollToSection("#week")} className="transition hover:text-white">A week</a>
           </nav>
           {user ? (
             <button
@@ -242,10 +265,10 @@ export default function Home() {
             minimizes carbon by favoring clean electricity. Always ready on time.
           </p>
           <div className="rise mt-12 flex flex-col items-stretch justify-center gap-4 sm:flex-row sm:items-center" style={{ animationDelay: "360ms" }}>
-            <a href="#simulator" className="rounded-full bg-white px-8 py-3.5 text-center text-sm font-medium text-black transition hover:bg-zinc-200 active:scale-[0.98]">
+            <a href="#simulator" onClick={scrollToSection("#simulator")} className="rounded-full bg-white px-8 py-3.5 text-center text-sm font-medium text-black transition hover:bg-zinc-200 active:scale-[0.98]">
               Try it with your day
             </a>
-            <a href="#week" className="rounded-full border border-white/15 px-8 py-3.5 text-center text-sm text-zinc-300 transition hover:border-white/40 hover:text-white active:scale-[0.98]">
+            <a href="#week" onClick={scrollToSection("#week")} className="rounded-full border border-white/15 px-8 py-3.5 text-center text-sm text-zinc-300 transition hover:border-white/40 hover:text-white active:scale-[0.98]">
               A hostel week →
             </a>
           </div>
@@ -501,7 +524,7 @@ export default function Home() {
           <div className="mx-auto mt-20 max-w-xl text-center">
             <h2 className="text-2xl font-semibold tracking-tight sm:text-3xl">Put your building on the clean part of the day.</h2>
             <p className="mt-3 text-sm leading-6 text-zinc-500">Start with one hostel, one floor, or one home. Ready times guaranteed.</p>
-            <a href="mailto:hello@heliotrope.app" className="mt-7 inline-block rounded-full bg-white px-8 py-3 text-sm font-medium text-black transition hover:bg-zinc-200">
+            <a href="mailto:stellarieX@proton.me" className="mt-7 inline-block rounded-full bg-white px-8 py-3 text-sm font-medium text-black transition hover:bg-zinc-200">
               Talk to us
             </a>
           </div>
@@ -510,6 +533,7 @@ export default function Home() {
         <footer className="border-t border-white/10">
           <div className="mx-auto flex max-w-7xl flex-col items-center justify-between gap-2 px-6 py-8 text-[12px] text-zinc-600 sm:flex-row sm:px-10 lg:px-16">
             <span>Heliotrope</span>
+            <a href="mailto:stellarieX@proton.me" className="transition hover:text-zinc-300">stellarieX@proton.me</a>
             <span>© {new Date().getFullYear()}</span>
           </div>
         </footer>

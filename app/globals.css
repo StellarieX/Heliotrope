@@ -37,7 +37,43 @@ body {
   transform: translateY(0);
 }
 
+/* smooth anchor travel + landing offset */
+html {
+  scroll-behavior: smooth;
+}
+
+section[id] {
+  scroll-margin-top: 16px;
+}
+
+/* motion-blur pulse while nav-travelling */
+@keyframes nav-blur {
+  0% {
+    filter: blur(0);
+    transform: scaleY(1);
+  }
+  35% {
+    filter: blur(7px);
+    transform: scaleY(0.992);
+  }
+  100% {
+    filter: blur(0);
+    transform: scaleY(1);
+  }
+}
+
+.nav-motion {
+  animation: nav-blur 0.55s ease;
+  will-change: filter, transform;
+}
+
 @media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  .nav-motion {
+    animation: none;
+  }
   .rise,
   .reveal {
     opacity: 1;
