@@ -1,73 +1,51 @@
-"""Load intelligence provider boundary (Phase 3, §11, §26; M4 live).
+"""Load intelligence provider boundary (Phase 3, §11, §26).
 
     LoadIntelligenceProvider
             |
     RuleBasedLoadIntelligence   <-- the default, always available
             |
-    JevLoadIntelligence         <-- Gemini-structured classifier with honest fallback
+    JevLoadIntelligence         <-- Jev (TypeSafe AI System One model), with honest fallback
 
 WHY RULES FIRST. The backend must boot, classify and validate with no network,
-no API key and no model. That buys four things this phase needs: deterministic
-tests, an offline demo, low latency, and graceful degradation when an external
-service is down.
+no API key and no model. That buys deterministic tests, an offline demo, low
+latency, and graceful degradation when an external service is down.
 
-Jev/Gemini is a live adapter, not a fabrication (§26): when a key is present it
-attempts one structured Gemini call and strictly validates the JSON against the
-Classification enums. ANY failure — no key, HTTP error, bad JSON, unknown enum —
-falls back to the RuleBasedLoadClassifier and records the fallback as an
-Assumption (ParameterOrigin.ESTIMATED), so the response always says what it is.
+WHY JEV. Classifying a load is a typed decision, not a text-generation task. Jev
+(see services/jev_client.py) answers two Choice questions, the scheduling
+behaviour and the category, and returns calibrated probabilities and a confidence
+for each. That confidence becomes the classification's confidence (it is not a
+constant), and the runner-up options become its alternatives.
+
+ANY failure (no key, HTTP error, rate limit, malformed answer) falls back to the
+RuleBasedLoadClassifier and records the fallback as an Assumption
+(ParameterOrigin.ESTIMATED), so the response always says what it is.
 """
 
 from __future__ import annotations
 
-import json
-import threading
-import time
-from collections import deque
-from typing import Any, Optional
-
-import httpx
+from typing import Any
 
 from ..core import config
 from ..domain.loads import (
     Assumption,
     LoadCategory,
+    LoadSpec,
     LoadType,
     ParameterOrigin,
     required_fields_for,
     semantics_for,
 )
+from . import jev_client
 from .classification import (
+    LOW_CONFIDENCE_THRESHOLD,
+    Alternative,
     Classification,
     RuleBasedLoadClassifier,
     display_name,
     normalize_text,
 )
+from .jev_client import JevError
 from .load_normalizer import LoadIntelligenceService, LoadRequest, normalize_request
-from ..domain.loads import LoadSpec
-
-GEMINI_TIMEOUT_S = 10.0
-
-
-# A load description classifies the same way every time (temperature 0), and one
-# request asks twice (classify + normalize), so remember answers. Only successes are
-# kept: a fallback is often transient and must not stick.
-_CACHE_MAX = 256
-_cache: "dict[tuple[str, str], tuple[Classification, dict[str, Any]]]" = {}
-_cache_lock = threading.Lock()
-_call_times: "deque[float]" = deque()
-
-
-def _within_rate_limit() -> bool:
-    """Sliding one-minute window over actual model calls."""
-    now = time.monotonic()
-    with _cache_lock:
-        while _call_times and now - _call_times[0] > 60.0:
-            _call_times.popleft()
-        if len(_call_times) >= max(1, config.GEMINI_MAX_CALLS_PER_MIN):
-            return False
-        _call_times.append(now)
-        return True
 
 
 class IntelligenceUnavailable(RuntimeError):
@@ -102,101 +80,46 @@ class RuleBasedLoadIntelligence(LoadIntelligenceService):
 
 
 def resolve_api_key(explicit: str | None = None) -> str | None:
-    """Precedence: explicit arg > GEMINI_API_KEY > JEV_API_KEY (legacy alias)."""
-    if explicit:
-        return explicit
-    return config.GEMINI_API_KEY or config.JEV_API_KEY
+    """Explicit argument, else JEV_API_KEY, else TYPESAFE_API_KEY."""
+    return jev_client.resolve_api_key(explicit)
 
 
-class _GeminiUnusable(RuntimeError):
-    """Internal: Gemini did not yield a trustworthy classification."""
+# --- the two decisions Jev is asked --------------------------------------------
+
+_JOB_TYPE_HELP = {
+    "FIXED": "Always-on, or must run exactly when it is used, so it can never be moved in time (fridge, lights, TV, router, fan).",
+    "DEFERRABLE_ATOMIC": "Runs one continuous cycle that must not be interrupted once started (washing machine, dryer, dishwasher, oven cycle).",
+    "DEFERRABLE_INTERRUPTIBLE": "Needs a total amount of energy by a deadline and can pause and resume at will (EV or battery charging, a pump filling a tank).",
+    "THERMAL": "Heats or cools something that holds temperature, so it can run ahead of need within a comfort band (water heater, geyser, air conditioner, room heater).",
+}
+_CATEGORY_HELP = {
+    "EV charging": "Charging an electric vehicle or electric two-wheeler.",
+    "Laundry": "Washing machine or clothes dryer.",
+    "Dishwashing": "Dishwasher.",
+    "Water heating": "Water heater, geyser or boiler.",
+    "Space heating": "Room heater or a heating appliance for a space.",
+    "Cooling": "Air conditioner or cooler.",
+    "Pumping": "Water pump, borewell or tank-filling motor.",
+    "Refrigeration": "Fridge or freezer.",
+    "Always-on": "Lights, fans, TV, router, computers, anything left on while in use.",
+    "Battery storage": "Stationary battery, inverter or power bank charging.",
+    "Unknown": "Does not clearly fit any other category.",
+}
 
 
-def _gemini_prompt(text: str) -> str:
-    categories = sorted(c.value for c in LoadCategory)
-    job_types = sorted(t.value for t in LoadType)
-    return (
-        "Classify this household load for energy scheduling. "
-        "Respond with ONLY a JSON object, no markdown, no explanation, with keys: "
-        '"job_type" (one of ' + ", ".join(job_types) + "), "
-        '"category" (one of ' + ", ".join(categories) + '), '
-        'optional "power_kw" (number >= 0), optional "duration_minutes" (integer > 0). '
-        f'Load description: "{text}"'
-    )
-
-
-def _extract_gemini_text(payload: dict) -> str:
-    try:
-        candidates = payload["candidates"]
-        text = candidates[0]["content"]["parts"][0]["text"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise _GeminiUnusable(f"unexpected Gemini response shape: {exc}") from exc
-    if not isinstance(text, str) or not text.strip():
-        raise _GeminiUnusable("empty Gemini response text")
-    return text.strip()
-
-
-def _parse_gemini_payload(text: str) -> dict:
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        lines = cleaned.splitlines()
-        lines = [ln for ln in lines if not ln.strip().startswith("```")]
-        cleaned = "\n".join(lines).strip()
-    try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        raise _GeminiUnusable(f"Gemini response is not valid JSON: {exc}") from exc
-    if not isinstance(data, dict):
-        raise _GeminiUnusable("Gemini response JSON is not an object")
-    return data
-
-
-def _validate_gemini_data(data: dict) -> tuple[LoadType, LoadCategory, Optional[float], Optional[int]]:
-    try:
-        job_type = LoadType(str(data["job_type"]))
-    except (KeyError, ValueError) as exc:
-        raise _GeminiUnusable(f"unknown job_type {data.get('job_type')!r}: {exc}") from exc
-    try:
-        category = LoadCategory(str(data["category"]))
-    except (KeyError, ValueError) as exc:
-        raise _GeminiUnusable(f"unknown category {data.get('category')!r}: {exc}") from exc
-    power_kw: Optional[float] = None
-    if data.get("power_kw") is not None:
-        try:
-            power_kw = float(data["power_kw"])
-        except (TypeError, ValueError) as exc:
-            raise _GeminiUnusable(f"bad power_kw {data.get('power_kw')!r}") from exc
-        if power_kw < 0:
-            raise _GeminiUnusable(f"negative power_kw {power_kw!r}")
-    duration_minutes: Optional[int] = None
-    if data.get("duration_minutes") is not None:
-        try:
-            duration_minutes = int(data["duration_minutes"])
-        except (TypeError, ValueError) as exc:
-            raise _GeminiUnusable(f"bad duration_minutes {data.get('duration_minutes')!r}") from exc
-        if duration_minutes <= 0:
-            raise _GeminiUnusable(f"non-positive duration_minutes {duration_minutes!r}")
-    return job_type, category, power_kw, duration_minutes
-
-
-def _gemini_classify_raw(text: str, api_key: str) -> tuple[LoadType, LoadCategory, Optional[float], Optional[int]]:
-    url = f"{config.GEMINI_BASE_URL}/models/{config.GEMINI_MODEL}:generateContent"
-    body = {
-        "contents": [{"parts": [{"text": _gemini_prompt(text)}]}],
-        # Ask for raw JSON and no sampling noise: the reply is parsed strictly.
-        "generationConfig": {"responseMimeType": "application/json", "temperature": 0},
+def _questions() -> dict[str, dict[str, Any]]:
+    return {
+        "job_type": {
+            "type": "choice",
+            "instructions": "How can the electricity use of this household load be scheduled in time?",
+            "criteria": {t.value: _JOB_TYPE_HELP.get(t.value) for t in LoadType},
+        },
+        "category": {
+            "type": "choice",
+            "instructions": "Which kind of household load is this?",
+            "criteria": {c.value: _CATEGORY_HELP.get(c.value) for c in LoadCategory},
+        },
     }
-    try:
-        response = httpx.post(
-            url, params={"key": api_key}, json=body, timeout=GEMINI_TIMEOUT_S
-        )
-        response.raise_for_status()
-        payload = response.json()
-    except (httpx.HTTPError, ValueError) as exc:
-        raise _GeminiUnusable(f"Gemini request failed: {exc}") from exc
-    raw_text = _extract_gemini_text(payload)
-    data = _parse_gemini_payload(raw_text)
-    return _validate_gemini_data(data)
 
 
 def _fallback_classification(text: str, reason: str) -> Classification:
@@ -204,69 +127,83 @@ def _fallback_classification(text: str, reason: str) -> Classification:
     note = Assumption(
         field="classifier",
         origin=ParameterOrigin.ESTIMATED,
-        detail=f"Gemini unavailable ({reason}); rule-based fallback used",
+        detail=f"Jev unavailable ({reason}); rule-based fallback used",
     )
     return base.model_copy(update={"assumptions": [*base.assumptions, note]})
 
 
-def _gemini_classification(
-    text: str, job_type: LoadType, category: LoadCategory,
-    power_kw: Optional[float], duration_minutes: Optional[int],
-) -> Classification:
+def _jev_classification(text: str, api_key: str | None = None) -> Classification:
+    """Ask Jev; raises JevError on any failure."""
+    answers = jev_client.ask({"load_description": text}, _questions(), api_key=api_key)
+    return _classification_from_answers(text, answers)
+
+
+def _classification_from_answers(text: str, answers: dict[str, dict[str, Any]]) -> Classification:
+    """Pure mapping from Jev's two Choice answers to a Classification."""
+    job_type_v, jt_conf, jt_probs = jev_client.choice(answers["job_type"], {t.value for t in LoadType})
+    category_v, cat_conf, cat_probs = jev_client.choice(answers["category"], {c.value for c in LoadCategory})
+    job_type = LoadType(job_type_v)
+    category = LoadCategory(category_v)
     sem = semantics_for(job_type)
-    assumptions = [
-        Assumption(
-            field="category",
-            origin=ParameterOrigin.ESTIMATED,
-            detail="category and job type proposed by Gemini structured output; verify before relying on it",
-        )
-    ]
-    if power_kw is not None:
-        assumptions.append(
-            Assumption(
-                field="power_kw",
-                origin=ParameterOrigin.ESTIMATED,
-                detail=f"Gemini suggested power_kw={power_kw}; not measured, confirm it",
+
+    # The reading is only as sure as its weaker half.
+    confidence = max(0.0, min(1.0, min(jt_conf, cat_conf)))
+
+    alternatives: list[Alternative] = []
+    for v, p in sorted(jt_probs.items(), key=lambda kv: -kv[1]):
+        if v != job_type_v and p >= 0.10 and v in {t.value for t in LoadType}:
+            alternatives.append(
+                Alternative(
+                    category=category,
+                    job_type=LoadType(v),
+                    weight=round(p, 3),
+                    reason=f"Jev gave this scheduling behaviour {p:.0%} probability.",
+                )
             )
-        )
-    if duration_minutes is not None:
-        assumptions.append(
-            Assumption(
-                field="duration_minutes",
-                origin=ParameterOrigin.ESTIMATED,
-                detail=f"Gemini suggested duration_minutes={duration_minutes}; not measured, confirm it",
+    for v, p in sorted(cat_probs.items(), key=lambda kv: -kv[1]):
+        if v != category_v and p >= 0.10 and v in {c.value for c in LoadCategory}:
+            alternatives.append(
+                Alternative(
+                    category=LoadCategory(v),
+                    job_type=job_type,
+                    weight=round(p, 3),
+                    reason=f"Jev gave this category {p:.0%} probability.",
+                )
             )
-        )
+
     return Classification(
         name=display_name(text),
         input=text or "",
         category=category,
         job_type=job_type,
         shiftable=sem.shiftable,
-        # Unverified LLM output stays below the rule-based low-confidence
-        # threshold (0.70) and is flagged ambiguous: a valid enum is not
-        # evidence the label is right, and 0.75 would claim otherwise.
-        confidence=0.6,
-        ambiguous=True,
+        confidence=confidence,
+        ambiguous=confidence < LOW_CONFIDENCE_THRESHOLD,
         reason=(
-            "Gemini structured classification of the load description. "
-            "Unverified model output — confirm the category before relying on it."
+            f"Jev (System One model) classified this as {category.value} / {job_type.value}: "
+            f"{jt_probs.get(job_type_v, 0):.0%} and {cat_probs.get(category_v, 0):.0%} probability, "
+            f"confidence {confidence:.0%}."
         ),
-        matched_rule="gemini",
-        alternatives=[],
+        matched_rule="jev",
+        alternatives=alternatives,
         required_fields=list(required_fields_for(job_type)),
         thermal_example=None,
-        assumptions=assumptions,
+        assumptions=[
+            Assumption(
+                field="category",
+                origin=ParameterOrigin.ESTIMATED,
+                detail="type and category decided by Jev with calibrated confidence; confirm if it matters",
+            )
+        ],
     )
 
 
 class JevLoadIntelligence:
-    """Gemini-backed classifier with per-call honest fallback.
+    """Jev-backed classifier with per-call honest fallback.
 
-    `available()` is True when a key is configured (GEMINI_API_KEY or the
-    JEV_API_KEY legacy alias). Every `classify`/`normalize` call attempts one
-    Gemini structured call and falls back to the rule-based classifier on any
-    failure, recording the fallback as an assumption.
+    `available()` is True when a key is configured (JEV_API_KEY, or TYPESAFE_API_KEY).
+    Every `classify`/`normalize` call asks Jev and falls back to the rule-based
+    classifier on any failure, recording the fallback as an assumption.
     """
 
     name = "jev"
@@ -283,51 +220,22 @@ class JevLoadIntelligence:
         """True when a key is present. Per-call success is not cached."""
         return self.configured
 
-    def _classify_inner(self, text: str) -> tuple[Classification, dict[str, Any]]:
-        key = resolve_api_key(self._explicit_key)
-        if not key:
-            return _fallback_classification(text, "no API key configured"), {}
-        cache_key = (config.GEMINI_MODEL, normalize_text(text))
-        with _cache_lock:
-            hit = _cache.get(cache_key)
-        if hit is not None:
-            return hit[0], dict(hit[1])
-        if not _within_rate_limit():
-            return _fallback_classification(text, "AI call limit reached; try again in a minute"), {}
+    def _classify_inner(self, text: str) -> Classification:
+        if not self.configured:
+            return _fallback_classification(text, "no API key configured")
         try:
-            job_type, category, power_kw, duration = _gemini_classify_raw(text, key)
-        except _GeminiUnusable as exc:
-            return _fallback_classification(text, str(exc)), {}
-        classification = _gemini_classification(text, job_type, category, power_kw, duration)
-        hints: dict[str, Any] = {}
-        if power_kw is not None:
-            hints["power_kw"] = power_kw
-        if duration is not None:
-            hints["duration_minutes"] = duration
-        hints["_classification"] = classification
-        with _cache_lock:
-            if len(_cache) >= _CACHE_MAX:
-                _cache.pop(next(iter(_cache)))
-            _cache[cache_key] = (classification, dict(hints))
-        return classification, hints
+            return _jev_classification(text, self._explicit_key)
+        except JevError as exc:
+            return _fallback_classification(text, str(exc))
 
     def classify(self, text: str) -> Classification:
-        classification, _ = self._classify_inner(text or "")
-        return classification
+        return self._classify_inner(text or "")
 
     def normalize(self, request: LoadRequest, now=None) -> LoadSpec:
-        classification, hints = self._classify_inner(request.name)
-        patched = request
-        fill: dict[str, Any] = {}
-        if hints.get("power_kw") is not None and request.power_kw is None:
-            fill["power_kw"] = hints["power_kw"]
-        if hints.get("duration_minutes") is not None and request.duration_minutes is None:
-            fill["duration_minutes"] = hints["duration_minutes"]
-        if fill:
-            patched = request.model_copy(update=fill)
+        classification = self._classify_inner(request.name)
 
         class _Fixed:
-            name = "gemini_or_rules"
+            name = "jev_or_rules"
 
             def __init__(self, fixed: Classification, rules: RuleBasedLoadClassifier) -> None:
                 self._fixed = fixed
@@ -338,28 +246,17 @@ class JevLoadIntelligence:
                     return self._fixed
                 return self._rules.classify(text)
 
-        spec = normalize_request(
-            patched, now=now, classifier=_Fixed(classification, self._rules)  # type: ignore[arg-type]
+        return normalize_request(
+            request, now=now, classifier=_Fixed(classification, self._rules)  # type: ignore[arg-type]
         )
-        if fill:
-            extra = [
-                Assumption(
-                    field=field,
-                    origin=ParameterOrigin.ESTIMATED,
-                    detail=f"{field} suggested by Gemini; not measured, confirm it",
-                )
-                for field in fill
-            ]
-            spec = spec.model_copy(update={"assumptions": [*spec.assumptions, *extra]})
-        return spec
 
 
 def get_load_intelligence() -> LoadIntelligenceProvider:
     """The provider the API uses.
 
-    Rule-based by default and whenever unconfigured. `"jev"` is honored only
-    when a Gemini/Jev key is present; the Jev provider itself still falls back
-    per call, so callers never see an exception for a missing model.
+    Rule-based by default and whenever unconfigured. `"jev"` or `"auto"` is honored
+    only when a Jev key is present; the Jev provider itself still falls back per
+    call, so callers never see an exception for an unreachable model.
     """
     requested = (config.LOAD_INTELLIGENCE_PROVIDER or "rule_based").lower()
     if requested in ("jev", "auto"):

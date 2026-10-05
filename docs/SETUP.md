@@ -31,10 +31,10 @@ cp .env.example .env.local   # fill Firebase keys + backend URL
 | `CARBON_MAX_RANGE_DAYS` | backend | no | default `7` |
 | `CARBON_CACHE_TTL_S` | backend | no | default `300` |
 | `CARBON_SYNTHETIC_SEED` | backend | no | default `7` |
-| `LOAD_INTELLIGENCE_PROVIDER` | backend | no | default `rule_based`; `auto` enables the Jev AI classifier whenever a key is set |
+| `LOAD_INTELLIGENCE_PROVIDER` | backend | no | default `rule_based`; `auto` enables Jev whenever a key is set |
 | `DEFAULT_LOAD_TIMEZONE` | backend | no | default `UTC` |
-| `JEV_API_KEY` | backend | no | legacy alias for `GEMINI_API_KEY`; `GEMINI_API_KEY` wins when both are set (`backend/app/core/config.py:33`) |
-| `GEMINI_API_KEY` | backend | no | Jev (Gemini) classifier via `httpx`; model `GEMINI_MODEL` (default `gemini-2.5-flash`), capped at `GEMINI_MAX_CALLS_PER_MIN` (30); falls back to local rules when unset, over the cap, or on error |
+| `JEV_API_KEY` | backend | no | your TypeSafe AI key (Jev); `TYPESAFE_API_KEY`, the name its SDK reads, also works. Sent only to `api.typesafe.ai` |
+| `JEV_MODEL` / `JEV_MAX_CALLS_PER_MIN` | backend | no | defaults `jev-latest` / `120`; over the cap or on any error the built-in rules answer and say so |
 | `ELECTRICITY_MAPS_API_KEY` | backend | no | live Electricity Maps adapter via `httpx` (zone `ELECTRICITY_MAPS_ZONE`, default `US-CAL-CISO`); only used with `CARBON_PROVIDER=external` (returns the past 24h) |
 
 Never prefix secrets with `NEXT_PUBLIC_` — those are bundled into browser JS.

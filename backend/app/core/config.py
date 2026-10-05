@@ -66,13 +66,12 @@ del _VERCEL_HOSTS
 CORS_ALLOW_LOCALHOST_IN_DEVELOPMENT = HELIOTROPE_ENV != "production"
 
 # Optional: never required to boot, never sent to the browser.
-# Precedence for the Gemini/Jev classifier key: GEMINI_API_KEY wins when set;
-# JEV_API_KEY is honored as a legacy alias so existing deployments keep working.
-# Resolve via `GEMINI_API_KEY or JEV_API_KEY` at the use site (see
-# services/load_intelligence.py) rather than baking the fallback in here, so
-# tests and callers can distinguish "new key set" from "legacy alias set".
+# Jev (TypeSafe AI's System One model) key. JEV_API_KEY is the name used in this
+# project's deployments; TYPESAFE_API_KEY is the name TypeSafe's own SDK reads.
+# This key is only ever sent to TypeSafe's API (JEV_BASE_URL), never to any other
+# provider.
 JEV_API_KEY = os.environ.get("JEV_API_KEY")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+TYPESAFE_API_KEY = os.environ.get("TYPESAFE_API_KEY")
 ELECTRICITY_MAPS_API_KEY = os.environ.get("ELECTRICITY_MAPS_API_KEY")
 ELECTRICITY_MAPS_ZONE = _get("ELECTRICITY_MAPS_ZONE", "US-CAL-CISO")
 
@@ -95,15 +94,15 @@ CARBON_WEATHER_SOLAR_SHARE = _get_float("CARBON_WEATHER_SOLAR_SHARE", "0.20")
 CARBON_WEATHER_WIND_SHARE = _get_float("CARBON_WEATHER_WIND_SHARE", "0.10")
 
 # Load Intelligence. "rule_based" never leaves the process (the library default,
-# so tests and offline runs are deterministic). "jev" uses the Gemini-backed
-# classifier and still falls back to the rules per call, recording why.
+# so tests and offline runs are deterministic). "jev" asks Jev (see
+# services/jev_client.py) and still falls back to the rules per call, recording why.
 # "auto" means: jev when a key is configured, otherwise rule_based.
 LOAD_INTELLIGENCE_PROVIDER = _get("LOAD_INTELLIGENCE_PROVIDER", "rule_based")
-GEMINI_MODEL = _get("GEMINI_MODEL", "gemini-2.5-flash")
+JEV_MODEL = _get("JEV_MODEL", "jev-latest")
 # Override only to route through a proxy or a local stand-in for tests.
-# Hard ceiling on model calls per minute for the whole process. The API is public,
-# so without it anyone could burn the key's quota; over the limit, requests are
-# answered by the built-in rules instead (and say so).
-GEMINI_MAX_CALLS_PER_MIN = _get_int("GEMINI_MAX_CALLS_PER_MIN", "30")
-GEMINI_BASE_URL = _get("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
+JEV_BASE_URL = _get("JEV_BASE_URL", "https://api.typesafe.ai").rstrip("/")
+# Hard ceiling on Jev calls per minute for the whole process. The API is public, so
+# without it anyone could burn the key's quota; over the limit the built-in rules
+# answer instead (and say so).
+JEV_MAX_CALLS_PER_MIN = _get_int("JEV_MAX_CALLS_PER_MIN", "120")
 DEFAULT_LOAD_TIMEZONE = _get("DEFAULT_LOAD_TIMEZONE", "UTC")

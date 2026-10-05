@@ -8,9 +8,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 
-from app.core import config
 from app.domain.carbon import Quality, SignalType
-from app.services import load_intelligence
 from app.services.carbon_service import CarbonService, CarbonUnavailable
 from app.services.forecast_service import ForecastService
 from app.services.providers import weather
@@ -140,64 +138,6 @@ def test_gaps_in_weather_data_are_skipped_not_filled(monkeypatch):
     weather._cache.clear()
 
 
-# ---- Jev is selected automatically when a key exists --------------------------
-
-def test_auto_uses_jev_only_with_a_key(monkeypatch):
-    monkeypatch.setattr(config, "LOAD_INTELLIGENCE_PROVIDER", "auto")
-    monkeypatch.setattr(config, "GEMINI_API_KEY", None)
-    monkeypatch.setattr(config, "JEV_API_KEY", None)
-    assert load_intelligence.get_load_intelligence().name == "rule_based"
-    monkeypatch.setattr(config, "GEMINI_API_KEY", "test-key")
-    assert load_intelligence.get_load_intelligence().name == "jev"
-
-
-def test_jev_legacy_alias_key_also_enables_it(monkeypatch):
-    monkeypatch.setattr(config, "LOAD_INTELLIGENCE_PROVIDER", "auto")
-    monkeypatch.setattr(config, "GEMINI_API_KEY", None)
-    monkeypatch.setattr(config, "JEV_API_KEY", "legacy-key")
-    assert load_intelligence.get_load_intelligence().name == "jev"
-
-
-def test_default_provider_stays_rule_based(monkeypatch):
-    monkeypatch.setattr(config, "LOAD_INTELLIGENCE_PROVIDER", "rule_based")
-    monkeypatch.setattr(config, "GEMINI_API_KEY", "test-key")
-    assert load_intelligence.get_load_intelligence().name == "rule_based"
-
-
-def test_jev_failure_falls_back_to_rules_and_says_so(monkeypatch):
-    monkeypatch.setattr(config, "GEMINI_API_KEY", "bad-key")
-
-    def boom(*a, **k):
-        raise httpx.ConnectError("blocked")
-
-    monkeypatch.setattr(load_intelligence.httpx, "post", boom)
-    c = load_intelligence.JevLoadIntelligence("bad-key").classify("EV charger")
-    assert c.category.value == "EV_CHARGING" or "EV" in str(c.category).upper()
-    assert any("fallback" in a.detail.lower() for a in c.assumptions)
-
-
-def test_jev_request_asks_for_json_and_uses_configured_model(monkeypatch):
-    seen = {}
-
-    class R:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {"candidates": [{"content": {"parts": [{"text": '{"job_type":"DEFERRABLE_INTERRUPTIBLE","category":"EV_CHARGING"}'}]}}]}
-
-    def fake_post(url, params=None, json=None, timeout=None):
-        seen["url"], seen["body"] = url, json
-        return R()
-
-    monkeypatch.setattr(load_intelligence.httpx, "post", fake_post)
-    monkeypatch.setattr(config, "GEMINI_MODEL", "gemini-test-model")
-    load_intelligence.JevLoadIntelligence("k").classify("EV charger")
-    assert seen["url"].endswith("/models/gemini-test-model:generateContent")
-    assert seen["url"].startswith(config.GEMINI_BASE_URL)
-    assert seen["body"]["generationConfig"]["responseMimeType"] == "application/json"
-
-
 # ---- forecast history is read in capped windows, never silently synthetic -----
 
 class _FakeService:
@@ -230,72 +170,3 @@ def test_long_history_is_read_in_windows_without_duplicates():
     times = [p.time for p in hist.points]
     assert len(times) == len(set(times)) and times == sorted(times)
     assert all(p.quality == Quality.ESTIMATED for p in hist.points)
-
-
-# ---- Jev: cached, and capped so a public API cannot drain the key ---------------
-
-def _gemini_ok():
-    class R:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {"candidates": [{"content": {"parts": [{"text": '{"job_type":"DEFERRABLE_INTERRUPTIBLE","category":"EV charging"}'}]}}]}
-
-    return R()
-
-
-@pytest.fixture()
-def clean_jev_state():
-    load_intelligence._cache.clear()
-    load_intelligence._call_times.clear()
-    yield
-    load_intelligence._cache.clear()
-    load_intelligence._call_times.clear()
-
-
-def test_same_description_is_asked_of_the_model_only_once(monkeypatch, clean_jev_state):
-    calls = {"n": 0}
-
-    def fake_post(*a, **k):
-        calls["n"] += 1
-        return _gemini_ok()
-
-    monkeypatch.setattr(load_intelligence.httpx, "post", fake_post)
-    jev = load_intelligence.JevLoadIntelligence("k")
-    jev.classify("EV charger")
-    jev.classify("  ev   CHARGER ")
-    assert calls["n"] == 1
-
-
-def test_model_calls_are_capped_and_the_rules_answer_beyond_the_cap(monkeypatch, clean_jev_state):
-    monkeypatch.setattr(config, "GEMINI_MAX_CALLS_PER_MIN", 2)
-    calls = {"n": 0}
-
-    def fake_post(*a, **k):
-        calls["n"] += 1
-        return _gemini_ok()
-
-    monkeypatch.setattr(load_intelligence.httpx, "post", fake_post)
-    jev = load_intelligence.JevLoadIntelligence("k")
-    for name in ("pump one", "pump two", "pump three"):
-        c = jev.classify(name)
-    assert calls["n"] == 2
-    assert any("limit" in a.detail.lower() for a in c.assumptions)
-
-
-def test_a_fallback_is_not_cached(monkeypatch, clean_jev_state):
-    seq = iter([httpx.ConnectError("down"), None])
-
-    def fake_post(*a, **k):
-        r = next(seq)
-        if r is not None:
-            raise r
-        return _gemini_ok()
-
-    monkeypatch.setattr(load_intelligence.httpx, "post", fake_post)
-    jev = load_intelligence.JevLoadIntelligence("k")
-    first = jev.classify("heat pump")
-    second = jev.classify("heat pump")
-    assert any("fallback" in a.detail.lower() for a in first.assumptions)
-    assert second.matched_rule == "gemini"

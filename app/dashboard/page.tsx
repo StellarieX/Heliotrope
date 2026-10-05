@@ -5,7 +5,7 @@ import Link from "next/link";
 import { onAuthStateChanged, signInWithPopup, signOut, type User } from "firebase/auth";
 import { addDoc, collection, deleteDoc, doc, getDoc, getDocs, updateDoc } from "firebase/firestore";
 import { getDb, getFirebaseAuth, getGoogleProvider } from "../../lib/firebase";
-import { jevRank, classifyJob, type JobInput, type RankedJob } from "../../lib/prioritize";
+import { jevRank, classifyJob, hoursUntilReady, type JobInput, type RankedJob } from "../../lib/prioritize";
 import {
   compareSchedulers,
   coordinateBuilding,
@@ -13,6 +13,7 @@ import {
   getCarbonSignal,
   getScheduleHistory,
   getScheduleState,
+  prioritizeLoads,
   planSchedule,
   postScheduleEvent,
   replanSchedule,
@@ -255,6 +256,8 @@ export default function Dashboard() {
   const [profileLoaded, setProfileLoaded] = useState(false);
   const [jobs, setJobs] = useState<DashboardJob[]>([]);
   const [ranked, setRanked] = useState<RankedJob[] | null>(null);
+  const [ranking, setRanking] = useState(false);
+  const [rankNote, setRankNote] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [fName, setFName] = useState("");
   const [fPower, setFPower] = useState("");
@@ -264,7 +267,7 @@ export default function Dashboard() {
   const [fDuration, setFDuration] = useState("");
   const [fTempMin, setFTempMin] = useState("");
   const [fTempMax, setFTempMax] = useState("");
-  // Backend classification of the name being typed (AI when Jev is on, else rules).
+  // Backend classification of the name being typed (Jev when a key is set, else the built-in rules).
   const activePreview = useClassification(fName, fReady);
   const [signal, setSignal] = useState<CarbonSignalResponse | null>(null);
   const [signalError, setSignalError] = useState<string | null>(null);
@@ -799,6 +802,48 @@ export default function Dashboard() {
     setAddError(null);
   }
 
+  /** Rank by priority: Jev judges how essential each appliance is, the backend combines
+   *  that with time pressure, size and rigidity. Falls back to the local heuristic, and
+   *  says so, if the backend is unreachable. */
+  async function toggleRanking() {
+    if (ranked) {
+      setRanked(null);
+      setRankNote(null);
+      return;
+    }
+    const shiftable = jobs.filter((j) => j.shiftable !== false);
+    setRanking(true);
+    try {
+      const res = await prioritizeLoads(
+        shiftable.map((j) => ({
+          id: j.id,
+          name: j.name,
+          kind: j.kind,
+          power_kw: j.powerKw,
+          hours_until_ready: hoursUntilReady(j.readyBy),
+          flex_hours: j.flexHours,
+        }))
+      );
+      const byId = new Map(shiftable.map((j) => [j.id, j]));
+      setRanked(
+        res.items.flatMap((it) => {
+          const j = byId.get(it.id);
+          return j ? [{ ...j, score: it.score, band: it.band, reason: it.reason, source: it.source }] : [];
+        })
+      );
+      setRankNote(
+        res.provider === "jev"
+          ? "Ranked with Jev (importance) plus time pressure, size and flexibility."
+          : res.notes[0] ?? "Ranked with the built-in heuristic."
+      );
+    } catch {
+      setRanked(jevRank(jobs));
+      setRankNote("Backend unreachable: ranked with the local heuristic.");
+    } finally {
+      setRanking(false);
+    }
+  }
+
   async function saveDetail(id: string, need: Detail, value: number) {
     if (!user) return;
     const db = getDb();
@@ -1026,15 +1071,18 @@ export default function Dashboard() {
               </p>
             </div>
             <button
-              onClick={() => setRanked(ranked ? null : jevRank(jobs))}
-              disabled={jobs.length === 0}
-              title="A quick priority order by urgency, size and flexibility. The real timing comes from Plan live below."
+              onClick={() => void toggleRanking()}
+              disabled={jobs.length === 0 || ranking}
+              title="Which load matters first: Jev judges how essential each appliance is; time pressure, size and flexibility are added. The real timing comes from Plan live below."
               className="min-h-11 cursor-pointer rounded-full border border-white/15 px-5 py-2 text-[13px] text-zinc-300 transition hover:border-white/40 hover:text-white active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-30"
             >
-              {ranked ? "Hide ranking" : "Rank by priority"}
+              {ranking ? "Ranking…" : ranked ? "Hide ranking" : "Rank by priority"}
             </button>
           </div>
 
+          {ranked && rankNote && (
+            <p className="border-t border-white/5 px-4 py-3 font-mono text-[11px] text-zinc-500 sm:px-8">{rankNote}</p>
+          )}
           {loadError && (
             <div role="alert" className="flex flex-wrap items-center justify-between gap-3 border-t border-white/5 px-6 py-4 sm:px-8">
               <p className="font-mono text-[12px] text-orange-300">{loadError}</p>
@@ -1056,7 +1104,16 @@ export default function Dashboard() {
                     {j.shiftable === false ? (
                       <span className="shrink-0 rounded-full bg-white/5 px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider text-zinc-500">always-on · filtered</span>
                     ) : (
-                      ranked && j.band && <BandChip band={j.band} />
+                      ranked && j.band && (
+                        <>
+                          <BandChip band={j.band} />
+                          {j.source === "jev" && (
+                            <span title="Jev judged how essential this appliance is" className="shrink-0 rounded-full bg-violet-400/15 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-violet-300">
+                              jev
+                            </span>
+                          )}
+                        </>
+                      )
                     )}
                   </div>
                   <p className="mt-1.5 text-[13px] text-zinc-500">
@@ -1128,16 +1185,16 @@ export default function Dashboard() {
                         <span
                           title={
                             activePreview.provider === "jev"
-                              ? "Classified by the Jev AI model; double-check the type."
+                              ? `Decided by Jev with ${Math.round(activePreview.confidence * 100)}% confidence.`
                               : activePreview.fallbackReason
-                                ? `AI classifier unavailable (${activePreview.fallbackReason}); the built-in rules answered.`
+                                ? `Jev unavailable (${activePreview.fallbackReason}); the built-in rules answered.`
                                 : "Classified by the built-in rules."
                           }
                           className={`ml-2 shrink-0 rounded-full px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${
                             activePreview.provider === "jev" ? "bg-violet-400/15 text-violet-300" : "bg-white/5 text-zinc-500"
                           }`}
                         >
-                          {activePreview.provider === "jev" ? "AI" : "rules"}
+                          {activePreview.provider === "jev" ? "jev" : "rules"}
                         </span>
                       )}
                     </>

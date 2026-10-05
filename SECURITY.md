@@ -19,9 +19,9 @@
 
 Public `users` reads are intentional so `/[username]` pages resolve without login. Because of that, `users/{uid}` never holds an email, token or address: the rules reject any field outside the allow-list above, and profiles written by older versions are stripped of their `email` automatically when the owner next opens the app. Rules are exercised against the real Firestore emulator in `tests/rules/rules.test.mjs`.
 
-## AI classifier key (Jev / Gemini)
+## Jev key (TypeSafe AI)
 
-The key lives only in the backend environment (Render), never in the browser or on Vercel. Because the API is unauthenticated, model calls are capped per process (`GEMINI_MAX_CALLS_PER_MIN`, default 30) and results are cached, so a caller cannot drain the quota; over the cap the built-in rules answer and the response says so. Free-text load names are sent to Google when the key is set.
+The key lives only in the backend environment (Render), never in the browser or on Vercel, and is only ever sent to `api.typesafe.ai` (`JEV_BASE_URL`). There is no other model provider in the code, so it cannot be sent anywhere else. Because the API is unauthenticated, Jev calls are capped per process (`JEV_MAX_CALLS_PER_MIN`, default 120) and results are cached, so a caller cannot drain the quota; over the cap the built-in rules answer and the response says so. Load names and the appliance details used for ranking (name, category, power, hours until ready) are sent to TypeSafe when the key is set.
 
 ## Backend: no-auth warning
 

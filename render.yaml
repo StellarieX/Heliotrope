@@ -25,11 +25,12 @@ services:
       # (defaults to Bhopal, India) and tune CARBON_WEATHER_* in docs/DEPLOYMENT.md.
       - key: CARBON_PROVIDER
         value: weather
-      # Jev, the AI load classifier: used whenever a key is present, and it falls
-      # back to the built-in rules per request if Gemini is unreachable.
+      # Jev (TypeSafe AI's System One model) decides what kind of load something is
+      # and how essential it is. Used whenever a key is present; each request falls
+      # back to the built-in rules if Jev is unreachable.
       - key: LOAD_INTELLIGENCE_PROVIDER
         value: auto
-      # Paste the same key you already use as JEV_API_KEY on Vercel (either name
-      # works on the backend). Leave blank to run on the built-in rules.
-      - key: GEMINI_API_KEY
+      # Your TypeSafe / Jev API key (the one from console.typesafe.ai/keys). It is only
+      # ever sent to api.typesafe.ai. Leave blank to run on the built-in rules.
+      - key: JEV_API_KEY
         sync: false

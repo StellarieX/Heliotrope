@@ -70,9 +70,12 @@ export type RankedJob = JobInput & {
   score: number; // 0–100
   band: "Critical" | "High" | "Normal" | "Low";
   reason: string;
+  /** Who produced this score: "jev" (Jev judged importance), "heuristic" (backend,
+   *  no Jev), or "local" (this file, when the backend was unreachable). */
+  source?: "jev" | "heuristic" | "local";
 };
 
-function hoursUntilReady(readyBy: string, now = new Date()): number {
+export function hoursUntilReady(readyBy: string, now = new Date()): number {
   const [h, m] = readyBy.split(":").map(Number);
   if (Number.isNaN(h)) return 12;
   const target = h + (m || 0) / 60;
@@ -96,7 +99,7 @@ export function jevRank(jobs: JobInput[], now = new Date()): RankedJob[] {
           : `Ready by ${j.readyBy} (${hrs.toFixed(1)}h out) · ${j.powerKw} kW · +${j.flexHours}h flexible — ${
               band === "Critical" || band === "High" ? "schedule first." : "fits around the big ones."
             }`;
-      return { ...j, score, band, reason };
+      return { ...j, score, band, reason, source: "local" as const };
     })
     .sort((a, b) => b.score - a.score);
 }

@@ -7,6 +7,8 @@
 
     /validate   a fully specified LoadSpec -> a structured feasibility verdict.
 
+    /prioritize loads -> which one matters first (Jev + a transparent composite).
+
 Nothing here schedules anything. Classification is not prioritization and
 neither is optimization; use POST /schedule for the real engines.
 
@@ -28,6 +30,7 @@ from ...domain.loads import Assumption, LoadSemantics, LoadSpec
 from ...services.classification import Classification
 from ...services.load_intelligence import IntelligenceUnavailable, get_load_intelligence
 from ...services.load_normalizer import LoadRequest
+from ...services.prioritization import PriorityRequest, prioritize
 
 router = APIRouter()
 
@@ -103,6 +106,14 @@ def classify_load(body: LoadRequest) -> JSONResponse:
         feasibility=report,
     )
     return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+
+
+@router.post("/loads/prioritize")
+def prioritize_loads(body: PriorityRequest) -> JSONResponse:
+    """Order loads by how much each needs attention. Jev judges how essential each
+    appliance is; time pressure, size and rigidity are computed here. Falls back to a
+    labelled heuristic when Jev is unconfigured or unreachable, never to an error."""
+    return JSONResponse(status_code=200, content=prioritize(body.loads).model_dump(mode="json"))
 
 
 @router.post("/loads/validate")

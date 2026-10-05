@@ -6,6 +6,7 @@ Heliotrope is a carbon-aware scheduler. You describe your loads (EV charging, wa
 
 ## Features
 
+- **Jev decisions** — Jev (TypeSafe AI's System One model) classifies loads with calibrated confidence and judges how essential each appliance is for the "which load first?" ranking (`/loads/prioritize`); time pressure, size and rigidity stay in code. Without a key, a labelled built-in heuristic answers.
 - **Plain-words load intake** — `/loads/classify` turns "geyser at night" into a typed `LoadSpec` (FIXED, ATOMIC, INTERRUPTIBLE, THERMAL) with confidence, ambiguity flags, and recorded assumptions.
 - **Three solvers** — ASAP (carbon-blind baseline), greedy (cheapest-first heuristic), and exact OR-Tools CP-SAT. Integer-scaled arithmetic with overflow guards and an independent post-solve validator; `INFEASIBLE` is an explicit 200 response, never a silent guess.
 - **Carbon-aware planning on a live signal** — the default `weather` provider estimates grid intensity from real solar and wind forecasts (Open-Meteo, no key), labelled `PROXY`/`ESTIMATED`; CSV upload, Electricity Maps history and a fixed test curve are also selectable. Forecasts in EXPECTED or ROBUST (`predicted + λ·(upper − predicted)`) modes, with planned-vs-realized CO₂ scoring and a "vs running now" comparison for every plan.
@@ -40,7 +41,7 @@ The frontend (`app/`, `lib/`) owns identity, load CRUD, and charts. It reaches F
 | Frontend | Next.js 16, React 19, Tailwind CSS v4, TypeScript, Firebase Auth (Google) + Firestore, Vercel hosting |
 | Backend | Python 3.11, FastAPI + Pydantic, OR-Tools CP-SAT, SQLite execution store, pytest + hypothesis |
 | Carbon | Weather-derived proxy from Open-Meteo (production default, keyless), CSV, Electricity Maps history (key-gated), synthetic test curve |
-| Intelligence | Jev: Gemini-based classifier (auto-enabled when a key is set, cached and rate-limited), falling back per request to the built-in rules |
+| Intelligence | Jev, TypeSafe AI's System One model: typed, calibrated decisions for load classification and prioritization (auto-enabled when a key is set, cached, call-capped), falling back per request to the built-in rules |
 
 ## Quickstart
 
@@ -71,7 +72,7 @@ Full environment table and troubleshooting: `docs/SETUP.md`.
 | `CARBON_PROVIDER` | Backend env | `weather` (live proxy; set this in production), `synthetic` (library default, for tests), `csv`, `external` |
 | `CARBON_LAT` / `CARBON_LON` / `CARBON_UTC_OFFSET_HOURS` / `CARBON_WEATHER_*` | Backend env | Site location and the proxy's estimation parameters (default: Bhopal, a coal-heavy grid) |
 | `ELECTRICITY_MAPS_API_KEY` / `ELECTRICITY_MAPS_ZONE` | Backend env | Electricity Maps adapter for `CARBON_PROVIDER=external` (past 24h only) |
-| `GEMINI_API_KEY` (legacy alias `JEV_API_KEY`) / `LOAD_INTELLIGENCE_PROVIDER` / `GEMINI_MODEL` / `GEMINI_MAX_CALLS_PER_MIN` | Backend env | Jev AI classification: `auto` uses it when a key exists (default model `gemini-2.5-flash`, 30 calls/min cap), else the rules |
+| `JEV_API_KEY` (or `TYPESAFE_API_KEY`) / `LOAD_INTELLIGENCE_PROVIDER` / `JEV_MODEL` / `JEV_MAX_CALLS_PER_MIN` | Backend env | Jev: `auto` uses it when a key exists (model `jev-latest`, 120 calls/min cap), else the built-in rules |
 | `CORS_ALLOW_ORIGINS` | Backend env | Allowed browser origins for direct cross-origin mode; unneeded in same-origin mode |
 | `LOG_LEVEL` / `CARBON_MAX_RANGE_DAYS` / `CARBON_CACHE_TTL_S` / `DEFAULT_LOAD_TIMEZONE` | Backend env | `info` / `7` / `300` / `UTC` |
 | `HELIOTROPE_EXECUTION_DB` | Backend env | SQLite path override (default `backend/data/heliotrope_execution.db`) |

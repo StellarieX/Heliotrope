@@ -1,10 +1,16 @@
 # Changelog
 
+## v0.2.1 — Jev, done properly
+
+- **Correction.** v0.2.0 treated Jev as a Gemini wrapper. Jev is TypeSafe AI's System One model, a different provider with a different API. v0.2.0's code would have sent a `JEV_API_KEY` to Google. That Gemini code path is removed entirely; the Jev key can only reach `api.typesafe.ai`.
+- **Real Jev integration** (`backend/app/services/jev_client.py`, per docs.typesafe.ai/api): classification asks two Choice questions and uses Jev's calibrated confidence and probabilities (confidence is no longer a constant, and runner-up options become alternatives). Retries only the documented 429/529, caches successes, and caps calls per minute.
+- **New `/loads/prioritize`.** Jev rates how essential each appliance is (a Score question, ignored below 0.5 confidence); time pressure, size and flexibility are combined in code with transparent weights. The dashboard's "Rank by priority" uses it, labels Jev-judged rows, and falls back to a labelled heuristic when Jev is unavailable.
+- Config: `JEV_API_KEY` (or `TYPESAFE_API_KEY`), `JEV_MODEL`, `JEV_BASE_URL`, `JEV_MAX_CALLS_PER_MIN`. Removed `GEMINI_*`.
+
 ## v0.2.0 — Live data, Jev, no simulation, mobile (2026-10-05)
 
 - **Live carbon signal:** new `weather` provider builds an estimated intensity from real solar and wind forecasts (Open-Meteo, no key), labelled `PROXY`/`ESTIMATED`. `render.yaml` selects it. The default test curve is no longer what the app shows.
 - **Forecast bug fixed:** the forecast always trained on SYNTHETIC history because it asked for 14 days and a single query is capped at 7. History is now read in windows, so the forecast uses the real provider's data.
-- **Jev enabled:** `LOAD_INTELLIGENCE_PROVIDER=auto` uses the Gemini classifier whenever a key is set, with a configurable model, a per-process call cap, a result cache, JSON-mode output, and per-request fallback to the rules. The UI shows an AI/rules badge.
 - **No simulation in the product:** removed the simulated clock (`+15 min`), the demo building data, and the landing page's hand-drawn simulator, invented "pilot" results and fixed-time timeline. The landing page now shows live solver output. The backend `/simulation` endpoint remains as a developer tool.
 - **Real inputs:** "+Nh flexible" now sets the latest finish time (it was stored but never reached the planner). Energy for interruptible loads and run length for atomic loads are asked for instead of assumed; loads missing them are left out of the plan with a prompt on the row.
 - **Shared capacity** now schedules the user's own loads (each its own participant) and refreshes automatically.
@@ -44,7 +50,7 @@
 ## M4 — shipped (live adapters with honest fallback)
 
 - Electricity Maps carbon adapter (live `httpx` call when `ELECTRICITY_MAPS_API_KEY` set, zone `ELECTRICITY_MAPS_ZONE`, default `US-CAL-CISO`); synthetic fallback / 503 when unconfigured or upstream fails.
-- Gemini load-classification adapter (live `httpx` call when `GEMINI_API_KEY` — legacy alias `JEV_API_KEY`, `GEMINI_API_KEY` wins — is set); falls back to rule-based classifier, recorded as an assumption, on any failure.
+- Gemini load-classification adapter (live `httpx` call when `GEMINI_API_KEY` — legacy alias `JEV_API_KEY`, `GEMINI_API_KEY` wins — is set); falls back to rule-based classifier, recorded as an assumption, on any failure. *(superseded by the real Jev integration in v0.2.1)*
 - Tick + telemetry endpoints (`POST /schedules/{id}/tick`, `POST /schedules/{id}/telemetry` with `MEASURED` vs `SIMULATED` source) and time-varying `capacity_profile_kw` on `/schedule`, coordination, and replan.
 
 ## M5 — shipped (Tier 5)

@@ -10,7 +10,7 @@ export interface Classified {
   category: string;
   confidence: number;
   ambiguous: boolean;
-  /** Which classifier answered: "jev" (AI) or "rule_based". */
+  /** Which classifier answered: "jev" (TypeSafe's System One model) or "rule_based". */
   provider: string;
   /** Set when the AI classifier was asked but fell back to the rules, with why. */
   fallbackReason: string | null;

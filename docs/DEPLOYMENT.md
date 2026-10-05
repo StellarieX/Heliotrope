@@ -69,11 +69,11 @@ Environment:
 | `CARBON_LAT` / `CARBON_LON` / `CARBON_UTC_OFFSET_HOURS` | no | Site for the weather proxy; defaults to Bhopal, India (`23.2599`, `77.4126`, `5.5`) |
 | `CARBON_WEATHER_BASE_GCO2` / `CARBON_WEATHER_SOLAR_SHARE` / `CARBON_WEATHER_WIND_SHARE` | no | Proxy calibration: intensity with no renewables (`700`) and the largest share full sun (`0.20`) / wind (`0.10`) can displace |
 | `CARBON_CSV_PATH` / `CARBON_MAX_RANGE_DAYS` / `CARBON_CACHE_TTL_S` / `CARBON_SYNTHETIC_SEED` | no | Defaults empty / `7` / `300` / `7` |
-| `LOAD_INTELLIGENCE_PROVIDER` | `auto` in `render.yaml` | `auto`/`jev`: Jev AI classifier when a key is set, else rules. `rule_based` never calls the model |
+| `LOAD_INTELLIGENCE_PROVIDER` | `auto` in `render.yaml` | `auto`/`jev`: Jev when a key is set, else rules. `rule_based` never calls Jev |
 | `DEFAULT_LOAD_TIMEZONE` | no (`UTC`) | |
 | `ELECTRICITY_MAPS_API_KEY` / `ELECTRICITY_MAPS_ZONE` | no | Only for `CARBON_PROVIDER=external`; that adapter returns the past 24h, so it cannot drive planning on its own |
-| `GEMINI_API_KEY` (`JEV_API_KEY` legacy alias, `GEMINI_API_KEY` wins) | for Jev | Paste your existing Jev key here (set on **Render**, not Vercel). Falls back to the rules per request on any failure |
-| `GEMINI_MODEL` / `GEMINI_MAX_CALLS_PER_MIN` / `GEMINI_BASE_URL` | no | Default `gemini-2.5-flash` / `30` model calls per minute for the whole process (the API is public; over the cap the rules answer) / Google endpoint. If classifications show "rules" with a Gemini error, check the model name first |
+| `JEV_API_KEY` (or `TYPESAFE_API_KEY`) | for Jev | Your TypeSafe key from console.typesafe.ai/keys, set on **Render** (never Vercel, never the browser). Only ever sent to `api.typesafe.ai`. Without it the built-in rules answer |
+| `JEV_MODEL` / `JEV_MAX_CALLS_PER_MIN` / `JEV_BASE_URL` | no | Default `jev-latest` / `120` Jev calls per minute for the whole process (the API is public; over the cap the rules answer) / `https://api.typesafe.ai` |
 
 `config.py` auto-trusts Vercel's own `VERCEL_URL` /
 `VERCEL_PROJECT_PRODUCTION_URL` hosts, so per-deployment URLs do not need manual

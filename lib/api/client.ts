@@ -283,6 +283,39 @@ export async function classifyLoad(body: ClassifyRequest): Promise<ClassifyRespo
   return postJson<ClassifyResponse>("/api/v1/loads/classify", body);
 }
 
+export interface PriorityLoadIn {
+  id: string;
+  name: string;
+  kind?: string;
+  power_kw: number;
+  hours_until_ready: number;
+  flex_hours: number;
+}
+
+export interface PriorityItem {
+  id: string;
+  score: number;
+  band: "Critical" | "High" | "Normal" | "Low";
+  reason: string;
+  source: "jev" | "heuristic";
+  importance: number | null;
+  importance_label: string | null;
+  importance_confidence: number | null;
+}
+
+export interface PriorityResponse {
+  provider: "jev" | "heuristic";
+  items: PriorityItem[];
+  notes: string[];
+}
+
+/** Which load matters first. Jev judges how essential each appliance is; the backend
+ *  combines that with time pressure, size and rigidity. Labelled `heuristic` when Jev
+ *  is not configured or unreachable. */
+export async function prioritizeLoads(loads: PriorityLoadIn[]): Promise<PriorityResponse> {
+  return postJson<PriorityResponse>("/api/v1/loads/prioritize", { loads });
+}
+
 /** Phase 3: a fully specified load -> structured feasibility verdict. */
 export async function validateLoad(spec: LoadSpec): Promise<ValidateResponse> {
   return postJson<ValidateResponse>("/api/v1/loads/validate", spec);

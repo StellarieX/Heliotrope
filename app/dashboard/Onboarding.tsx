@@ -128,10 +128,10 @@ function DraftCard({
           </span>
           {cls && (
             <span
-              title={cls.provider === "jev" ? "Classified by the Jev AI model" : "Classified by the built-in rules"}
+              title={cls.provider === "jev" ? `Decided by Jev with ${Math.round(cls.confidence * 100)}% confidence` : "Classified by the built-in rules"}
               className={`rounded-full px-2 py-0.5 text-[10px] uppercase tracking-wider ${cls.provider === "jev" ? "bg-violet-400/15 text-violet-300" : "bg-white/5 text-zinc-500"}`}
             >
-              {cls.provider === "jev" ? "AI" : "rules"}
+              {cls.provider === "jev" ? "jev" : "rules"}
             </span>
           )}
         </p>
