@@ -798,6 +798,13 @@ def post_override(schedule_id: str, body: OverrideBody) -> JSONResponse:
             transition(state, JobStatus.PAUSED, "user override")
         except ValueError as exc:
             return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_transition", "message": str(exc)})
+        store.record_event(
+            record,
+            ScheduleEvent(
+                event_type=ScheduleEventType.USER_OVERRIDE, timestamp=now,
+                job_id=body.job_id, payload={"command": body.command.value},
+            ),
+        )
         return JSONResponse(status_code=200, content={"accepted": True, "state": _state_payload(record)})
     if body.command in (OverrideCommand.START_NOW, OverrideCommand.RUN_ASAP) and state is not None:
         try:
