@@ -88,6 +88,10 @@ class CarbonPointOut(BaseModel):
         return _require_aware(v, "timestamp")
 
 
+# The single list of accepted carbon provider names.
+CARBON_PROVIDER_NAMES = ("synthetic", "csv", "external", "weather")
+
+
 class CarbonQuery(BaseModel):
     start: datetime
     end: datetime
@@ -102,7 +106,7 @@ class CarbonQuery(BaseModel):
     @field_validator("provider")
     @classmethod
     def _known(cls, v: str) -> str:
-        allowed = {"synthetic", "csv", "external"}
+        allowed = set(CARBON_PROVIDER_NAMES)
         if v not in allowed:
             raise ValueError(f"provider must be one of {sorted(allowed)}")
         return v

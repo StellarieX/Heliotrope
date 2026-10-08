@@ -23,12 +23,9 @@ def get_carbon(
     resolution_minutes: int = 15,
     provider: str | None = None,
 ) -> JSONResponse:
-    # `provider` passes straight through to the service, which owns the
-    # provider allowlist and the configured default: an omitted provider uses
-    # CARBON_PROVIDER via `CarbonService.default()`, and an unknown name is a
-    # 422 from the service. The query object below validates only the window;
-    # it never decides which provider serves, so there is exactly one place
-    # where provider names are accepted or rejected.
+    # Provider names are validated in one place (CARBON_PROVIDER_NAMES in
+    # domain.carbon); an omitted provider uses CARBON_PROVIDER via
+    # `CarbonService.default()`.
     def _err(detail: str, code: str, status: int) -> JSONResponse:
         return JSONResponse(
             status_code=status,
@@ -47,7 +44,7 @@ def get_carbon(
             start=datetime.fromisoformat(_coerce(start)),
             end=datetime.fromisoformat(_coerce(end)),
             resolution_minutes=resolution_minutes,
-            provider="synthetic",
+            provider=(provider or "synthetic").strip().lower(),
         )
     except ValueError as exc:
         detail = str(exc)

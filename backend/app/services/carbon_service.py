@@ -13,6 +13,7 @@ from datetime import datetime
 
 from ..core import config
 from ..domain.carbon import (
+    CARBON_PROVIDER_NAMES,
     CarbonSignalResponse,
     CarbonPointOut,
     SignalQuality,
@@ -62,7 +63,7 @@ class CarbonService:
     def __post_init__(self) -> None:
         self.provider_name = (self.provider_name or config.CARBON_PROVIDER or "synthetic").lower()
         self.csv_path = self.csv_path or config.CARBON_CSV_PATH
-        if self.provider_name not in ("synthetic", "csv", "external", "weather"):
+        if self.provider_name not in CARBON_PROVIDER_NAMES:
             raise CarbonBadRequest(f"unknown provider {self.provider_name!r}")
 
     @classmethod
