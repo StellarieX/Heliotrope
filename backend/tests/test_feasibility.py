@@ -221,9 +221,16 @@ def test_fixed_loads_need_no_window():
 # --- thermal feasibility (§7, §23) ----------------------------------------
 
 
+# The shipped AC example starts inside its band at 15-minute resolution. These
+# tests exercise the checker's out-of-band start and hourly steps explicitly.
+HOT_HOURLY_AC = AC_SYNTHETIC.model_copy(
+    update={"temperature_initial_c": 30.0, "resolution_minutes": 60}
+)
+
+
 def test_thermal_target_unreachable_within_the_window():
     report = is_thermal_profile_feasible(
-        thermal("AC", AC_SYNTHETIC.model_copy(update={"temperature_initial_c": 26.0}), release_at=D, deadline_at=D + timedelta(hours=2))
+        thermal("AC", HOT_HOURLY_AC.model_copy(update={"temperature_initial_c": 26.0}), release_at=D, deadline_at=D + timedelta(hours=2))
     )
     assert report.feasible is False
     assert IssueCode.THERMAL_TARGET_UNREACHABLE in codes(report)
@@ -252,7 +259,7 @@ def test_precooling_trajectory_is_allowed_even_though_it_starts_hot():
     quickly, and a long coast genuinely drifts out of band (see the test below).
     """
     profile = [AC_SYNTHETIC.max_power_kw] * 7 + [0.0] * 1
-    report = is_thermal_profile_feasible(thermal("AC", AC_SYNTHETIC), profile)
+    report = is_thermal_profile_feasible(thermal("AC", HOT_HOURLY_AC), profile)
     transient = [w for w in report.warnings if w.code is IssueCode.THERMAL_INITIAL_OUT_OF_BAND]
     assert transient, "the out-of-band start should be reported as a warning"
     assert report.feasible is True

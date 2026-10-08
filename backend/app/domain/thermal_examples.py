@@ -72,6 +72,11 @@ GEYSER_NAME = "Geyser (synthetic)"
 
 # --- AC: state = room temperature ------------------------------------------
 
+# The scheduler steps the recurrence once per 15-minute slot, so the example's
+# resolution is 15 minutes (a spec at another resolution is not resampled).
+# The room starts at the top of its 22-26 degC comfort band: an initial state
+# outside the band is unschedulable in every engine.
+
 # a = 0.85 -> a room drifts toward a 34 °C hot-day ambient when the cooler is
 #             off, which is why pre-cooling has to be timed, not stacked.
 # c = 5.10  -> (1 - a) * 34.
@@ -83,10 +88,10 @@ AC_SYNTHETIC: ThermalSpec = _thermal(
     decay_a=0.85,
     b=-1.40,
     max_power_kw=1.5,
-    resolution_minutes=60,
+    resolution_minutes=15,
     t_min=22.0,
     t_max=26.0,
-    t_initial=30.0,
+    t_initial=26.0,
     t_target=24.0,
 )
 AC_NAME = "Air conditioner (synthetic)"
