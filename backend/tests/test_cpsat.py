@@ -22,7 +22,7 @@ import pytest
 from app.domain.carbon import CarbonPoint, CarbonSignal
 from app.domain.loads import LoadSpec, LoadType
 from app.domain.scaling import CO2_G_PER_KG, WMIN_PER_KWH
-from app.domain.scheduling import SchedulerConfig
+from app.domain.scheduling import ObjectiveWeights, SchedulerConfig
 from app.services.scheduler_service import SchedulerService
 from app.services.schedulers import SCHEDULERS, SchedulerName
 
@@ -186,6 +186,25 @@ def test_cpsat_finds_the_lowest_carbon_window_not_merely_a_feasible_one(service)
     )
     assert result.status.value == "OPTIMAL"
     assert result.schedule[0].start_slot == 3, "should take the 100 g slots at 3-4"
+
+
+def test_cpsat_solves_with_a_peak_weight(service):
+    """The peak term builds a constraint per slot; it must not crash on a live expression."""
+    signal = constant_signal([500.0, 500.0, 500.0, 100.0, 100.0, 500.0])
+    job = LoadSpec(
+        id="atomic-1", normalized_name="Oven", category="Cooking",
+        job_type=LoadType.DEFERRABLE_ATOMIC, power_kw=2.0, max_power_kw=2.0,
+        duration_minutes=30, release_at=DAY_START,
+        deadline_at=DAY_START + timedelta(minutes=90),
+    )
+    scheduler_input, _ = service.build_input(
+        [job], signal, capacity_kw=5.0, objective=ObjectiveWeights(carbon=1.0, peak=1.0)
+    )
+    result = service.run(
+        scheduler_input, SchedulerName.CPSAT, config=SchedulerConfig(time_limit_seconds=30.0)
+    )
+    assert result.status.value in ("OPTIMAL", "FEASIBLE")
+    assert result.schedule and result.schedule[0].start_slot == 3
 
 
 # --- §10 atomic contiguity ---------------------------------------------------

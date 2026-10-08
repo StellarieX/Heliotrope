@@ -604,10 +604,9 @@ class CPSATScheduler(BaseScheduler):
                     var = pw_thermal.get(job.id, {}).get(slot)
                     if var is not None:
                         terms.append(var)
-            total_expr = total + (sum(terms) if terms else 0)
-            if total_expr == 0:
+            if not terms and total == 0:
                 continue
-            model.Add(peak >= total_expr)
+            model.Add(peak >= total + (sum(terms) if terms else 0))
         return peak * mean_carbon * slot_minutes
 
     def _delay_term(
