@@ -39,7 +39,7 @@ from ...domain.execution import (
     ScheduleRecord,
 )
 from ...domain.loads import LoadSpec
-from ...domain.scheduling import SchedulerInput
+from ...domain.scheduling import SchedulerConfig, SchedulerInput
 from ...services.carbon_service import CarbonBadRequest, CarbonUnavailable
 from ...services.coordinator import CoordinationError, MultiUserCoordinator
 from ...services.execution_events import apply_event, check_override, transition
@@ -173,7 +173,9 @@ def plan_single(body: PlanRequest) -> JSONResponse:
         "kind": "single",
         "scheduler": name.value,
         "execution": body.execution.model_dump(mode="json"),
+        "solver_config": body.solver_config.model_dump(mode="json") if body.solver_config else None,
     }
+    store._persist(record)  # the context is what makes replans faithful after a restart
     payload = _state_payload(record)
     payload["warnings"] = warnings
     return JSONResponse(status_code=200, content=payload)
@@ -203,6 +205,7 @@ def plan_coordinated(body: CoordinatedPlanRequest) -> JSONResponse:
         "coordination_request": body.model_dump(mode="json"),
         "execution": body.execution.model_dump(mode="json"),
     }
+    store._persist(record)
     payload = _state_payload(record)
     payload["coordination"] = result.model_dump(mode="json")
     return JSONResponse(status_code=200, content=payload)
@@ -659,7 +662,9 @@ def _solve_record_input(record: ScheduleRecord, solve_input: SchedulerInput):
         body = CoordinationRequest(**record.context["coordination_request"])
         return coordinator._solve_coordinated(body, solve_input)
     name = SchedulerName(record.context.get("scheduler", "CPSAT"))
-    return service.run(solve_input, name, explain=True)
+    raw_cfg = record.context.get("solver_config")
+    cfg = SchedulerConfig(**raw_cfg) if raw_cfg else None
+    return service.run(solve_input, name, config=cfg, explain=True)
 
 
 @router.post("/schedules/{schedule_id}/replan")
