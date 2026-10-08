@@ -219,13 +219,14 @@ class CoordinatedCPSATScheduler(CPSATScheduler):
                 if flat:
                     terms.append(sum(flat))
 
-            for pid, cap_slots in self.max_inconvenience.items():
-                items = [
-                    self._delay_vars[job.id]
-                    for job in scheduler_input.jobs
-                    if self.participant_of.get(job.id) == pid and job.id in self._delay_vars
-                ]
-                if items:
-                    model.Add(sum(items) <= int(round(cap_slots * MILLI)) * max(1, len(items)))
+        # Hard caps are constraints, not objective terms: they bind even at weight 0.
+        for pid, cap_slots in self.max_inconvenience.items():
+            items = [
+                self._delay_vars[job.id]
+                for job in scheduler_input.jobs
+                if self.participant_of.get(job.id) == pid and job.id in self._delay_vars
+            ]
+            if items:
+                model.Add(sum(items) <= int(round(cap_slots * MILLI)) * max(1, len(items)))
 
         return terms
