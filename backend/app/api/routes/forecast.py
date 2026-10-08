@@ -194,7 +194,7 @@ def evaluate_forecast(request: EvaluateRequest) -> JSONResponse:
         for point in request.actual:
             actual.append((_parsed(point.timestamp, "actual.timestamp"), point.gco2_per_kwh))
         evaluation = service.evaluate(forecast, actual)
-    except ValueError as exc:
+    except (ValueError, KeyError, TypeError) as exc:
         return _error(exc, 422, "invalid_request")
     except ForecastServiceError as exc:
         return _error(exc, 422, "invalid_request")
