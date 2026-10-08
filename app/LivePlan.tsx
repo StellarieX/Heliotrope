@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   compareSchedulers,
   getCarbonSignal,
@@ -73,7 +73,9 @@ export default function LivePlan() {
     return () => ctl.abort();
   }, [attempt]);
 
+  const solveSeq = useRef(0);
   const solve = useCallback(async (flexHours: number) => {
+    const seq = ++solveSeq.current;
     const t0 = floorToSlot();
     const jobs: StoredJob[] = SAMPLE.map((j) => ({ ...j, flexHours }));
     const { specs } = buildSpecs(jobs, t0);
@@ -84,11 +86,13 @@ export default function LivePlan() {
       const asap = cmp.results.ASAP;
       const opt = cmp.results.CPSAT;
       if (!asap || !opt) throw new Error("incomplete answer");
+      if (opt.status !== "OPTIMAL" && opt.status !== "FEASIBLE") throw new Error("no feasible plan");
+      if (seq !== solveSeq.current) return; // a newer slider position superseded this answer
       setPlan({ asap, opt, flex: flexHours, t0: t0.getTime() });
     } catch {
-      setError("The solver didn't answer. Try again in a moment.");
+      if (seq === solveSeq.current) setError("The solver didn't give a usable plan. Try again in a moment.");
     } finally {
-      setBusy(false);
+      if (seq === solveSeq.current) setBusy(false);
     }
   }, []);
 

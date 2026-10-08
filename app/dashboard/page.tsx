@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { onAuthStateChanged, signInWithPopup, signOut, type User } from "firebase/auth";
 import { addDoc, collection, deleteDoc, doc, getDoc, getDocs, updateDoc } from "firebase/firestore";
@@ -292,6 +292,7 @@ export default function Dashboard() {
 
   // Backend-computed "run now" vs planned comparison for the current plan.
   const [impact, setImpact] = useState<CompareSchedulerResult | null>(null);
+  const impactSeq = useRef(0);
   const [liveId, setLiveId] = useState<string | null>(null);
   const [liveState, setLiveState] = useState<ExecutionState | null>(null);
   const [liveHistory, setLiveHistory] = useState<ScheduleHistory | null>(null);
@@ -411,7 +412,7 @@ export default function Dashboard() {
     if (!savedId) return;
     if (localStorage.getItem(ACTIVE_OWNER_KEY) !== user.uid) {
       // A schedule saved by another account (or before owners were recorded).
-      clearLiveSession();
+      queueMicrotask(clearLiveSession);
       return;
     }
     // Deferred into a microtask so the effect body itself stays free of state
@@ -494,11 +495,15 @@ export default function Dashboard() {
         ...(carbonPayload ? { carbon: carbonPayload } : {}),
       };
       setImpact(null);
+      const seq = ++impactSeq.current;
       const state = await planSchedule(planBody);
       // Fire-and-forget: the impact card is a bonus and must never block or fail the plan.
       void compareSchedulers({ ...planBody, schedulers: ["ASAP", "CPSAT"] })
         .then((cmp) => {
-          const result = cmp.results.CPSAT ?? null;
+          // Only a real solution carries honest savings; INFEASIBLE/UNKNOWN shows no impact card.
+          const raw = cmp.results.CPSAT ?? null;
+          const result = raw && (raw.status === "OPTIMAL" || raw.status === "FEASIBLE") ? raw : null;
+          if (impactSeq.current !== seq) return; // a newer plan superseded this one
           setImpact(result);
           try {
             if (result) localStorage.setItem(ACTIVE_IMPACT_KEY, JSON.stringify({ id: state.schedule_id, impact: result }));
@@ -506,7 +511,9 @@ export default function Dashboard() {
             /* storage full/blocked: the card just won't survive a reload */
           }
         })
-        .catch(() => setImpact(null));
+        .catch(() => {
+          if (impactSeq.current === seq) setImpact(null);
+        });
       setLiveId(state.schedule_id);
       localStorage.setItem(ACTIVE_SCHEDULE_KEY, state.schedule_id);
       try {
