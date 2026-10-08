@@ -640,7 +640,12 @@ class CPSATScheduler(BaseScheduler):
         return sum(total) if total else 0
 
     def _cost_term(self, scheduler_input, run_atomic, pw_interruptible, pw_thermal, slot_minutes):
-        """§27: money is tracked separately from carbon, never mixed in."""
+        """§27: money is tracked separately from carbon, never mixed in.
+
+        Not normalized (unlike peak and delay): the term is tariff micro-units x
+        watt-minutes, so its weight is scale-dependent and must be tuned against
+        the carbon term by the caller.
+        """
         tariff = scheduler_input.tariff
         prices = tariff.price_micro_per_kwh if tariff else []
         total = []

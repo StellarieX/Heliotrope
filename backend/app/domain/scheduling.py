@@ -78,8 +78,9 @@ class ObjectiveWeights(BaseModel):
       * delay: one slot of delay for a job is charged as the carbon cost of
                 running that job for one more slot
 
-    That keeps the weights unit-free and comparable, so turning one on does not
-    require re-tuning the others.
+    That keeps the peak and delay weights unit-free and comparable. The cost
+    weight is NOT normalized: the cost term is tariff micro-units x watt-minutes,
+    on a different scale from the carbon term, so it needs its own tuning.
     """
 
     carbon: float = Field(default=1.0, ge=0.0)
