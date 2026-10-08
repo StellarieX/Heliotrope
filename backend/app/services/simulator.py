@@ -60,11 +60,17 @@ class ExecutionSimulator:
         applied: list[str] = []
         capacity_kw = None
         capacity_profile_kw: list[float] | None = None
-        for item in sorted(script, key=lambda s: s["at"]):
+        for item in sorted(script, key=_at):
             at = _at(item)
             action = item.get("do", "")
             if action == "capacity":
                 capacity_kw = float(item["kw"])
+                if record.scheduler_input is not None:
+                    from ..domain.scaling import to_power_w
+
+                    record.scheduler_input = record.scheduler_input.model_copy(
+                        update={"capacity_w": to_power_w(capacity_kw)}
+                    )
                 record.events.append(ScheduleEvent(
                     event_type=ScheduleEventType.CAPACITY_CHANGED,
                     timestamp=at, payload={"capacity_kw": capacity_kw, "simulated": True},
