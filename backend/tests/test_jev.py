@@ -243,3 +243,36 @@ def test_prioritize_endpoint_validates_and_answers(client):
     assert client.post("/api/v1/loads/prioritize", json={"loads": too_many}).status_code == 422
     assert client.post("/api/v1/loads/prioritize", json={"loads": [
         {"id": "a", "name": "EV", "power_kw": -1, "hours_until_ready": 1}]}).status_code == 422
+
+
+# ---- honesty of labels and validation -------------------------------------------------
+
+def test_classify_endpoint_reports_rule_based_when_jev_fails(client, monkeypatch):
+    monkeypatch.setattr(config, "LOAD_INTELLIGENCE_PROVIDER", "jev")
+    monkeypatch.setattr(config, "JEV_API_KEY", "k")
+
+    def boom(*a, **k):
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(httpx, "post", boom)
+    r = client.post("/api/v1/loads/classify", json={"name": "geyser at night"})
+    assert r.status_code == 200
+    assert r.json()["provider"] == "rule_based"
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"type": "choice", "choice": ["a"], "confidence": 0.9, "probabilities": {"a": 1.0}},
+        {"type": "choice", "choice": "a", "confidence": 5.0, "probabilities": {"a": 1.0}},
+        {"type": "choice", "choice": "a", "confidence": float("nan"), "probabilities": {"a": 1.0}},
+    ],
+)
+def test_malformed_choice_answers_raise_jev_error(answer):
+    with pytest.raises(JevError):
+        jev_client.choice(answer, {"a", "b"})
+
+
+def test_score_confidence_must_be_a_probability():
+    with pytest.raises(JevError):
+        jev_client.score({"type": "score", "score": 1.0, "confidence": 2.0}, 3)

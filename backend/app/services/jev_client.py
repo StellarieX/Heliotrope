@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import threading
+import math
 import time
 from collections import deque
 from typing import Any
@@ -104,7 +105,7 @@ def ask(
     for attempt in range(2):
         try:
             resp = httpx.post(url, headers=headers, json=body, timeout=REQUEST_TIMEOUT_S)
-        except httpx.TransportError as exc:
+        except httpx.RequestError as exc:
             last = f"network error: {exc}"
         else:
             if resp.status_code in RETRY_STATUSES:
@@ -140,20 +141,32 @@ def ask(
     return answers
 
 
+def _unit(x: Any) -> bool:
+    """True for a finite real number in [0, 1] (confidences and probabilities)."""
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and 0.0 <= x <= 1.0
+
+
 def choice(answer: dict[str, Any], allowed: set[str]) -> tuple[str, float, dict[str, float]]:
     """(chosen option, confidence, probabilities) from a Choice answer, validated."""
     pick = answer.get("choice")
     conf = answer.get("confidence")
     probs = answer.get("probabilities")
-    if pick not in allowed or not isinstance(conf, (int, float)) or not isinstance(probs, dict):
+    if not isinstance(pick, str) or pick not in allowed or not _unit(conf) or not isinstance(probs, dict):
         raise JevError(f"unexpected Choice answer: {str(answer)[:120]}")
-    return str(pick), float(conf), {str(k): float(v) for k, v in probs.items() if isinstance(v, (int, float))}
+    clean = {str(k): float(v) for k, v in probs.items() if _unit(v)}
+    return pick, float(conf), clean
 
 
 def score(answer: dict[str, Any], levels: int) -> tuple[float, float]:
     """(score on 0..levels-1, confidence) from a Score answer, validated."""
     val = answer.get("score")
     conf = answer.get("confidence")
-    if not isinstance(val, (int, float)) or not isinstance(conf, (int, float)) or not (-0.001 <= val <= levels - 1 + 0.001):
+    if (
+        not isinstance(val, (int, float))
+        or isinstance(val, bool)
+        or not math.isfinite(val)
+        or not _unit(conf)
+        or not (-0.001 <= val <= levels - 1 + 0.001)
+    ):
         raise JevError(f"unexpected Score answer: {str(answer)[:120]}")
     return float(val), float(conf)
