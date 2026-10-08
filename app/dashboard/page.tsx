@@ -877,7 +877,7 @@ export default function Dashboard() {
       );
       setRankNote(
         res.provider === "jev"
-          ? "Ranked with Jev (importance) plus time pressure, size and flexibility."
+          ? `Ranked with Jev (importance) plus time pressure, size and flexibility.${res.notes[0] ? ` ${res.notes[0]}` : ""}`
           : res.notes[0] ?? "Ranked with the built-in heuristic."
       );
     } catch {
