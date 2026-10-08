@@ -361,10 +361,12 @@ class SchedulerNormalizer:
         power_w = to_power_w(spec.power_kw or 0.0)
         if spec.max_power_kw is not None:
             max_power_w = to_power_w(spec.max_power_kw)
+        elif spec.job_type is LoadType.THERMAL and spec.thermal is not None:
+            # A thermal load's rating is the plant's own maximum; only an
+            # explicit max_power_kw narrows it.
+            max_power_w = to_power_w(spec.thermal.max_power_kw)
         elif spec.power_kw is not None:
             max_power_w = power_w
-        elif spec.job_type is LoadType.THERMAL and spec.thermal is not None:
-            max_power_w = to_power_w(spec.thermal.max_power_kw)
         else:
             max_power_w = 0
             report.warnings.append(

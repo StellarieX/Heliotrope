@@ -155,6 +155,13 @@ def to_objective_weight(weight: float) -> int:
 # --- thermal scaling -------------------------------------------------------
 
 
+#: Comfort-band slack (milli-degC) shared by the heuristics and the validator.
+#: CP-SAT enforces the band exactly (stricter); a heuristic trajectory may sit up
+#: to this far outside it because the integer recurrence rounds, and the
+#: independent validator accepts exactly the same slack.
+THERMAL_BAND_TOLERANCE_MILLI = 10
+
+
 @dataclass(frozen=True)
 class ThermalScale:
     """Integer coefficients for the thermal recurrence.

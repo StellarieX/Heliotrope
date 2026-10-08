@@ -501,8 +501,11 @@ class CPSATScheduler(BaseScheduler):
 
         assert_non_negative_band(scale.min_milli, f"job {job.id!r}")
 
+        # 1 milli-kW == 1 W; a user max_power_kw below the plant's maximum
+        # narrows the power domain.
+        power_cap = min(scale.max_power_millikw, job.max_power_w)
         pw = {
-            t: model.NewIntVar(0, scale.max_power_millikw, f"tpw_{job.id}_{t}")
+            t: model.NewIntVar(0, power_cap, f"tpw_{job.id}_{t}")
             for t in window
         }
         temp = {

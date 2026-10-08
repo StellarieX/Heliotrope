@@ -20,7 +20,13 @@ from enum import Enum
 from typing import Optional
 
 from ...domain.loads import LoadType
-from ...domain.scaling import CO2_KG_DIVISOR, WMIN_PER_KWH, temperature_c_from_milli, to_millikw
+from ...domain.scaling import (
+    CO2_KG_DIVISOR,
+    THERMAL_BAND_TOLERANCE_MILLI,
+    WMIN_PER_KWH,
+    temperature_c_from_milli,
+    to_millikw,
+)
 from ...domain.scheduling import (
     CarbonProvenance,
     JobExplanation,
@@ -449,15 +455,20 @@ class BaseScheduler(ABC):
                         # into two runs and risk a minimum-chunk violation.
                         break
                     continue
+                # Clip the final slot to what is still needed instead of
+                # over-delivering a whole slot of full power.
+                remaining = needed - delivered
+                if remaining < budget * slot_minutes:
+                    budget = max(1, -(-remaining // slot_minutes))
                 placement.set(job.id, slot, budget)
                 delivered += budget * slot_minutes
                 used.append(slot)
                 charged_this_run = True
 
-        if delivered + 1 < needed:
-            slots = placement.power_by_job.get(job.id, {})
+        if delivered < needed:
             for slot in used:
-                slots.pop(slot, None)
+                placement.clear_slot(job.id, slot)
+                placement.power_by_job.get(job.id, {}).pop(slot, None)
             return False
 
         # Every charged block must satisfy the minimum chunk, including the
@@ -499,9 +510,9 @@ class BaseScheduler(ABC):
                 if not repaired:
                     break
             if not repaired:
-                slots = placement.power_by_job.get(job.id, {})
                 for slot in used:
-                    slots.pop(slot, None)
+                    placement.clear_slot(job.id, slot)
+                    placement.power_by_job.get(job.id, {}).pop(slot, None)
                 return False
         return True
 
@@ -531,6 +542,13 @@ class BaseScheduler(ABC):
             return True
 
         candidate_slots = self._thermal_candidate_slots(scheduler_input, job, len(asap_slots))
+        # The ASAP trajectory is already written into the live placement. Lift
+        # it out before the trial so capacity is read without the job's own
+        # ASAP draw, then either replace the whole row or put it back.
+        asap_row = dict(placement.power_by_job.get(job.id, {}))
+        for slot in asap_row:
+            placement.clear_slot(job.id, slot)
+        placement.power_by_job[job.id] = {}
         trial = Placement(slot_count=scheduler_input.horizon.slot_count)
         trial_placed = self._simulate_thermal(
             scheduler_input, job, candidate_slots, trial, source=placement
@@ -539,6 +557,8 @@ class BaseScheduler(ABC):
             for slot, power_w in trial.power_by_job.get(job.id, {}).items():
                 placement.set(job.id, slot, power_w)
             return True
+        for slot, power_w in asap_row.items():
+            placement.set(job.id, slot, power_w)
         return bool(asap_slots)
 
     def _thermal_asap_slots(
@@ -612,7 +632,7 @@ class BaseScheduler(ABC):
             headroom_millikw = to_millikw(
                 self._available_w(scheduler_input, job, read, slot) / 1000.0
             )
-            ceiling = min(scale.max_power_millikw, max(0, headroom_millikw))
+            ceiling = min(scale.max_power_millikw, job.max_power_w, max(0, headroom_millikw))
 
             if mode == "fixed":
                 power = ceiling if slot in chosen else 0
@@ -628,7 +648,9 @@ class BaseScheduler(ABC):
             # slot.
             temperature_milli = scale.next_temperature_milli(temperature_milli, power)
             if not (
-                scale.min_milli - 20 <= temperature_milli <= scale.max_milli + 20
+                scale.min_milli - THERMAL_BAND_TOLERANCE_MILLI
+                <= temperature_milli
+                <= scale.max_milli + THERMAL_BAND_TOLERANCE_MILLI
             ):
                 return None
             if power > 0:

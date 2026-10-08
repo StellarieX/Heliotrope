@@ -20,7 +20,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from ..domain.loads import LoadType
-from ..domain.scaling import WMIN_PER_KWH, temperature_c_from_milli, to_millikw
+from ..domain.scaling import (
+    THERMAL_BAND_TOLERANCE_MILLI,
+    WMIN_PER_KWH,
+    temperature_c_from_milli,
+    to_millikw,
+)
 from ..domain.scheduling import SchedulerInput
 from .carbon_accounting import Placement
 
@@ -188,9 +193,9 @@ class ScheduleValidator:
 
         if job.energy_required_wmin:
             delivered = sum(slots.values()) * self._slot_minutes
-            # Tolerance of one slot-equivalent: the solver works in integer
-            # watt-minutes and must not be failed for a rounding remainder.
-            if delivered + 1 < job.energy_required_wmin:
+            # Power and slot length are integers, so delivered energy is an
+            # exact integer watt-minute count; no rounding slack is needed.
+            if delivered < job.energy_required_wmin:
                 result.add(
                     f"{job.id}: delivered {delivered / WMIN_PER_KWH:.3f} kWh but needs "
                     f"{job.energy_required_wmin / WMIN_PER_KWH:.3f} kWh before its deadline"
@@ -238,17 +243,32 @@ class ScheduleValidator:
         temperature_milli = scale.initial_milli
 
         min_m, max_m = scale.min_milli, scale.max_milli
+        tol = THERMAL_BAND_TOLERANCE_MILLI
+        power_cap = min(scale.max_power_millikw, job.max_power_w)
+        for slot, power_w in slots.items():
+            if power_w < 0:
+                result.add(f"{job.id}: slot {slot} has negative power")
+            if power_w > power_cap:
+                result.add(
+                    f"{job.id}: slot {slot} draws {power_w / 1000:.3f} kW, above its "
+                    f"{power_cap / 1000:.3f} kW limit"
+                )
+            if power_w > 0 and not (job.release_slot <= slot < job.deadline_slot):
+                result.add(
+                    f"{job.id}: draws power at slot {slot}, outside its window "
+                    f"[{job.release_slot}, {job.deadline_slot})"
+                )
         for slot in range(job.release_slot, job.deadline_slot):
             power_millikw = to_millikw(slots.get(slot, 0) / 1000.0)
             temperature_milli = scale.next_temperature_milli(temperature_milli, power_millikw)
             temperature_c = temperature_c_from_milli(temperature_milli)
-            if temperature_c < temperature_c_from_milli(min_m) - 0.01:
+            if temperature_milli < min_m - tol:
                 result.add(
                     f"{job.id}: comfort floor breached at slot {slot} — "
                     f"{temperature_c:.2f} degC is below "
                     f"{temperature_c_from_milli(min_m):.2f} degC"
                 )
-            elif temperature_c > temperature_c_from_milli(max_m) + 0.01:
+            elif temperature_milli > max_m + tol:
                 result.add(
                     f"{job.id}: comfort ceiling breached at slot {slot} — "
                     f"{temperature_c:.2f} degC is above "
