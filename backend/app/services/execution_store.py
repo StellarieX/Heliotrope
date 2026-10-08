@@ -90,7 +90,7 @@ class ExecutionStore:
             )
 
     def _load(self, schedule_id: str) -> ScheduleRecord | None:
-        """Read one record back from SQLite into the cache, if present."""
+        """Read one record back from SQLite into the cache, if present. Caller holds the lock."""
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT data FROM schedules WHERE schedule_id = ?", (schedule_id,)
@@ -98,8 +98,7 @@ class ExecutionStore:
         if row is None:
             return None
         record = ScheduleRecord.model_validate_json(row[0])
-        with self._lock:
-            self._records[schedule_id] = record
+        self._records[schedule_id] = record
         return record
 
     # --- records -------------------------------------------------------------
@@ -147,11 +146,12 @@ class ExecutionStore:
         return record
 
     def get(self, schedule_id: str) -> ScheduleRecord | None:
+        # Double-checked under the lock so concurrent first-loads share one record.
         with self._lock:
             record = self._records.get(schedule_id)
-        if record is not None:
-            return record
-        return self._load(schedule_id)
+            if record is not None:
+                return record
+            return self._load(schedule_id)
 
     def append_version(
         self,
