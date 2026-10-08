@@ -64,6 +64,9 @@ backend/data/
 # typescript
 *.tsbuildinfo
 next-env.d.ts
-.hypothesis/
-.pytest_cache/
-__pycache__/
+
+# assistant / editor tooling
+.claude/
+CLAUDE.md
+.vscode/
+.idea/
