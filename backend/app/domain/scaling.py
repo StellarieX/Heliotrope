@@ -400,7 +400,18 @@ def assert_objective_headroom(
         raise ScalingError(f"{max_jobs} jobs exceeds the modelled maximum {MAX_JOBS}")
     if max_slots > MAX_SLOTS:
         raise ScalingError(f"{max_slots} slots exceeds the modelled maximum {MAX_SLOTS}")
-    worst = max_jobs * max_slots * max_power_w * max_carbon * max_slot_minutes
+    # CP-SAT multiplies every carbon term by the integer objective weight
+    # (OBJECTIVE_WEIGHT_SCALE for a unit weight), so that factor is part of the
+    # worst case. Coordination's priority and MILLI multipliers sit on top of
+    # this and are covered by the INT64_SAFETY margin below int64 max.
+    worst = (
+        max_jobs
+        * max_slots
+        * max_power_w
+        * max_carbon
+        * max_slot_minutes
+        * OBJECTIVE_WEIGHT_SCALE
+    )
     if worst > INT64_SAFETY:
         raise ScalingError(
             f"worst-case objective ({worst}) exceeds the safe int64 range "

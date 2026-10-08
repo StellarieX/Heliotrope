@@ -355,7 +355,7 @@ def test_an_absurd_risk_weight_still_cannot_break_a_deadline(service):
     scheduler_input, _ = build(
         service,
         ForecastConfig(forecast_mode=ForecastMode.ROBUST, risk_weight=10.0),
-        uncertainty=[10_000] * horizon_for(mixed_scenario()).slot_count,
+        uncertainty=[1_000] * horizon_for(mixed_scenario()).slot_count,
     )
     result = service.run(scheduler_input, SchedulerName.CPSAT)
     assert result.metrics.deadline_misses == 0
