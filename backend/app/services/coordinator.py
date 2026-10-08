@@ -384,6 +384,23 @@ class MultiUserCoordinator:
         """Name who conflicts: participants feasible alone but not together
         point at shared capacity, not at any one user's jobs."""
         engine = GreedyScheduler()
+        if result.status is not ScheduleStatus.INFEASIBLE:
+            # A time-limit or internal failure is not a proof of infeasibility.
+            res = CoordinationResult(
+                status=result.status.value,
+                coordination_mode=CoordinationMode.COORDINATED,
+                reason=f"the solver did not produce a schedule ({result.status.value}): {result.reason}",
+                solver_status=result.solver.status.value,
+                solve_time_ms=result.solver.solve_time_ms,
+                fairness_mode=request.fairness_mode,
+                signal_provenance={
+                    "signal_type": merged.carbon.signal_type,
+                    "source": merged.carbon.source,
+                },
+            )
+            res.metrics.participant_count = len(request.participants)
+            res.metrics.job_count = len(merged.jobs)
+            return res
         alone_ok, alone_bad = [], []
         for pid, sub in by_participant.items():
             r = engine.schedule(sub)
