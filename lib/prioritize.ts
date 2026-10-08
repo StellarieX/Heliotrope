@@ -17,7 +17,7 @@ export type JobClass = { category: string; shiftable: boolean; why: string };
 
 export function classifyJob(name: string): JobClass {
   const k = name.toLowerCase();
-  if (/ev|car|bike|scooter|charger|vehicle|tesla/.test(k))
+  if (/ev|cars?|bike|scooter|charger|vehicle|tesla/.test(k))
     return { category: "EV charging", shiftable: true, why: "charges in a movable block" };
   if (/geyser|heater|water|boiler|bath/.test(k))
     return { category: "Water heating", shiftable: true, why: "heats once, stays hot for hours" };
