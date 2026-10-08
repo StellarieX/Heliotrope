@@ -155,6 +155,7 @@ const ACTIVE_SCHEDULE_KEY = "heliotrope:active_schedule_id";
 const ACTIVE_IMPACT_KEY = "heliotrope:active_impact";
 /** Fingerprint of the loads the active plan was built from, to flag a stale plan after a reload. */
 const ACTIVE_SIG_KEY = "heliotrope:active_plan_sig";
+const ACTIVE_OWNER_KEY = "heliotrope:active_owner";
 
 /** Merge consecutive slot allocations into "11:30 PM–1:00 AM" style windows. */
 function runWindows(allocs: Array<{ slot: number; timestamp: string }>, slotMin = 15): string[] {
@@ -331,6 +332,21 @@ export default function Dashboard() {
     setProfileLoaded(true);
   }, []);
 
+  const clearLiveSession = useCallback(() => {
+    try {
+      for (const k of [ACTIVE_SCHEDULE_KEY, ACTIVE_IMPACT_KEY, ACTIVE_SIG_KEY, ACTIVE_OWNER_KEY]) {
+        localStorage.removeItem(k);
+      }
+    } catch {
+      /* storage blocked: nothing persisted to clear */
+    }
+    setImpact(null);
+    setPlannedJobsSignature(null);
+    setLiveId(null);
+    setLiveState(null);
+    setLiveHistory(null);
+  }, []);
+
   useEffect(() => {
     if (!auth) {
     // Firebase not configured: nothing will ever resolve, so stop showing "loading".
@@ -342,9 +358,17 @@ export default function Dashboard() {
     return onAuthStateChanged(auth, (u) => {
       setUser(u);
       setReady(true);
-      if (u) void loadAll(u);
+      if (u) {
+        void loadAll(u);
+      } else {
+        // Signed out: nothing of the previous account may linger in memory or storage.
+        clearLiveSession();
+        setJobs([]);
+        setRanked(null);
+        setCoordResult(null);
+      }
     });
-  }, [auth, loadAll]);
+  }, [auth, loadAll, clearLiveSession]);
 
   const refreshLive = useCallback(async (id: string) => {
     try {
@@ -382,8 +406,14 @@ export default function Dashboard() {
   // deleted, backend restarted, network down) is dropped quietly — the user
   // simply plans again.
   useEffect(() => {
+    if (!user) return;
     const savedId = localStorage.getItem(ACTIVE_SCHEDULE_KEY);
     if (!savedId) return;
+    if (localStorage.getItem(ACTIVE_OWNER_KEY) !== user.uid) {
+      // A schedule saved by another account (or before owners were recorded).
+      clearLiveSession();
+      return;
+    }
     // Deferred into a microtask so the effect body itself stays free of state
     // updates; the effect only kicks off the rehydration.
     void Promise.resolve()
@@ -399,10 +429,11 @@ export default function Dashboard() {
           /* unreadable: show the schedule without the impact card */
         }
       })
-      .catch(() => {
-        localStorage.removeItem(ACTIVE_SCHEDULE_KEY);
+      .catch((e) => {
+        // Only a definitive 404 drops the saved id; a network blip keeps it for the next load.
+        if ((e as { status?: number }).status === 404) localStorage.removeItem(ACTIVE_SCHEDULE_KEY);
       });
-  }, [refreshLive]);
+  }, [user, refreshLive, clearLiveSession]);
 
   // Poll the live schedule forward once a minute. Each tick advances the
   // backend clock, then we re-read state — refresh only, no other side effects.
@@ -479,6 +510,7 @@ export default function Dashboard() {
       setLiveId(state.schedule_id);
       localStorage.setItem(ACTIVE_SCHEDULE_KEY, state.schedule_id);
       try {
+        if (user) localStorage.setItem(ACTIVE_OWNER_KEY, user.uid);
         localStorage.setItem(ACTIVE_SIG_KEY, jobsSignature);
       } catch {
         /* storage blocked: stale detection just won't survive a reload */
