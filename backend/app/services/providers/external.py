@@ -66,7 +66,7 @@ class ExternalProvider:
 
     def get_signal(
         self, start: datetime, end: datetime, resolution_minutes: int
-    ) -> list[CarbonPoint]:
+    ) -> tuple[list[CarbonPoint], int, int]:
         if not self.configured:
             raise ProviderNotConfigured(
                 "external carbon provider selected but no API key is configured"
@@ -124,6 +124,7 @@ class ExternalProvider:
         aligned: list[CarbonPoint] = []
         idx = 0
         latest: CarbonPoint | None = None
+        filled = 0
         for slot in slots:
             slot_utc = to_utc(slot)
             while idx < len(by_time) and to_utc(by_time[idx].time) <= slot_utc:
@@ -134,6 +135,10 @@ class ExternalProvider:
                     f"electricity-maps history starts after requested start for zone {self.zone!r}; "
                     "refusing to invent earlier points"
                 )
+            if to_utc(latest.time) != slot_utc:
+                # No record for this slot: the latest earlier one is carried
+                # forward, which is a fill, not a measurement.
+                filled += 1
             aligned.append(
                 CarbonPoint(
                     time=slot,
@@ -145,7 +150,9 @@ class ExternalProvider:
                     source=latest.source,
                 )
             )
-        return aligned
+        # (points, missing, interpolated): forward-filled slots are reported as
+        # both so the signal is never presented as complete measured data.
+        return aligned, filled, filled
 
     @staticmethod
     def normalize(records: list[dict], zone: str = "") -> list[CarbonPoint]:

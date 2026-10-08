@@ -57,7 +57,8 @@ def test_success_maps_measured_points(monkeypatch):
         return _FakeResponse(_history_payload())
 
     monkeypatch.setattr(httpx, "get", fake_get)
-    points = ExternalProvider("key-123").get_signal(start, end, 30)
+    points, missing, interpolated = ExternalProvider("key-123").get_signal(start, end, 30)
+    assert (missing, interpolated) == (0, 0)
     assert len(points) == 2
     assert all(p.signal_type == SignalType.AVERAGE for p in points)
     assert all(p.quality == Quality.MEASURED for p in points)
