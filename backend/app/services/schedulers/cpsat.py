@@ -696,7 +696,8 @@ class CPSATScheduler(BaseScheduler):
         self._last_model = None
         result = super().schedule(scheduler_input)
         solver = getattr(self, "_last_solver", None)
-        if solver is not None:
+        # A schedule the validator withheld must keep its honest INTERNAL_ERROR report.
+        if solver is not None and result.status in (ScheduleStatus.FEASIBLE, ScheduleStatus.OPTIMAL):
             status = self._status
             info = SolverInfo(
                 name=self.name.value,
