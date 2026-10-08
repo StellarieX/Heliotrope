@@ -38,7 +38,7 @@ from ...domain.execution import (
     ScheduleLifecycle,
     ScheduleRecord,
 )
-from ...domain.loads import LoadSpec
+from ...domain.loads import LoadSpec, LoadType
 from ...domain.scheduling import BaselineProfile, SchedulerConfig, SchedulerInput
 from ...services.carbon_service import CarbonBadRequest, CarbonUnavailable
 from ...services.coordinator import CoordinationError, MultiUserCoordinator
@@ -804,15 +804,69 @@ def post_override(schedule_id: str, body: OverrideBody) -> JSONResponse:
     now = utcnow()
     slot = now_slot(record.scheduler_input.horizon, now)
 
+    placement = _placement_of(record)
+    inactive = (JobStatus.COMPLETED, JobStatus.CANCELLED, JobStatus.FAILED)
+
     def headroom(s: int) -> float:
         base = record.scheduler_input
         assert base is not None
-        return base.headroom_w(s) / 1000.0
+        # Other active jobs' planned draw in this slot is not free capacity.
+        others = sum(
+            slots.get(s, 0)
+            for jid, slots in placement.items()
+            if jid != body.job_id
+            and (record.execution.get(jid) is None or record.execution[jid].status not in inactive)
+        )
+        return (base.headroom_w(s) - others) / 1000.0
 
     allowed, explanation = check_override(record, body.job_id, body.command, slot, headroom)
     if not allowed:
         return JSONResponse(status_code=422, content={"detail": explanation, "code": "override_rejected", "message": explanation})
     state = record.execution.get(body.job_id)
+    reshape = body.command in (OverrideCommand.MOVE, OverrideCommand.START_NOW, OverrideCommand.RUN_ASAP)
+    # Validate the window change before anything is mutated.
+    patched = None
+    if reshape and not (
+        body.command is OverrideCommand.MOVE and not body.new_release_at and not body.new_deadline_at
+    ):
+        horizon = record.scheduler_input.horizon
+        patched = []
+        for job in record.scheduler_input.jobs:
+            if job.id != body.job_id:
+                patched.append(job)
+                continue
+            update: dict = {}
+            if body.command in (OverrideCommand.START_NOW, OverrideCommand.RUN_ASAP) or body.new_release_at:
+                ref = body.new_release_at or now
+                update["release_slot"] = max(0, sum(
+                    1 for s in range(horizon.slot_count) if horizon.slot_end(s) <= ref
+                ))
+            if body.new_deadline_at:
+                update["deadline_slot"] = sum(
+                    1 for s in range(horizon.slot_count) if horizon.slot_start(s) < body.new_deadline_at
+                )
+            release = update.get("release_slot", job.release_slot)
+            deadline = update.get("deadline_slot", job.deadline_slot)
+            if release >= deadline:
+                return _err(
+                    f"cannot apply: the new window is empty (release slot {release}, "
+                    f"deadline slot {deadline})",
+                    "override_rejected", 422,
+                )
+            running = state is not None and state.status is JobStatus.RUNNING
+            if not running:
+                need = 1
+                if job.job_type is LoadType.DEFERRABLE_ATOMIC:
+                    need = job.duration_slots or 1
+                elif job.job_type is LoadType.DEFERRABLE_INTERRUPTIBLE:
+                    need = max(1, job.minimum_slots())
+                if deadline - release < need:
+                    return _err(
+                        f"cannot apply: the new window has {deadline - release} slot(s) "
+                        f"but the job needs {need}",
+                        "override_rejected", 422,
+                    )
+            patched.append(job.model_copy(update=update))
     if body.command is OverrideCommand.CANCEL and state is not None:
         try:
             transition(state, JobStatus.CANCELLED, "user override")
@@ -831,6 +885,7 @@ def post_override(schedule_id: str, body: OverrideBody) -> JSONResponse:
             ),
         )
         return JSONResponse(status_code=200, content={"accepted": True, "state": _state_payload(record)})
+    prior_status = (state.status, state.note) if state is not None else None
     if body.command in (OverrideCommand.START_NOW, OverrideCommand.RUN_ASAP) and state is not None:
         try:
             if state.status is JobStatus.PAUSED:
@@ -858,27 +913,23 @@ def post_override(schedule_id: str, body: OverrideBody) -> JSONResponse:
                 "state": _state_payload(record),
             },
         )
-    # MOVE / START_NOW / RUN_ASAP reshape the window, then replan.
-    if body.command in (OverrideCommand.MOVE, OverrideCommand.START_NOW, OverrideCommand.RUN_ASAP):
-        horizon = record.scheduler_input.horizon
-        patched = []
-        for job in record.scheduler_input.jobs:
-            if job.id != body.job_id:
-                patched.append(job)
-                continue
-            update: dict = {}
-            if body.command in (OverrideCommand.START_NOW, OverrideCommand.RUN_ASAP) or body.new_release_at:
-                ref = body.new_release_at or now
-                update["release_slot"] = max(0, sum(
-                    1 for s in range(horizon.slot_count) if horizon.slot_end(s) <= ref
-                ))
-            if body.new_deadline_at:
-                update["deadline_slot"] = max(
-                    update.get("release_slot", job.release_slot) + 1,
-                    sum(1 for s in range(horizon.slot_count) if horizon.slot_start(s) < body.new_deadline_at),
-                )
-            patched.append(job.model_copy(update=update))
-        record.scheduler_input = record.scheduler_input.model_copy(update={"jobs": patched})
+    # MOVE / START_NOW / RUN_ASAP reshape the window, then replan; the new
+    # window is kept only if the replan is feasible.
+    previous_input = record.scheduler_input
+    if patched is not None:
+        record.scheduler_input = previous_input.model_copy(update={"jobs": patched})
+    out = _do_replan(record, now, RescheduleReason.USER_OVERRIDE)
+    if out.get("error") is not None and patched is not None:
+        record.scheduler_input = previous_input
+        if state is not None and prior_status is not None:
+            state.status, state.note = prior_status
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": out["error"], "code": "override_rejected",
+                "message": out["error"], "state": _state_payload(record),
+            },
+        )
     store.record_event(
         record,
         ScheduleEvent(
@@ -886,7 +937,6 @@ def post_override(schedule_id: str, body: OverrideBody) -> JSONResponse:
             job_id=body.job_id, payload={"command": body.command.value},
         ),
     )
-    out = _do_replan(record, now, RescheduleReason.USER_OVERRIDE)
     out["accepted"] = True
     out["explanation"] = explanation
     out["state"] = _state_payload(record)

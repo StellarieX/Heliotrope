@@ -490,3 +490,14 @@ def test_replan_rejects_duplicate_added_job_without_mutating():
     assert res.status_code == 422
     after = execution.store.get(sid).scheduler_input
     assert after.capacity_w == before.capacity_w
+
+
+def test_override_move_to_empty_window_is_rejected_unchanged():
+    sid = plan([ev_job(energy_required_kwh=7.2)])
+    before = execution.store.get(sid).scheduler_input.jobs[0].deadline_slot
+    res = client.post(
+        f"/api/v1/schedules/{sid}/override",
+        json={"job_id": "ev-1", "command": "MOVE", "new_deadline_at": f"{DAY}T18:00:00+00:00"},
+    )
+    assert res.status_code == 422
+    assert execution.store.get(sid).scheduler_input.jobs[0].deadline_slot == before
