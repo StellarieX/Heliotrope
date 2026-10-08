@@ -28,14 +28,8 @@ app = FastAPI(title="Heliotrope Backend", version="0.3.0")
 # middleware so production explicit origins keep working.
 _explicit_origins = [o for o in config.CORS_ALLOW_ORIGINS if o != "*"]
 _wildcard_requested = "*" in config.CORS_ALLOW_ORIGINS
-if config.CORS_ALLOW_LOCALHOST_IN_DEVELOPMENT:
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?",
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+# One middleware only: Starlette answers preflights in the outermost CORS layer, so
+# stacking several makes the first one reject origins that a later one would allow.
 if _wildcard_requested:
     app.add_middleware(
         CORSMiddleware,
@@ -44,10 +38,15 @@ if _wildcard_requested:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-if _explicit_origins:
+elif _explicit_origins or config.CORS_ALLOW_LOCALHOST_IN_DEVELOPMENT:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_explicit_origins,
+        allow_origin_regex=(
+            r"http://(localhost|127\.0\.0\.1)(:\d+)?"
+            if config.CORS_ALLOW_LOCALHOST_IN_DEVELOPMENT
+            else None
+        ),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
