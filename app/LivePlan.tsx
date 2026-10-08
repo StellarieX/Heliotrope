@@ -8,7 +8,7 @@ import {
   type CompareSchedulerResult,
 } from "../lib/api/client";
 import type { CarbonSignalResponse } from "../lib/api/types";
-import { buildSpecs, floorToSlot, type StoredJob } from "../lib/loads/specs";
+import { buildSpecs, nextSlot, type StoredJob } from "../lib/loads/specs";
 
 // Example household loads for the live demo. These are plain inputs; every number
 // shown below (windows, kg of CO2, % saved) is computed by the backend solver on
@@ -61,7 +61,7 @@ export default function LivePlan() {
         return;
       }
       setPhase("ready");
-      const start = floorToSlot();
+      const start = nextSlot();
       getCarbonSignal({ start: start.toISOString(), end: new Date(start.getTime() + DAY_MS).toISOString() })
         .then((s) => {
           if (!ctl.signal.aborted) setSignal(s);
@@ -76,7 +76,7 @@ export default function LivePlan() {
   const solveSeq = useRef(0);
   const solve = useCallback(async (flexHours: number) => {
     const seq = ++solveSeq.current;
-    const t0 = floorToSlot();
+    const t0 = nextSlot();
     const jobs: StoredJob[] = SAMPLE.map((j) => ({ ...j, flexHours }));
     const { specs } = buildSpecs(jobs, t0);
     setBusy(true);

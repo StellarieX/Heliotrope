@@ -37,6 +37,11 @@ export function floorToSlot(d = new Date()): Date {
   return new Date(Math.floor(d.getTime() / SLOT_MS) * SLOT_MS);
 }
 
+/** The next 15-minute slot boundary at or after `d`: a plan must never start in a slot that has already begun. */
+export function nextSlot(d = new Date()): Date {
+  return new Date(Math.ceil(d.getTime() / SLOT_MS) * SLOT_MS);
+}
+
 export function kindOf(j: StoredJob): LoadKind {
   if (j.shiftable === false || j.jobType === "FIXED") return "FIXED";
   const text = `${j.name} ${j.kind || ""}`;
@@ -133,7 +138,7 @@ export interface BuiltSpecs {
   needsDetail: Array<{ job: StoredJob; need: Detail }>;
 }
 
-export function buildSpecs(jobs: StoredJob[], now: Date = floorToSlot()): BuiltSpecs {
+export function buildSpecs(jobs: StoredJob[], now: Date = nextSlot()): BuiltSpecs {
   const specs: LoadSpec[] = [];
   const needsDetail: BuiltSpecs["needsDetail"] = [];
   for (const j of jobs) {

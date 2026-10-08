@@ -35,7 +35,7 @@ import type {
 import BuildingChart from "./BuildingChart";
 import CarbonChart from "./CarbonChart";
 import ExecutionPanel from "./ExecutionPanel";
-import { buildSpecs, detailNeeded, kindOf, latestFinish, floorToSlot, type Detail, type StoredJob } from "../../lib/loads/specs";
+import { buildSpecs, detailNeeded, kindOf, latestFinish, nextSlot, type Detail, type StoredJob } from "../../lib/loads/specs";
 import { useClassification } from "../../lib/loads/useClassification";
 import Onboarding from "./Onboarding";
 import { scrubLegacyEmail } from "../../lib/profile";
@@ -669,7 +669,7 @@ export default function Dashboard() {
       const pKw = Number(fPower);
       const eKwh = fEnergy ? Number(fEnergy) : null;
       const dMin = fDuration ? Math.round(Number(fDuration)) : null;
-      const now = floorToSlot();
+      const now = nextSlot();
       const isThermalForm = jobType === "THERMAL";
       const isAcForm = /cool|ac\b|air/i.test(`${name} ${activePreview?.category ?? c.category}`);
       const tMin = fTempMin ? Number(fTempMin) : isThermalForm ? (isAcForm ? 22 : 40) : NaN;
