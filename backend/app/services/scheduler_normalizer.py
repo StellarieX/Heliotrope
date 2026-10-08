@@ -101,6 +101,15 @@ class SchedulerNormalizer:
                     )
                 )
 
+        seen_ids: set[str] = set()
+        for job in jobs:
+            if job.id in seen_ids:
+                raise NormalizationError(
+                    f"two loads share the id {job.id!r}; give each load a distinct id so "
+                    "their schedules are not merged"
+                )
+            seen_ids.add(job.id)
+
         if not jobs and not any(baseline_w):
             raise NormalizationError(
                 "every job was rejected as FIXED with no power rating, so there is "
