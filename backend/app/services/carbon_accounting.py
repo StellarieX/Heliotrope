@@ -12,7 +12,7 @@ reports 18; a schedule that quietly under-delivers reports what it actually did,
 which is the whole point of an independent accounting layer.
 
     energy_kwh    = sum over slots of  power_w * slot_minutes / WMIN_PER_KWH
-    total_co2_kg  = sum over slots of  power_w * slot_minutes * carbon[t] / 3.6e9
+    total_co2_kg  = sum over slots of  power_w * slot_minutes * carbon[t] / CO2_KG_DIVISOR  (6e7)
 
 BASELINE IS ALWAYS INCLUDED. A fixed fridge emits whether or not anything was
 scheduled around it. Savings are therefore measured against the full ASAP

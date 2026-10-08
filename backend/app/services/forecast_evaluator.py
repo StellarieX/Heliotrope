@@ -210,6 +210,7 @@ def build_evaluation(
     actual: Iterable[tuple[datetime, float]],
 ) -> ForecastEvaluation:
     """Evaluate and keep the aligned rows, so a metric can be audited by hand."""
+    actual = list(actual)  # consumed twice below
     actual_map = {moment: value for moment, value in actual}
     rows = [
         {

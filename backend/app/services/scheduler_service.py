@@ -18,6 +18,7 @@ happened anyway. ASAP is what actually happens with no optimization, so
 from __future__ import annotations
 
 import copy
+from datetime import datetime
 from contextlib import contextmanager
 from typing import Iterator, Optional
 

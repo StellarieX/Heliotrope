@@ -301,7 +301,7 @@ class ForecastBacktester:
         return BacktestResult(
             model=config.model,
             config=config,
-            steps=len(windows),
+            steps=sum(1 for w in windows if w.get("status") == "OK"),
             metrics=evaluation.metrics,
             runtime_ms=elapsed_ms,
             windows=windows,
