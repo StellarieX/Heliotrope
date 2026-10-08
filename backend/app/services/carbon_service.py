@@ -40,14 +40,20 @@ class _CacheEntry:
     expires_at: float
 
 
+_SHARED_CACHE: dict = {}
+_SHARED_LOCK = threading.Lock()
+
+
 @dataclass
 class CarbonService:
     provider_name: str = ""
     csv_path: str = ""
     max_range_days: int = 7
     cache_ttl_s: int = 300
-    _cache: dict = field(default_factory=dict, repr=False)
-    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+    # Shared across instances: routes build a fresh service per request, so a
+    # per-instance cache would never hit and CARBON_CACHE_TTL_S would be inert.
+    _cache: dict = field(default_factory=lambda: _SHARED_CACHE, repr=False)
+    _lock: threading.Lock = field(default_factory=lambda: _SHARED_LOCK, repr=False, compare=False)
 
     #: Upper bound on cached responses. Expired entries are pruned on every
     #: access, so without this the dict only grows for distinct queries.
