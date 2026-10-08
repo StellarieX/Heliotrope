@@ -87,7 +87,7 @@ async function toHttpError(res: Response): Promise<Error> {
 async function read<T>(res: Response): Promise<T> {
   if (!res.ok) throw await toHttpError(res);
   const text = await res.text().catch(() => "");
-  if (!text) return {} as T;
+  if (!text) throw new Error(`Backend returned an empty response (${res.status})`);
   try {
     return JSON.parse(text) as T;
   } catch {

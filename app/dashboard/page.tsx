@@ -727,12 +727,17 @@ export default function Dashboard() {
           setAddErrors(r.errors.map((e) => e.message));
           setAddWarnings(r.warnings.map((w) => w.message));
         })
-        .catch(() => {
-          // Backend validation is advisory; the form still works offline.
-          if (!cancelled) {
+        .catch((e) => {
+          if (cancelled) return;
+          const status = (e as { status?: number }).status;
+          if (status !== undefined && status >= 400 && status < 500) {
+            // The backend rejected the load itself: surface why instead of saving it.
+            setAddErrors([e instanceof Error ? e.message : "This load was rejected."]);
+          } else {
+            // Network/server trouble: validation is advisory, the form still works offline.
             setAddErrors([]);
-            setAddWarnings([]);
           }
+          setAddWarnings([]);
         });
     }, 500);
     return () => {
