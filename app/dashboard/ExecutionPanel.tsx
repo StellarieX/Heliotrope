@@ -82,7 +82,7 @@ export default function ExecutionPanel({
               <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2.5">
                 <div className="min-w-0 flex-1 basis-48">
                   <div className="flex flex-wrap items-center gap-2">
-                    <p className="truncate text-sm font-medium">{names[j.job_id] ?? j.job_id}</p>
+                    <p className="truncate text-sm font-medium">{names[j.job_id] ?? "Removed load"}</p>
                     <span className={`rounded-full px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${STATUS_STYLE[j.status] ?? "bg-white/5 text-zinc-400"}`}>
                       {STATUS_LABEL[j.status] ?? j.status.toLowerCase()}
                     </span>
