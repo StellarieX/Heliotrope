@@ -318,6 +318,23 @@ class SchedulerService:
                 "No earlier option existed, or moving it would not have reduced emissions.",
             )
 
+        if str(result.scheduler).upper() == "ASAP":
+            return (
+                ReasonCode.EARLIEST,
+                f"{job.name} runs as early as release, capacity and its power limit "
+                f"allow, starting {start.isoformat()}. ASAP does not optimise for "
+                "carbon, so no CO2 saving is claimed.",
+            )
+
+        if saved is None or saved <= 0:
+            return (
+                ReasonCode.SCHEDULED,
+                f"{job.name} was placed from {start.isoformat()} to meet its constraints "
+                f"before {deadline.isoformat()}. It does not emit less than the earliest "
+                f"feasible window (difference {-(saved or 0.0):.4g} kg CO2), so no CO2 "
+                "saving is claimed.",
+            )
+
         if job.job_type is LoadType.THERMAL:
             return (
                 ReasonCode.THERMAL_PRECONDITIONING,

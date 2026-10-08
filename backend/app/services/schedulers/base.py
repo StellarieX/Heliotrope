@@ -879,13 +879,16 @@ class BaseScheduler(ABC):
                 end_time = horizon.slot_start(min(earliest + 1, horizon.slot_count - 1))
                 shifted = 0
 
+            earliest_end_slot = min(
+                earliest + max(1, job.minimum_slots()) - 1, horizon.slot_count - 1
+            )
             out.append(
                 JobExplanation(
                     job_id=job.id,
                     name=job.name,
                     job_type=job.job_type,
                     original_start=horizon.slot_start(earliest),
-                    original_end=start_time if active else end_time,
+                    original_end=horizon.slot_end(earliest_end_slot),
                     scheduled_start=start_time,
                     scheduled_end=end_time,
                     deadline_at=(
