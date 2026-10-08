@@ -896,6 +896,7 @@ export default function Dashboard() {
     try {
       await updateDoc(doc(db, "users", user.uid, "jobs", id), { [field]: value });
       setJobs((js) => js.map((j) => (j.id === id ? { ...j, [field]: value } : j)));
+      setRanked((r) => (r ? r.map((j) => (j.id === id ? { ...j, [field]: value } : j)) : r));
       setLoadError(null);
     } catch {
       setLoadError("Couldn't save that detail. Check your connection and try again.");
