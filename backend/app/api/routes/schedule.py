@@ -24,7 +24,8 @@ from pydantic import BaseModel, Field, field_validator
 import math
 
 from ...domain.forecasting import ForecastConfig, ForecastMode
-from ...domain.horizon import SchedulingHorizon
+from ...domain.horizon import HorizonError, SchedulingHorizon
+from ...domain.scaling import ScalingError
 from ...domain.loads import LoadSpec
 from ...domain.scheduling import (
     ObjectiveWeights,
@@ -293,7 +294,7 @@ def _prepare(request: ScheduleRequest):
             ),
             capacity_profile_kw=request.capacity_profile_kw,
         )
-    except NormalizationError as exc:
+    except (NormalizationError, ScalingError, HorizonError) as exc:
         detail = str(exc)
         return None, _err(detail, "invalid_request", 422)
 
