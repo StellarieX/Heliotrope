@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field, field_validator
 
 import math
 
-from ...domain.coordination import CoordinationRequest
+from ...domain.coordination import CoordinationMode, CoordinationRequest
 from ...domain.execution import (
     ExecutionConfig,
     JobExecutionState,
@@ -185,6 +185,9 @@ def plan_single(body: PlanRequest) -> JSONResponse:
 def plan_coordinated(body: CoordinatedPlanRequest) -> JSONResponse:
     from .coordination import _signal_for
 
+    if body.coordination_mode is not CoordinationMode.COORDINATED:
+        msg = "plan-coordinated tracks a jointly solved schedule; use coordination_mode COORDINATED"
+        return JSONResponse(status_code=422, content={"detail": msg, "code": "invalid_request", "message": msg})
     try:
         signal = _signal_for(body)
     except (CoordinationError, CarbonBadRequest, ValueError) as exc:
