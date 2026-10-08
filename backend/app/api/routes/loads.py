@@ -94,6 +94,9 @@ def classify_load(body: LoadRequest) -> JSONResponse:
     except IntelligenceUnavailable as exc:
         detail = str(exc)
         return _err(detail, "provider_unavailable", 503)
+    except ValueError as exc:
+        # e.g. a release time after the deadline: the request is wrong, not the server.
+        return _err(str(exc), "invalid_request", 422)
 
     report = validate_load(spec)
     response = ClassifyResponse(
