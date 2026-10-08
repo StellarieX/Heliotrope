@@ -101,7 +101,8 @@ def classify_load(body: LoadRequest) -> JSONResponse:
 
     report = validate_load(spec, now=datetime.now(timezone.utc))
     response = ClassifyResponse(
-        provider=provider.name,
+        # Say who actually answered: the provider may have fallen back to the rules for this call.
+        provider=provider.name if classification.matched_rule == provider.name else "rule_based",
         classification=classification,
         confidence=spec.confidence,
         ambiguous=spec.ambiguous,
