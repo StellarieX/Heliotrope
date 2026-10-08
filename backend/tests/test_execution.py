@@ -462,3 +462,19 @@ def test_start_now_checks_contiguous_slots():
     assert allowed is False
     assert "slot" in detail
 
+
+
+def test_rejected_event_leaves_no_trace():
+    sid = plan([ev_job(energy_required_kwh=7.2)])
+    res = client.post(
+        f"/api/v1/schedules/{sid}/events",
+        json={
+            "event_type": "JOB_COMPLETED", "timestamp": f"{DAY}T19:00:00+00:00",
+            "job_id": "ev-1", "payload": {"energy_delivered_kwh": 5.0},
+        },
+    )
+    assert res.status_code == 422
+    state = client.get(f"/api/v1/schedules/{sid}/state").json()
+    assert state["jobs"][0]["energy_delivered_kwh"] == 0.0
+    record = execution.store.get(sid)
+    assert record is not None and record.events == []

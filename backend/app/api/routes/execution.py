@@ -269,10 +269,10 @@ class EventBody(BaseModel):
         return _require_aware_dt(v, "timestamp")
 
 
-def _maybe_auto_replan(record: ScheduleRecord, advised: bool) -> dict:
+def _maybe_auto_replan(record: ScheduleRecord, advised: bool, now: datetime) -> dict:
     policy = ReschedulePolicy(record.context.get("execution", {}).get("policy", "HYBRID"))
     if advised and policy in (ReschedulePolicy.EVENT_DRIVEN, ReschedulePolicy.HYBRID):
-        return _do_replan(record, utcnow(), RescheduleReason.SYSTEM_RECOVERY, auto=True)
+        return _do_replan(record, now, RescheduleReason.SYSTEM_RECOVERY, auto=True)
     return {"replanned": False}
 
 
@@ -369,51 +369,31 @@ def post_event(schedule_id: str, body: EventBody) -> JSONResponse:
     # Energy actuals ride on events so manual telemetry stays truthful.
     # They go through the same meter validation as /telemetry so negative
     # or absurd values are rejected instead of silently stored.
-    if body.job_id and isinstance(body.payload, dict):
-        state = record.execution.get(body.job_id)
-        if state is not None:
-            has_energy = "energy_delivered_kwh" in body.payload
-            delivered = body.payload.get("delivered_slots")
-            has_slots = isinstance(delivered, dict)
-            if has_energy or has_slots:
-                try:
-                    energy_val = (
-                        float(body.payload["energy_delivered_kwh"])
-                        if has_energy else None
-                    )
-                    slot_updates: dict[int, int] = {}
-                    if has_slots:
-                        assert isinstance(delivered, dict)
-                        for k, v in delivered.items():
-                            si = int(k)
-                            pw = int(v)
-                            if pw < 0:
-                                raise ValueError("delivered_slots power must be >= 0")
-                            if pw / 1000.0 > meters.MAX_POWER_KW:
-                                raise ValueError(
-                                    f"delivered_slots power {pw}W exceeds plausible maximum"
-                                )
-                            slot_updates[si] = pw
-                    if energy_val is not None or slot_updates:
-                        meters.push_reading(
-                            schedule_id, body.job_id, ts,
-                            energy_kwh=energy_val,
-                            power_kw=(
-                                max(slot_updates.values()) / 1000.0
-                                if slot_updates and energy_val is None else None
-                            ),
-                            source="EVENT",
-                        )
-                except (ValueError, TypeError) as exc:
-                    return _err(str(exc), "invalid_request", 422)
+    energy_val: Optional[float] = None
+    slot_updates: dict[int, int] = {}
+    state = record.execution.get(body.job_id) if body.job_id else None
+    if state is not None and isinstance(body.payload, dict):
+        has_energy = "energy_delivered_kwh" in body.payload
+        delivered = body.payload.get("delivered_slots")
+        has_slots = isinstance(delivered, dict)
+        if has_energy or has_slots:
+            try:
                 if has_energy:
-                    state.energy_delivered_kwh = float(
-                        body.payload["energy_delivered_kwh"]
-                    )
+                    energy_val = float(body.payload["energy_delivered_kwh"])
                 if has_slots:
                     assert isinstance(delivered, dict)
                     for k, v in delivered.items():
-                        state.delivered_slots[int(k)] = int(v)
+                        si = int(k)
+                        pw = int(v)
+                        if pw < 0:
+                            raise ValueError("delivered_slots power must be >= 0")
+                        if pw / 1000.0 > meters.MAX_POWER_KW:
+                            raise ValueError(
+                                f"delivered_slots power {pw}W exceeds plausible maximum"
+                            )
+                        slot_updates[si] = pw
+            except (ValueError, TypeError) as exc:
+                return _err(str(exc), "invalid_request", 422)
     event = ScheduleEvent(
         event_type=body.event_type,
         timestamp=ts,
@@ -421,14 +401,39 @@ def post_event(schedule_id: str, body: EventBody) -> JSONResponse:
         job_id=body.job_id,
         payload=body.payload,
     )
-    store.record_event(record, event)
+
+    def _commit(target: ScheduleRecord, push: bool):
+        tstate = target.execution.get(body.job_id) if body.job_id else None
+        if tstate is not None:
+            if push and (energy_val is not None or slot_updates):
+                meters.push_reading(
+                    schedule_id, body.job_id, ts,
+                    energy_kwh=energy_val,
+                    power_kw=(
+                        max(slot_updates.values()) / 1000.0
+                        if slot_updates and energy_val is None else None
+                    ),
+                    source="EVENT",
+                )
+            if energy_val is not None:
+                tstate.energy_delivered_kwh = energy_val
+            for si, pw in slot_updates.items():
+                tstate.delivered_slots[si] = pw
+        return apply_event(target, event)
+
+    # Dry-run on a copy so a rejected event leaves no energy, slots or log entry behind.
     try:
-        advised, notes = apply_event(record, event)
+        _commit(record.model_copy(deep=True), push=False)
     except ValueError as exc:
         return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_transition", "message": str(exc)})
+    try:
+        advised, notes = _commit(record, push=True)
+    except ValueError as exc:
+        return _err(str(exc), "invalid_request", 422)
+    store.record_event(record, event)
     _refresh_lifecycle(record, event.timestamp)
     out: dict = {"state": _state_payload(record), "replan_advised": advised, "notes": notes}
-    auto = _maybe_auto_replan(record, advised)
+    auto = _maybe_auto_replan(record, advised, event.timestamp)
     out.update(auto)
     return JSONResponse(status_code=200, content=out)
 
@@ -540,7 +545,7 @@ def post_telemetry(schedule_id: str, body: TelemetryBody) -> JSONResponse:
         "replan_advised": advised,
         "state": _state_payload(record),
     }
-    auto = _maybe_auto_replan(record, advised)
+    auto = _maybe_auto_replan(record, advised, ts)
     out.update(auto)
     return JSONResponse(status_code=200, content=out)
 
@@ -890,7 +895,10 @@ def simulation_advance(schedule_id: str, body: AdvanceBody) -> JSONResponse:
     if error is not None:
         return error
     assert record is not None
-    trace = simulator.run(record, body.script, body.carbon_actual or None, body.to_time)
+    try:
+        trace = simulator.run(record, body.script, body.carbon_actual or None, body.to_time)
+    except ValueError as exc:
+        return _err(str(exc), "invalid_request", 422)
     _refresh_lifecycle(record, body.to_time)
     metrics = _execution_metrics(record)
     store._persist(record)

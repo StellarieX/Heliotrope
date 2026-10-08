@@ -93,9 +93,10 @@ def apply_event(record: ScheduleRecord, event: ScheduleEvent) -> tuple[bool, lis
         state.actual_start = state.actual_start or event.timestamp
         state.last_updated = event.timestamp
     elif event.event_type is ScheduleEventType.JOB_COMPLETED and state:
-        state.energy_delivered_kwh = _validated_energy(event.payload, state.expected_energy_kwh)
+        energy = _validated_energy(event.payload, state.expected_energy_kwh)
+        transition(state, JobStatus.COMPLETED, "completed")  # may reject: mutate nothing first
+        state.energy_delivered_kwh = energy
         state.actual_end = event.timestamp
-        transition(state, JobStatus.COMPLETED, "completed")
         state.last_updated = event.timestamp
     elif event.event_type is ScheduleEventType.JOB_PAUSED and state:
         transition(state, JobStatus.PAUSED, "paused by event")
