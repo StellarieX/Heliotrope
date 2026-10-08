@@ -19,7 +19,6 @@ it can run.
 
 from __future__ import annotations
 
-import math
 from enum import Enum
 from typing import Iterable, Optional, Sequence
 
@@ -330,11 +329,12 @@ def is_energy_feasible(spec: LoadSpec) -> FeasibilityReport:
     needed_hours = energy / max_power
     needed_minutes = needed_hours * 60.0
 
-    # Minimum chunks quantize usable time downward: partial chunks cannot run.
+    # A minimum chunk is a floor on each contiguous run, not a quantum: one
+    # block of any length >= chunk is legal (CP-SAT and the validator agree), so
+    # the whole window is usable as long as it can hold a single chunk.
     chunk = spec.min_chunk_minutes
     usable_minutes = window
     if chunk:
-        usable_minutes = math.floor(window / chunk) * chunk
         if usable_minutes + EPS < chunk:
             report.with_issue(
                 Issue(
