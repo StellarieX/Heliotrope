@@ -478,3 +478,15 @@ def test_rejected_event_leaves_no_trace():
     assert state["jobs"][0]["energy_delivered_kwh"] == 0.0
     record = execution.store.get(sid)
     assert record is not None and record.events == []
+
+
+def test_replan_rejects_duplicate_added_job_without_mutating():
+    sid = plan([ev_job(energy_required_kwh=7.2)])
+    before = execution.store.get(sid).scheduler_input
+    res = client.post(
+        f"/api/v1/schedules/{sid}/replan",
+        json={"capacity_kw": 15.0, "added_jobs": [spec_dict(ev_job(energy_required_kwh=7.2))]},
+    )
+    assert res.status_code == 422
+    after = execution.store.get(sid).scheduler_input
+    assert after.capacity_w == before.capacity_w

@@ -39,7 +39,7 @@ from ...domain.execution import (
     ScheduleRecord,
 )
 from ...domain.loads import LoadSpec
-from ...domain.scheduling import SchedulerConfig, SchedulerInput
+from ...domain.scheduling import BaselineProfile, SchedulerConfig, SchedulerInput
 from ...services.carbon_service import CarbonBadRequest, CarbonUnavailable
 from ...services.coordinator import CoordinationError, MultiUserCoordinator
 from ...services.execution_events import apply_event, check_override, transition
@@ -679,13 +679,13 @@ def post_replan(schedule_id: str, body: ReplanBody) -> JSONResponse:
         return error
     assert record is not None and record.scheduler_input is not None
     now = body.now or utcnow()
-    # Capacity change and job add/remove reshape the problem before solving.
-    # Scalar remains the default; a per-slot profile overrides it per slot.
+    # Phase 1: validate everything against the untouched record.
+    base = record.scheduler_input
+    update: dict = {}
     if body.capacity_kw is not None or body.capacity_profile_kw is not None:
         from ...domain.scaling import to_power_w
 
-        n = record.scheduler_input.horizon.slot_count
-        update: dict = {}
+        n = base.horizon.slot_count
         if body.capacity_kw is not None:
             update["capacity_w"] = to_power_w(body.capacity_kw)
         if body.capacity_profile_kw is not None:
@@ -707,35 +707,55 @@ def post_replan(schedule_id: str, body: ReplanBody) -> JSONResponse:
             # A scalar-only replan clears any previous profile so the new
             # scalar actually takes effect instead of being overridden.
             update["capacity_profile_w"] = None
-        try:
-            record.scheduler_input = record.scheduler_input.model_copy(update=update)
-        except ValueError as exc:
-            return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_request", "message": str(exc)})
-    if body.removed_job_ids:
-        record.scheduler_input = record.scheduler_input.model_copy(
-            update={"jobs": [j for j in record.scheduler_input.jobs if j.id not in body.removed_job_ids]}
-        )
-        for jid in body.removed_job_ids:
+    jobs = list(base.jobs)
+    removed = set(body.removed_job_ids)
+    cancel_states: list[JobExecutionState] = []
+    if removed:
+        jobs = [j for j in jobs if j.id not in removed]
+        for jid in removed:
             state = record.execution.get(jid)
             if state is not None:
                 try:
-                    transition(state, JobStatus.CANCELLED, "removed by replan request")
+                    transition(state.model_copy(deep=True), JobStatus.CANCELLED, "removed by replan request")
                 except ValueError as exc:
                     return _err(str(exc), "invalid_transition", 422)
+                cancel_states.append(state)
+    added: list = []
+    baseline_add: list[int] = []
     if body.added_jobs:
         try:
-            added, _ = _normalize_added(record, body.added_jobs)
+            added, baseline_add = _normalize_added(record, body.added_jobs)
         except NormalizationError as exc:
             return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_request", "message": str(exc)})
-        record.scheduler_input = record.scheduler_input.model_copy(
-            update={"jobs": [*record.scheduler_input.jobs, *added]}
+        new_ids = [j.id for j in added]
+        existing = {j.id for j in base.jobs} | set(record.execution)
+        dupes = sorted({i for i in new_ids if new_ids.count(i) > 1 or i in existing})
+        if dupes:
+            return _err(f"duplicate job id(s): {', '.join(dupes)}", "invalid_request", 422)
+        jobs = [*jobs, *added]
+    if added or removed:
+        update["jobs"] = jobs
+    if any(baseline_add):
+        update["baseline"] = BaselineProfile(
+            power_w=[b + a for b, a in zip(base.baseline.power_w, baseline_add)],
+            source=base.baseline.source,
         )
-        for job in added:
-            record.execution[job.id] = JobExecutionState(
-                job_id=job.id, participant_id=job.participant_id,
-                expected_energy_kwh=job.energy_kwh() or 0.0, last_updated=now,
-            )
+    try:
+        new_input = base.model_copy(update=update) if update else base
+    except ValueError as exc:
+        return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_request", "message": str(exc)})
+    # Phase 2: mutate.
+    record.scheduler_input = new_input
+    for state in cancel_states:
+        transition(state, JobStatus.CANCELLED, "removed by replan request")
+    for job in added:
+        record.execution[job.id] = JobExecutionState(
+            job_id=job.id, participant_id=job.participant_id,
+            expected_energy_kwh=job.energy_kwh() or 0.0, last_updated=now,
+        )
     out = _do_replan(record, now, body.reason)
+    # Phase 3: persist once, whichever way the replan went.
+    store._persist(record)
     out["state"] = _state_payload(record)
     return JSONResponse(status_code=200, content=out)
 
@@ -750,7 +770,7 @@ def _normalize_added(record: ScheduleRecord, specs: list[LoadSpec]):
     added_input, _report = normalizer.normalize(
         specs, signal, base.capacity_w / 1000.0, horizon=base.horizon
     )
-    return added_input.jobs, []
+    return added_input.jobs, list(added_input.baseline.power_w)
 
 
 # --- overrides ------------------------------------------------------------------------
