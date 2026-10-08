@@ -150,17 +150,25 @@ export default function Account() {
       if (db) {
         try {
           const js = await getDocs(collection(db, "users", uid, "jobs"));
-          await Promise.all(js.docs.map((d) => deleteDoc(d.ref).catch(() => {})));
+          await Promise.all(js.docs.map((d) => deleteDoc(d.ref)));
         } catch {
-          /* best-effort job cleanup */
+          // Stop here: deleting the login now would strand data nobody can remove.
+          throw new Error("cleanup");
         }
-        if (currentUsername) await deleteDoc(doc(db, "usernames", currentUsername)).catch(() => {});
-        await deleteDoc(doc(db, "users", uid)).catch(() => {});
+        // The public profile and username claim must be gone before the login is.
+        if (currentUsername) await deleteDoc(doc(db, "usernames", currentUsername));
+        await deleteDoc(doc(db, "users", uid));
       }
       await deleteUser(auth.currentUser);
       router.push("/");
-    } catch {
-      setDeleteStatus({ kind: "err", text: "Deletion needs a fresh sign-in — it failed. Try again." });
+    } catch (e) {
+      const cleanup = e instanceof Error && e.message === "cleanup";
+      setDeleteStatus({
+        kind: "err",
+        text: cleanup
+          ? "Couldn't remove your saved data, so your account was kept. Check your connection and try again."
+          : "Deletion needs a fresh sign-in — it failed. Try again.",
+      });
       setDeleting(false);
     }
   }
