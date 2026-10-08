@@ -125,8 +125,8 @@ def feasible_ev(**overrides) -> dict:
         "power_kw": 7.2,
         "energy_required_kwh": 18.0,
         "min_chunk_minutes": 15,
-        "release_at": "2026-10-05T18:30:00+00:00",
-        "deadline_at": "2026-10-06T07:00:00+00:00",
+        "release_at": "2099-10-05T18:30:00+00:00",
+        "deadline_at": "2099-10-06T07:00:00+00:00",
     }
     body.update(overrides)
     return body
@@ -152,8 +152,8 @@ def test_validate_reports_physical_impossibility_with_numbers(client):
         json=feasible_ev(
             power_kw=5.0,
             energy_required_kwh=50.0,
-            release_at="2026-10-05T12:00:00+00:00",
-            deadline_at="2026-10-05T14:00:00+00:00",
+            release_at="2099-10-05T12:00:00+00:00",
+            deadline_at="2099-10-05T14:00:00+00:00",
         ),
     ).json()
     assert body["feasible"] is False
@@ -195,8 +195,8 @@ def test_validate_accepts_a_thermal_power_profile(client):
         "category": "Water heating",
         "job_type": "THERMAL",
         "thermal": GEYSER_SYNTHETIC.model_dump(),
-        "release_at": "2026-10-05T00:00:00+00:00",
-        "deadline_at": "2026-10-05T12:00:00+00:00",
+        "release_at": "2099-10-05T00:00:00+00:00",
+        "deadline_at": "2099-10-05T12:00:00+00:00",
         "power_profile": [2.0] * 8 + [0.0] * 3,
     }
     assert client.post("/api/v1/loads/validate", json=body).json()["feasible"] is True
@@ -210,8 +210,8 @@ def test_validate_rejects_an_overheating_profile(client):
         "category": "Water heating",
         "job_type": "THERMAL",
         "thermal": GEYSER_SYNTHETIC.model_dump(),
-        "release_at": "2026-10-05T00:00:00+00:00",
-        "deadline_at": "2026-10-05T12:00:00+00:00",
+        "release_at": "2099-10-05T00:00:00+00:00",
+        "deadline_at": "2099-10-05T12:00:00+00:00",
         "power_profile": [2.0] * 40,
     }
     result = client.post("/api/v1/loads/validate", json=body).json()

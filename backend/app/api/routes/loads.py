@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 import math
+from datetime import datetime, timezone
 
 from ...core.feasibility import FeasibilityReport, is_thermal_profile_feasible, validate_load
 from ...domain.loads import Assumption, LoadSemantics, LoadSpec
@@ -98,7 +99,7 @@ def classify_load(body: LoadRequest) -> JSONResponse:
         # e.g. a release time after the deadline: the request is wrong, not the server.
         return _err(str(exc), "invalid_request", 422)
 
-    report = validate_load(spec)
+    report = validate_load(spec, now=datetime.now(timezone.utc))
     response = ClassifyResponse(
         provider=provider.name,
         classification=classification,
@@ -125,13 +126,13 @@ def validate(body: ValidateRequest) -> JSONResponse:
     # `power_profile` is a validation aid, not part of the load itself.
     body.power_profile = None
 
-    report = validate_load(body)
+    report = validate_load(body, now=datetime.now(timezone.utc))
     if power_profile is not None:
         report.merge(is_thermal_profile_feasible(body, power_profile))
 
     response = ValidateResponse(
         feasible=report.feasible,
-        checks_run=report.checks_run,
+        checks_run=list(dict.fromkeys(report.checks_run)),
         errors=[i.model_dump(mode="json") for i in report.errors],
         warnings=[i.model_dump(mode="json") for i in report.warnings],
         semantics=body.semantics,
