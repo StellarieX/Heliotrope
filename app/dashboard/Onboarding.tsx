@@ -425,6 +425,8 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
                 <span className="text-zinc-500">checking @{uname}…</span>
               ) : availability === "taken" ? (
                 <span className="text-orange-300">@{uname} is taken. Try another.</span>
+              ) : availability === "unknown" ? (
+                <span className="text-zinc-500">Couldn&apos;t check @{uname} right now; it will be verified when you save.</span>
               ) : (
                 <span className="text-lime-300">@{uname} is available · your public page will be /{uname}</span>
               )}
