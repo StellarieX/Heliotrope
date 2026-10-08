@@ -24,7 +24,6 @@ def _get_int(name: str, default: str) -> int:
 
 
 HELIOTROPE_ENV = _get("HELIOTROPE_ENV", "development")
-PORT = _get_int("PORT", "8000")
 LOG_LEVEL = _get("LOG_LEVEL", "info")
 
 def _parse_origins(raw: str) -> list[str]:

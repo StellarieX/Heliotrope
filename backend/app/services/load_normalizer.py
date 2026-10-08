@@ -315,7 +315,3 @@ def normalize_request(
     )
     return spec
 
-
-def _required_fields_for(job_type: LoadType) -> list[RequiredField]:
-    """Deprecated local alias kept so older imports keep working."""
-    return required_fields_for(job_type)

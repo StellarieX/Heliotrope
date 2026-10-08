@@ -100,7 +100,3 @@ class InMemoryMeterProvider:
         with self._lock:
             self._readings.setdefault((schedule_id, job_id), []).append(reading)
         return reading
-
-    def readings_for(self, schedule_id: str, job_id: str) -> list[MeterReading]:
-        with self._lock:
-            return list(self._readings.get((schedule_id, job_id), []))

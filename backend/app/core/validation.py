@@ -35,8 +35,3 @@ def validate_job(job: Job) -> list[str]:
         raise ValueError(f"job {job.id}: window is shorter than duration (infeasible)")
     return warnings
 
-
-def validate_capacity(capacity_kw: float) -> None:
-    check_non_negative(capacity_kw, "capacity_kw")
-    if capacity_kw == 0:
-        raise ValueError("capacity_kw must be > 0 to place any load")
