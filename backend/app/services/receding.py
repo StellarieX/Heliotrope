@@ -38,7 +38,9 @@ from ..domain.scheduling import (
     BaselineProfile,
     NormalizedJob,
     SchedulerInput,
+    ScheduledJob,
     SchedulerResult,
+    SlotAllocation,
     ScheduleStatus,
 )
 
@@ -166,6 +168,7 @@ def freeze_commitment(
     placement_slots: dict[str, dict[int, int]],
     current_slot: int,
     commit_slots: int,
+    never_freeze=frozenset(),
 ) -> tuple[list[NormalizedJob], list[int], list[str]]:
     """Split jobs into (re-optimizable, frozen-baseline-additions, frozen_ids).
 
@@ -182,7 +185,10 @@ def freeze_commitment(
     for job in scheduler_input.jobs:
         slots = placement_slots.get(job.id, {})
         active = sorted(s for s, p in slots.items() if p > 0 and s >= current_slot)
-        if active and active[0] < horizon_end and job.job_type is not LoadType.THERMAL:
+        if (
+            active and active[0] < horizon_end and job.job_type is not LoadType.THERMAL
+            and job.id not in never_freeze
+        ):
             for s in active:
                 frozen_add[s] += slots[s]
             frozen_ids.append(job.id)
@@ -209,13 +215,16 @@ def diff_placements(
     current: dict[str, dict[int, int]],
     from_slot: int,
     reason: str,
+    whole_previous=frozenset(),
 ) -> list[ScheduleChange]:
     """Per-job start/end movement between two future placements."""
     horizon = scheduler_input.horizon
     slot_minutes = horizon.slot_minutes
     changes: list[ScheduleChange] = []
     for job in scheduler_input.jobs:
-        prev = sorted(s for s, p in previous.get(job.id, {}).items() if p > 0 and s >= from_slot)
+        # A missed job never ran its past slots, so its whole old plan is superseded.
+        prev_from = 0 if job.id in whole_previous else from_slot
+        prev = sorted(s for s, p in previous.get(job.id, {}).items() if p > 0 and s >= prev_from)
         new = sorted(s for s, p in current.get(job.id, {}).items() if p > 0 and s >= from_slot)
         if prev == new:
             continue
@@ -293,6 +302,7 @@ class RecedingHorizon:
         solve_input: SchedulerInput,
         current_slot: int,
         reason: str,
+        never_freeze=frozenset(),
     ) -> tuple[SchedulerResult, list[ScheduleChange], list[str], bool]:
         """Solve the remaining problem with commitment freeze + improvement gate.
 
@@ -302,7 +312,7 @@ class RecedingHorizon:
         """
         notes: list[str] = []
         kept, frozen_add, frozen_ids = freeze_commitment(
-            solve_input, previous_slots, current_slot, self.commitment_slots
+            solve_input, previous_slots, current_slot, self.commitment_slots, never_freeze
         )
         frozen_lifted = False
         # The last schedule is the best guess for the next one: hand it to the solver
@@ -327,10 +337,14 @@ class RecedingHorizon:
         if result.status not in (ScheduleStatus.FEASIBLE, ScheduleStatus.OPTIMAL):
             return result, [], notes, frozen_lifted
 
+        if frozen_ids and not frozen_lifted:
+            result = self._with_frozen(result, solve_input, previous_slots, frozen_ids)
         current_slots = {
             s.job_id: {a.slot: a.power_w for a in s.allocations} for s in result.schedule
         }
-        changes = diff_placements(solve_input, previous_slots, current_slots, current_slot, reason)
+        changes = diff_placements(
+            solve_input, previous_slots, current_slots, current_slot, reason, never_freeze
+        )
         if not self._worth_it(solve_input, previous_slots, current_slots, current_slot, changes):
             notes.append(
                 "candidate discarded: movement and carbon gain both below threshold; "
@@ -338,6 +352,44 @@ class RecedingHorizon:
             )
             return result, [], notes, frozen_lifted
         return result, changes, notes, frozen_lifted
+
+    @staticmethod
+    def _with_frozen(result, solve_input, previous_slots, frozen_ids) -> SchedulerResult:
+        """Re-attach frozen jobs (held in the baseline during the solve) to the
+        schedule so diffs, the improvement gate and the stored version all see the
+        same job set as the previous version."""
+        horizon = solve_input.horizon
+        have = {s.job_id for s in result.schedule}
+        by_id = {j.id: j for j in solve_input.jobs}
+        extra: list[ScheduledJob] = []
+        for jid in frozen_ids:
+            job = by_id.get(jid)
+            slots = {s: p for s, p in previous_slots.get(jid, {}).items() if p > 0}
+            if job is None or not slots or jid in have:
+                continue
+            ordered = sorted(slots)
+            extra.append(
+                ScheduledJob(
+                    job_id=jid,
+                    name=job.name,
+                    job_type=job.job_type,
+                    start_time=horizon.slot_start(ordered[0]),
+                    end_time=horizon.slot_end(ordered[-1]),
+                    start_slot=ordered[0],
+                    end_slot=ordered[-1] + 1,
+                    energy_kwh=sum(slots.values()) * horizon.slot_minutes / 60000.0,
+                    peak_power_kw=max(slots.values()) / 1000.0,
+                    allocations=[
+                        SlotAllocation(slot=s, timestamp=horizon.slot_start(s), power_w=slots[s])
+                        for s in ordered
+                    ],
+                    reason_code="UNCHANGED",
+                    reason="held by the commitment freeze",
+                )
+            )
+        if not extra:
+            return result
+        return result.model_copy(update={"schedule": [*result.schedule, *extra]})
 
     def _worth_it(self, scheduler_input, previous, current, current_slot, changes) -> bool:
         if not changes:

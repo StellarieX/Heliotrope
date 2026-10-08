@@ -620,7 +620,10 @@ def _do_replan(record: ScheduleRecord, now: datetime, reason: RescheduleReason, 
     except RemainingInfeasible as exc:
         return {"replanned": False, "error": exc.reason or str(exc), "job_id": exc.job_id}
     previous = _placement_of(record)
-    result, changes, notes2, lifted = receding.replan(base_input, previous, solve_input, slot, reason.value)
+    result, changes, notes2, lifted = receding.replan(
+        base_input, previous, solve_input, slot, reason.value,
+        never_freeze=frozenset(j for j, st in states.items() if st is JobStatus.MISSED),
+    )
     if result.status not in ("FEASIBLE", "OPTIMAL"):
         return {"replanned": False, "error": result.reason, "status": result.status.value}
     if not changes:
@@ -639,15 +642,9 @@ def _do_replan(record: ScheduleRecord, now: datetime, reason: RescheduleReason, 
             set(record.context.get("completed_job_ids", [])) | set(done_ids)
         )
     version = store.append_version(record, result, reason, changes, notes + notes2)
-    # Keep the full horizon view: re-attach terminal job specs so the live
-    # input never shrinks to remaining-only. The solver only saw solve_input.
-    done_specs = [j for j in base_input.jobs if states.get(j.id) in terminal]
-    if done_specs:
-        remaining_ids = {j.id for j in solve_input.jobs}
-        merged_jobs = [*solve_input.jobs, *[j for j in done_specs if j.id not in remaining_ids]]
-        record.scheduler_input = solve_input.model_copy(update={"jobs": merged_jobs})
-    else:
-        record.scheduler_input = solve_input
+    # The stored input keeps the ORIGINAL job specs: remaining work (energy, duration,
+    # thermal state) is always re-derived from execution truth, so persisting the
+    # narrowed jobs would double-count what was already delivered on the next replan.
     _refresh_lifecycle(record, now)
     return {
         "replanned": True,
