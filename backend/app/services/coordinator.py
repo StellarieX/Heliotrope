@@ -41,6 +41,7 @@ from .carbon_accounting import CarbonAccountingService, Placement
 from .coordinated_cpsat import MILLI, CoordinatedCPSATScheduler
 from .schedule_validator import ScheduleValidator
 from .scheduler_normalizer import SchedulerNormalizer
+from .scheduler_service import with_default_gap
 from .schedulers.asap import ASAPScheduler
 from .schedulers.greedy import GreedyScheduler
 
@@ -123,29 +124,6 @@ class MultiUserCoordinator:
         self._validate_request(request)
         return self._merged_input(request, signal)
 
-    def replan_coordinated(
-        self,
-        request: CoordinationRequest,
-        merged: SchedulerInput,
-        states: dict,
-        delivered: dict[str, dict[int, int]],
-        delivered_kwh: dict[str, float],
-        now_slot: int,
-    ):
-        """One coordinated replan over remaining requirements. Returns
-        (result, changes, notes, lifted, solve_input)."""
-        from .receding import RecedingHorizon
-
-        receding = RecedingHorizon(
-            solve_fn=lambda inp: self._solve_coordinated(request, inp),
-            commitment_slots=2,
-        )
-        remaining, notes = receding.remaining_input(merged, states, delivered, delivered_kwh, now_slot)
-        result, changes, notes2, lifted = receding.replan(
-            merged, {}, remaining, now_slot, reason="replan"
-        )
-        return result, changes, notes + notes2, lifted, remaining
-
     def _solve_coordinated(self, request: CoordinationRequest, solve_input: SchedulerInput):
         from ..domain.scheduling import SchedulerConfig
 
@@ -166,7 +144,7 @@ class MultiUserCoordinator:
                 for p in request.participants
                 if p.max_inconvenience_slots is not None
             },
-            config=request.solver_config or SchedulerConfig(),
+            config=with_default_gap(request.solver_config) or SchedulerConfig(),
         )
         return engine.schedule(solve_input)
 
@@ -228,8 +206,19 @@ class MultiUserCoordinator:
                     f"baseline has {len(request.baseline_kw)} entries but the horizon "
                     f"has {scheduler_input.horizon.slot_count} slots"
                 )
+            # Extra baseline stacks on top of the FIXED loads already in the
+            # normalized baseline; it never replaces them.
+            fixed = scheduler_input.baseline
+            combined = [
+                fixed.at(s) + to_power_w(b) for s, b in enumerate(request.baseline_kw)
+            ]
+            for s, total in enumerate(combined):
+                if total > scheduler_input.capacity_at(s):
+                    raise CoordinationError(
+                        f"baseline (including fixed loads) exceeds the shared capacity at slot {s}"
+                    )
             scheduler_input = scheduler_input.model_copy(
-                update={"baseline": BaselineProfile(power_w=[to_power_w(b) for b in request.baseline_kw])}
+                update={"baseline": BaselineProfile(power_w=combined, source=fixed.source)}
             )
         return scheduler_input
 
@@ -258,6 +247,7 @@ class MultiUserCoordinator:
         # view — exactly the behavior that herds everyone into the same clean
         # window. The aggregate is then measured, not repaired.
         engine = GreedyScheduler()
+        preferred, pref_warnings = self._preferred_starts_checked(merged)
         placements: dict[str, Placement] = {}
         ok = True
         reasons: list[str] = []
@@ -277,22 +267,36 @@ class MultiUserCoordinator:
             "FEASIBLE" if ok else "INFEASIBLE",
             "; ".join(reasons),
             solver_time_limit,
+            solver_status="HEURISTIC" if ok else "INFEASIBLE",
+            preferred=preferred, extra_warnings=pref_warnings,
         )
 
     # --- coordinated mode ---------------------------------------------------------
 
     def _preferred_starts(self, merged: SchedulerInput) -> dict[str, int]:
+        return self._preferred_starts_checked(merged)[0]
+
+    def _preferred_starts_checked(self, merged: SchedulerInput) -> tuple[dict[str, int], list[str]]:
         """ASAP start per job on the merged input: first-come-first-served
-        reference that delay is measured against."""
+        reference that delay is measured against (shared by both modes).
+        Also returns warnings for jobs that fell back to their release slot."""
         result = ASAPScheduler().schedule(merged)
+        warns: list[str] = []
         starts = {}
         for scheduled in result.schedule:
             slots = [a.slot for a in scheduled.allocations if a.power_w > 0]
             if slots:
                 starts[scheduled.job_id] = min(slots)
+        missing = [j.id for j in merged.jobs if j.id not in starts]
+        if missing:
+            warns.append(
+                "first-come-first-served reference unavailable for "
+                + ", ".join(missing)
+                + "; delay for these jobs is measured from the release slot"
+            )
         for job in merged.jobs:
             starts.setdefault(job.id, job.release_slot)
-        return starts
+        return starts, warns
 
     def _run_coordinated(
         self,
@@ -303,7 +307,7 @@ class MultiUserCoordinator:
     ) -> CoordinationResult:
         from ..domain.scheduling import SchedulerConfig
 
-        preferred = self._preferred_starts(merged)
+        preferred, pref_warnings = self._preferred_starts_checked(merged)
         capacity_w = merged.capacity_w
         target_w = int(capacity_w * request.weights.target_utilization)
         target_profile = self._target_profile(request, merged)
@@ -314,7 +318,7 @@ class MultiUserCoordinator:
             for p in request.participants
             if p.max_inconvenience_slots is not None
         }
-        config = request.solver_config or SchedulerConfig()
+        config = with_default_gap(request.solver_config) or SchedulerConfig()
         if solver_time_limit is not None:
             config = config.model_copy(update={"time_limit_seconds": solver_time_limit})
         engine = CoordinatedCPSATScheduler(
@@ -343,6 +347,7 @@ class MultiUserCoordinator:
                 "OPTIMAL" if result.status is ScheduleStatus.OPTIMAL else "FEASIBLE",
                 "", solver_time_limit, solver_status=result.solver.status.value,
                 solve_ms=result.solver.solve_time_ms, preferred=preferred,
+                extra_warnings=pref_warnings,
             ),
             result,
             placement,
@@ -446,6 +451,7 @@ class MultiUserCoordinator:
         solver_status: str = "FEASIBLE",
         solve_ms: int | None = None,
         preferred: dict[str, int] | None = None,
+        extra_warnings: list[str] | None = None,
     ) -> CoordinationResult:
         horizon = merged.horizon
         n = horizon.slot_count
@@ -551,7 +557,7 @@ class MultiUserCoordinator:
         total_co2 = sum(stats["co2_kg"] for stats in stats_by_job.values())
         total_energy = sum(stats["energy_kwh"] for stats in stats_by_job.values())
         peak_kw = max((a.total_kw for a in aggregate), default=0.0)
-        warnings: list[str] = []
+        warnings: list[str] = list(extra_warnings or [])
         if violations:
             # Capacity breaches are DATA, in both modes: the metric counts the
             # slots and a warning says so. A solver that actually failed
