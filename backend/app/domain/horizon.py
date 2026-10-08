@@ -197,6 +197,39 @@ class SchedulingHorizon(BaseModel):
             return range(0)
         return range(first, last + 1)
 
+    def slot_overlap_fractions(
+        self, start_moment: datetime, end_moment: datetime
+    ) -> list[tuple[int, float]]:
+        """(slot index, the fraction of that slot covered by the window), in order.
+
+        `slot_range_for` answers a different question: which slots are FULLY
+        CONTAINED in the window. It rounds the front edge up and the back edge
+        down, so a window whose ends are not on the grid loses its two boundary
+        slots. Using it as a load's occupancy window therefore dropped part of
+        the load's energy — 30 minutes of draw across a 15-minute grid was
+        charged as 15 minutes, half of it vanishing from the baseline, with
+        headroom overstated and no downstream check able to notice.
+
+        Each slot's covered fraction is returned instead, so a caller can charge
+        exactly the energy the window really spans. An aligned window yields 1.0
+        for every slot it touches, so this is a no-op for everything currently
+        grid-aligned.
+        """
+        window_start = to_utc(start_moment)
+        window_end = to_utc(end_moment)
+        if window_end <= window_start:
+            return []
+        span_s = self.slot_minutes * 60.0
+        out: list[tuple[int, float]] = []
+        for index in self.slots:
+            slot_start = self.start + timedelta(minutes=self.slot_minutes * index)
+            slot_end = slot_start + timedelta(seconds=span_s)
+            lo = max(window_start, slot_start)
+            hi = min(window_end, slot_end)
+            if hi > lo:
+                out.append((index, (hi - lo).total_seconds() / span_s))
+        return out
+
     def minutes_to_slots(self, minutes: float) -> int:
         """Slots required to cover `minutes`, rounding UP.
 

@@ -250,9 +250,22 @@ class SchedulerNormalizer:
             return
 
         if spec.release_at is not None and spec.deadline_at is not None:
-            slots = horizon.slot_range_for(spec.release_at, spec.deadline_at)
-            for s in slots:
-                baseline_w[s] += power
+            # Charge each slot by the fraction of it the window actually covers.
+            # The previous code used `slot_range_for`, which returns only the
+            # slots FULLY CONTAINED in the window and so dropped the two boundary
+            # slots: a 30-minute draw on a 15-minute grid was charged as 15
+            # minutes and half the load's energy disappeared from the baseline.
+            # An already-aligned window prorates to whole power on every slot,
+            # so aligned inputs are unaffected.
+            covered = horizon.slot_overlap_fractions(spec.release_at, spec.deadline_at)
+            for slot, fraction in covered:
+                baseline_w[slot] += int(round(power * fraction))
+            if covered and any(f < 1.0 for _, f in covered):
+                report.warnings.append(
+                    f"{spec.normalized_name}'s declared window does not start and end on "
+                    f"{horizon.slot_minutes}-minute boundaries, so the boundary slots "
+                    "carry the fraction of it they really cover."
+                )
             report.warnings.append(
                 f"{spec.normalized_name} is drawn only inside its declared window; "
                 "outside it the baseline is zero."

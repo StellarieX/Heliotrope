@@ -17,6 +17,7 @@ happened anyway. ASAP is what actually happens with no optimization, so
 
 from __future__ import annotations
 
+import copy
 from contextlib import contextmanager
 from typing import Iterator, Optional
 
@@ -36,22 +37,36 @@ from ..domain.scheduling import (
     TimeOfUseTariff,
 )
 from .carbon_accounting import CarbonAccountingService, Placement
-from .schedulers import SCHEDULERS, SchedulerName
+from .schedulers import SCHEDULERS, BaseScheduler, SchedulerName
 from .scheduler_normalizer import SchedulerNormalizer, fingerprint_input
 
 
 @contextmanager
-def _scoped_config(engine, config: Optional[SchedulerConfig]) -> Iterator[None]:
-    """Apply `config` to a shared engine for the duration of one run only."""
+def _scoped_engine(
+    engine: BaseScheduler, config: Optional[SchedulerConfig]
+) -> Iterator[BaseScheduler]:
+    """The engine to run this call with.
+
+    `SCHEDULERS` holds process-wide singletons, and the engines read
+    `self.config` deep inside the shared template while FastAPI runs sync
+    endpoints in a threadpool. Assigning a caller's config onto the shared
+    instance therefore let one request's `time_limit_seconds` or `num_workers`
+    replace another's mid-solve. Measured on this code path: 5 of 10 concurrent
+    requests solved with a foreign config, including one that asked for 600 s
+    and was aborted at 0.2 s, and one that asked for 0.2 s and ran with 600 s.
+
+    A shallow copy gives the call its own `config` — and, with it, its own
+    `_status` and `_last_solver`, so a concurrent run cannot extract a placement
+    with another run's CpSolver — while sharing the stateless collaborators.
+    Nothing is mutated on the singleton, so concurrent solves are isolated by
+    construction rather than by lock ordering.
+    """
     if config is None:
-        yield
+        yield engine
         return
-    previous = engine.config
-    engine.config = config
-    try:
-        yield
-    finally:
-        engine.config = previous
+    scoped = copy.copy(engine)
+    scoped.config = config
+    yield scoped
 
 
 def with_default_gap(config: Optional[SchedulerConfig]) -> Optional[SchedulerConfig]:
@@ -128,14 +143,10 @@ class SchedulerService:
         """Run one scheduler and, optionally, attach counterfactual explanations."""
         engine = SCHEDULERS[scheduler]
         config = with_default_gap(config)
-        # `SCHEDULERS` holds process-wide singletons, and the engines read
-        # `self.config` deep inside the shared template. Assigning to it without
-        # restoring would let one caller's `time_limit_seconds` leak into every
-        # later call: a request asking for 30 s would make the *next* request
-        # block for 30 s too. The override is therefore strictly scoped to this
-        # call, even if scheduling raises.
-        with _scoped_config(engine, config):
-            result = engine.schedule(scheduler_input)
+        # `SCHEDULERS` holds process-wide singletons, so config must never be
+        # written onto them: see `_scoped_engine` for what that cost us.
+        with _scoped_engine(engine, config) as scoped:
+            result = scoped.schedule(scheduler_input)
         if explain:
             self.attach_explanations(scheduler_input, result)
         return result

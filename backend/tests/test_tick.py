@@ -6,12 +6,13 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 
-from .fixtures import ev_job, washing_machine_job
+from .fixtures import day_str, ev_job, washing_machine_job
 
 client = TestClient(app)
-DAY = "2026-10-05"
+DAY = day_str()                                        # the anchor day, always today
+NEXT = day_str(1)                                      # the following day
 CARBON_START = f"{DAY}T18:00:00+00:00"
-CARBON_END = "2026-10-06T08:00:00+00:00"
+CARBON_END = f"{NEXT}T08:00:00+00:00"
 
 
 def spec_dict(spec) -> dict:
@@ -42,7 +43,7 @@ def test_tick_advances_clock_and_marks_missed():
     assert sched_start is not None
     # Tick well past the atomic window without ever starting the job.
     res = client.post(
-        f"/api/v1/schedules/{sid}/tick", json={"now": "2026-10-05T23:30:00+00:00"}
+        f"/api/v1/schedules/{sid}/tick", json={"now": f"{DAY}T23:30:00+00:00"}
     )
     assert res.status_code == 200, res.text
     body = res.json()
@@ -57,7 +58,7 @@ def test_tick_auto_replans_under_periodic():
         execution={"policy": "PERIODIC", "reoptimization_interval_minutes": 15},
     )
     res = client.post(
-        f"/api/v1/schedules/{sid}/tick", json={"now": "2026-10-06T02:00:00+00:00"}
+        f"/api/v1/schedules/{sid}/tick", json={"now": f"{NEXT}T02:00:00+00:00"}
     )
     assert res.status_code == 200, res.text
     body = res.json()
@@ -76,7 +77,7 @@ def test_tick_auto_replans_under_periodic():
 def test_tick_does_not_replan_under_manual():
     sid = plan([ev_job(energy_required_kwh=18.0)], execution={"policy": "MANUAL"})
     res = client.post(
-        f"/api/v1/schedules/{sid}/tick", json={"now": "2026-10-06T02:00:00+00:00"}
+        f"/api/v1/schedules/{sid}/tick", json={"now": f"{NEXT}T02:00:00+00:00"}
     )
     assert res.status_code == 200, res.text
     body = res.json()
@@ -95,12 +96,12 @@ def test_tick_respects_reoptimization_interval():
         execution={"policy": "PERIODIC", "reoptimization_interval_minutes": 15},
     )
     first = client.post(
-        f"/api/v1/schedules/{sid}/tick", json={"now": "2026-10-06T02:00:00+00:00"}
+        f"/api/v1/schedules/{sid}/tick", json={"now": f"{NEXT}T02:00:00+00:00"}
     ).json()
     assert first["periodic_due"] is True
     # 5 min later: interval (15 min) has not elapsed since last_replan_at.
     second = client.post(
-        f"/api/v1/schedules/{sid}/tick", json={"now": "2026-10-06T02:05:00+00:00"}
+        f"/api/v1/schedules/{sid}/tick", json={"now": f"{NEXT}T02:05:00+00:00"}
     )
     assert second.status_code == 200, second.text
     assert second.json()["periodic_due"] is False
@@ -110,6 +111,6 @@ def test_tick_respects_reoptimization_interval():
 
 def test_tick_unknown_schedule_404():
     res = client.post(
-        "/api/v1/schedules/doesnotexist/tick", json={"now": "2026-10-05T20:00:00+00:00"}
+        "/api/v1/schedules/doesnotexist/tick", json={"now": f"{DAY}T20:00:00+00:00"}
     )
     assert res.status_code == 404

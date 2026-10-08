@@ -29,7 +29,29 @@ from app.domain.carbon import CarbonPoint, CarbonSignal, SignalType
 from app.domain.loads import LoadSpec, LoadType
 from app.domain.thermal_examples import GEYSER_SYNTHETIC
 
-DAY_START = datetime(2026, 10, 5, 0, 0, tzinfo=timezone.utc)
+def _day_start() -> datetime:
+    """Midnight UTC on the day the suite runs.
+
+    Anchoring to a literal date was a time bomb. Routes that fall back to
+    `utcnow()` internally — `/tick`, `/override`, and the version bookkeeping
+    behind them — compare against the real clock, so a horizon built on a fixed
+    past date silently stops working the moment the calendar passes it: ticks
+    look "not due" because the elapsed time is negative, and overrides are
+    rejected for having no slots left before a deadline that is already behind
+    the server. Deriving the anchor from "today" keeps those routes
+    deterministic and the suite green on any run date.
+    """
+    now = datetime.now(timezone.utc)
+    return now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+DAY_START = _day_start()
+
+
+def day_str(offset_days: int = 0) -> str:
+    """`DAY_START` shifted by `offset_days`, as the YYYY-MM-DD prefix that
+    every wall-clock literal in the suite is built from."""
+    return (DAY_START + timedelta(days=offset_days)).date().isoformat()
 
 
 def at(hours: float) -> datetime:

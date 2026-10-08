@@ -178,6 +178,20 @@ def resolve_wall_window(
             "on the same day, but same-day was declared — use crosses_midnight=True for next-day completion"
         )
 
+    if crosses_midnight is not True and deadline_wall == release_wall:
+        # Equal wall times describe a zero-length window, which is what the
+        # widening fix-up below used to silently turn into a full 24 hours of
+        # scheduling freedom — a night the user never asked for, reported back
+        # to them as "deadline rolled over to the next day" for a window that
+        # does not cross midnight at all. An explicit crosses_midnight=True is
+        # the honest way to ask for the all-day window; anything else is an
+        # error, because a load needs time to actually run.
+        raise WallClockError(
+            f"release and deadline are both {release_wall.isoformat()}, which is a "
+            "zero-length window. Give the load a later deadline, or pass "
+            "crosses_midnight=True to ask for the full day."
+        )
+
     crosses = inferred if crosses_midnight is None else crosses_midnight
     source = "inferred" if crosses_midnight is None else "declared"
 

@@ -6,12 +6,13 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 
-from .fixtures import ev_job, washing_machine_job
+from .fixtures import day_str, ev_job, washing_machine_job
 
 client = TestClient(app)
-DAY = "2026-10-05"
+DAY = day_str()                                        # the anchor day, always today
+NEXT = day_str(1)                                      # the following day
 CARBON_START = f"{DAY}T18:00:00+00:00"
-CARBON_END = "2026-10-06T08:00:00+00:00"
+CARBON_END = f"{NEXT}T08:00:00+00:00"
 
 
 def spec_dict(spec) -> dict:

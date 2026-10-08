@@ -170,7 +170,6 @@ class CPSATScheduler(BaseScheduler):
         status_code = solver.Solve(model)
 
         status = _STATUS_MAP.get(status_code, SolverStatus.UNKNOWN)
-        self._last_solver = solver
 
         if status is SolverStatus.INFEASIBLE:
             raise PlacementFailure(
@@ -207,6 +206,15 @@ class CPSATScheduler(BaseScheduler):
         if status is SolverStatus.OPTIMAL and self._relative_gap(solver) > _PROVEN_GAP:
             status = SolverStatus.FEASIBLE
         self._status = status
+        # Only a run that actually extracted a placement may publish the raw
+        # solver's objective/bound/gap. This used to be assigned before the two
+        # raises above, which let `schedule()` overwrite the honest INFEASIBLE /
+        # UNKNOWN report — already derived from `PlacementFailure.status` by the
+        # shared template — with the solved-but-unsatisfiable model's numbers:
+        # status UNKNOWN, objective 0.0, bound 0.0, gap 0.0, describing a
+        # solution that does not exist. A proved-infeasible must read
+        # INFEASIBLE, not "ran out of time".
+        self._last_solver = solver
         return self._extract(scheduler_input, run_atomic, pw_interruptible, pw_thermal)
 
     # --- variable construction ---------------------------------------------

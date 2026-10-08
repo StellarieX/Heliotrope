@@ -6,18 +6,20 @@ from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
 
+import app.api.routes.execution as execution
 from app.domain.execution import RescheduleReason, ScheduleEvent, ScheduleEventType
 from app.main import app
 from app.services.execution_store import ExecutionStore
 from app.services.scheduler_service import SchedulerService
 from app.services.schedulers import SchedulerName
 
-from .fixtures import ev_job, geyser_job, make_signal, washing_machine_job
+from .fixtures import at, day_str, ev_job, fan_job, geyser_job, make_signal, washing_machine_job
 
 client = TestClient(app)
-DAY = "2026-10-05"
+DAY = day_str()                                        # the anchor day, always today
+NEXT = day_str(1)                                      # the following day
 CARBON_START = f"{DAY}T18:00:00+00:00"
-CARBON_END = "2026-10-06T08:00:00+00:00"
+CARBON_END = f"{NEXT}T08:00:00+00:00"
 
 
 def spec_dict(spec) -> dict:
@@ -128,7 +130,7 @@ def test_missed_start_replanned_or_reported():
     # Advance the clock 2h past the scheduled start without starting.
     res = client.post(
         f"/api/v1/simulation/{sid}/advance",
-        json={"to_time": "2026-10-05T23:30:00+00:00", "script": []},
+        json={"to_time": f"{DAY}T23:30:00+00:00", "script": []},
     )
     assert res.status_code == 200
     statuses = {j["job_id"]: j["status"] for j in res.json()["state"]["jobs"]}
@@ -136,21 +138,58 @@ def test_missed_start_replanned_or_reported():
     assert sched_start is not None
 
 
-def test_override_rejected_without_headroom():
+def test_override_rejected_without_headroom(monkeypatch):
+    """The no-headroom branch of `check_override`, exercised deterministically.
+
+    `headroom_fn` measures only the FIXED baseline, never the other flexible
+    jobs' placements, so the capacity rejection can only be triggered by a
+    fixed load drawing at the moment of the override. An 8 kW fixed load holds
+    the 10 kW connection between 20:00 and 22:00; the override target needs
+    3 kW and is only schedulable once the fixed window has passed, so the plan
+    succeeds but the override inside the window cannot.
+
+    `now` is pinned because `post_override` reads the real clock: the horizon is
+    anchored to 20:00 today, so unpinned the verdict depended on the hour the
+    suite ran — late in the evening the deadline guardrail fired first and the
+    rejection explained slot counts rather than capacity, failing this
+    assertion for a reason the test does not claim to cover.
+    """
+    monkeypatch.setattr(execution, "utcnow", lambda: at(21))
     sid = plan(
-        [ev_job(energy_required_kwh=14.4), washing_machine_job(power_kw=9.0, duration_minutes=120)],
+        [
+            fan_job(power_kw=8.0, release_at=at(20), deadline_at=at(22)),
+            washing_machine_job(power_kw=3.0, duration_minutes=60,
+                                release_at=at(22), deadline_at=at(31)),
+        ],
         capacity_kw=10.0,
     )
     res = client.post(
         f"/api/v1/schedules/{sid}/override",
         json={"job_id": "wm-1", "command": "START_NOW"},
     )
-    # Either accepted (headroom exists right now) or rejected with a reason —
-    # both are honest; the contract is that rejection explains capacity.
-    assert res.status_code in (200, 422)
-    if res.status_code == 422:
-        assert "capacity" in res.json()["detail"]
-        assert res.json()["code"] == "override_rejected"
+    assert res.status_code == 422
+    body = res.json()
+    assert body["code"] == "override_rejected"
+    assert "capacity" in body["detail"]
+
+
+def test_override_accepted_when_headroom_exists(monkeypatch):
+    """The same schedule, checked once the fixed window has ended."""
+    monkeypatch.setattr(execution, "utcnow", lambda: at(23))
+    sid = plan(
+        [
+            fan_job(power_kw=8.0, release_at=at(20), deadline_at=at(22)),
+            washing_machine_job(power_kw=3.0, duration_minutes=60,
+                                release_at=at(22), deadline_at=at(31)),
+        ],
+        capacity_kw=10.0,
+    )
+    res = client.post(
+        f"/api/v1/schedules/{sid}/override",
+        json={"job_id": "wm-1", "command": "START_NOW"},
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["accepted"] is True
 
 
 def test_override_cancel_completed_rejected():
@@ -391,7 +430,7 @@ def test_simulation_advance_persists():
     sid = plan([washing_machine_job()])
     res = client.post(
         f"/api/v1/simulation/{sid}/advance",
-        json={"to_time": "2026-10-05T23:30:00+00:00", "script": []},
+        json={"to_time": f"{DAY}T23:30:00+00:00", "script": []},
     )
     assert res.status_code == 200
     reloaded = ExecutionStore(db_path=ex_routes.store._db_path).get(sid)
