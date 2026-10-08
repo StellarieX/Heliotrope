@@ -153,9 +153,9 @@ def test_feasible_implies_energy_fits_the_window(power, energy, window, chunk):
     spec = interruptible(power, energy, window, chunk)
     report = is_energy_feasible(spec)
     if report.feasible:
+        # Any contiguous block of at least one chunk is legal (CP-SAT and the validator
+        # accept it), so the whole window is usable once it can hold a single chunk.
         usable = window * 60
-        if spec.min_chunk_minutes:
-            usable = (usable // spec.min_chunk_minutes) * spec.min_chunk_minutes
         assert energy <= spec.effective_max_power_kw() * usable / 60.0 + 1e-6
 
 
