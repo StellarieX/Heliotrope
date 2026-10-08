@@ -150,7 +150,10 @@ class WallWindow:
     rollover_source: str  # "inferred" | "declared"
 
     def minutes(self) -> float:
-        return (self.deadline - self.release).total_seconds() / 60.0
+        # Subtract in UTC: aware datetimes sharing one tzinfo subtract by wall
+        # clock, which is wrong across a DST change.
+        utc = timezone.utc
+        return (self.deadline.astimezone(utc) - self.release.astimezone(utc)).total_seconds() / 60.0
 
 
 def resolve_wall_window(
@@ -203,7 +206,9 @@ def resolve_wall_window(
         if deadline <= release:
             deadline = deadline + timedelta(days=1)
     else:
-        deadline = next_occurrence(deadline_wall, now, zone)
+        # Same-day window: anchor to the release day so a declared same-day
+        # window is never reported as rolled over.
+        deadline = wall_instant(deadline_wall, release.astimezone(zone).date(), zone)
 
     if deadline <= release:
         deadline = deadline + timedelta(days=1)
@@ -213,4 +218,5 @@ def resolve_wall_window(
 
 
 def elapsed_minutes(start: datetime, end: datetime) -> float:
-    return (end - start).total_seconds() / 60.0
+    utc = timezone.utc
+    return (end.astimezone(utc) - start.astimezone(utc)).total_seconds() / 60.0
