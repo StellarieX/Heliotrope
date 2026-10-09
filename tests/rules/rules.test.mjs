@@ -93,6 +93,29 @@ await t("onboarding: jobs + onboarded flag in one batch", async () => {
   await assertSucceeds(b.commit());
 });
 
+// --- load shape and private settings
+await t("full app load shape is accepted", () =>
+  assertSucceeds(addDoc(collection(alice, "users/alice/jobs"), {
+    name: "Geyser bank", kind: "Water heating", shiftable: true, powerKw: 6, readyBy: "06:00",
+    flexHours: 1, jobType: "THERMAL", tempMinC: 40, tempMaxC: 65, confidence: 0.92,
+    createdAt: new Date().toISOString(),
+  })));
+await t("load with an unknown field is rejected", () =>
+  assertFails(addDoc(collection(alice, "users/alice/jobs"), { name: "EV", powerKw: 7, payload: "x".repeat(10) })));
+await t("load with an invalid job type is rejected", () =>
+  assertFails(addDoc(collection(alice, "users/alice/jobs"), { name: "EV", jobType: "ROCKET" })));
+await t("load with an absurd power is rejected", () =>
+  assertFails(addDoc(collection(alice, "users/alice/jobs"), { name: "EV", powerKw: 1e9 })));
+await t("load without a name is rejected", () =>
+  assertFails(addDoc(collection(alice, "users/alice/jobs"), { powerKw: 2 })));
+await t("owner saves max power in private settings", () =>
+  assertSucceeds(setDoc(doc(alice, "users/alice/settings/prefs"), { maxPowerKw: 25, updatedAt: serverTimestamp() })));
+await t("other user cannot read my settings", () => assertFails(getDoc(doc(bob, "users/alice/settings/prefs"))));
+await t("settings reject other documents", () =>
+  assertFails(setDoc(doc(alice, "users/alice/settings/other"), { maxPowerKw: 25 })));
+await t("settings reject unknown fields", () =>
+  assertFails(setDoc(doc(alice, "users/alice/settings/prefs"), { maxPowerKw: 25, email: "a@b.c" })));
+
 await env.cleanup();
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

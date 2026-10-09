@@ -34,6 +34,42 @@ service cloud.firestore {
         && (!('onboarded' in d) || d.onboarded is bool);
     }
 
+    function optNum(d, k, lo, hi) {
+      return !(k in d) || d[k] == null || (d[k] is number && d[k] >= lo && d[k] <= hi);
+    }
+
+    function optStr(d, k, maxLen) {
+      return !(k in d) || d[k] == null || (d[k] is string && d[k].size() <= maxLen);
+    }
+
+    // A saved load. Allow-listed keys only; numbers bounded so the doc can't be
+    // abused as storage. Values are re-validated by the backend before planning.
+    function validJob(d) {
+      return d.keys().hasOnly(['name', 'kind', 'shiftable', 'powerKw', 'readyBy', 'flexHours',
+                               'jobType', 'energyKwh', 'durationMin', 'tempMinC', 'tempMaxC',
+                               'tempTargetC', 'confidence', 'createdAt'])
+        && d.name is string && d.name.size() > 0 && d.name.size() <= 80
+        && optStr(d, 'kind', 60)
+        && (!('shiftable' in d) || d.shiftable is bool)
+        && optNum(d, 'powerKw', 0, 100000)
+        && optStr(d, 'readyBy', 10)
+        && optNum(d, 'flexHours', 0, 168)
+        && (!('jobType' in d) || d.jobType in ['FIXED', 'DEFERRABLE_ATOMIC',
+                                                'DEFERRABLE_INTERRUPTIBLE', 'THERMAL'])
+        && optNum(d, 'energyKwh', 0, 1000000)
+        && optNum(d, 'durationMin', 0, 10080)
+        && optNum(d, 'tempMinC', -50, 150)
+        && optNum(d, 'tempMaxC', -50, 150)
+        && optNum(d, 'tempTargetC', -50, 150)
+        && optNum(d, 'confidence', 0, 1)
+        && optStr(d, 'createdAt', 40);
+    }
+
+    function validSettings(d) {
+      return d.keys().hasOnly(['maxPowerKw', 'updatedAt'])
+        && optNum(d, 'maxPowerKw', 0, 100000);
+    }
+
     // User profile documents: public read so /[username] pages resolve;
     // only the account owner may write their own profile document.
     // `request.resource == null` is a delete, which has no payload to validate.
@@ -41,9 +77,19 @@ service cloud.firestore {
       allow read: if true;
       allow write: if request.auth != null && request.auth.uid == uid && (request.resource == null || validProfile(request.resource.data));
 
-      // Private per-user jobs: only the owner may read or write.
+      // Private per-user loads: only the owner may read or write, and only the
+      // fields the app writes, with sane types and sizes.
       match /jobs/{jobId} {
-        allow read, write: if request.auth != null && request.auth.uid == uid;
+        allow read, delete: if request.auth != null && request.auth.uid == uid;
+        allow create, update: if request.auth != null && request.auth.uid == uid
+          && validJob(request.resource.data);
+      }
+
+      // Private per-user settings (e.g. "Max power at once"): owner only.
+      match /settings/{docId} {
+        allow read, delete: if request.auth != null && request.auth.uid == uid;
+        allow create, update: if request.auth != null && request.auth.uid == uid
+          && docId == 'prefs' && validSettings(request.resource.data);
       }
     }
 

@@ -93,7 +93,7 @@ class SecurityRulesEngine:
 
     def eval_jobs_read(self, auth: Optional[Dict[str, Any]], uid: str, job_id: str) -> bool:
         """Evaluate read on /users/{uid}/jobs/{jobId}."""
-        m = re.search(r"allow\s+read(?:,\s*write)?:\s*if\s+([^;]+);", self.jobs_block)
+        m = re.search(r"allow\s+read(?:,\s*\w+)*:\s*if\s+([^;]+);", self.jobs_block)
         if not m:
             return False
         cond = m.group(1).strip()
@@ -108,7 +108,7 @@ class SecurityRulesEngine:
 
     def eval_jobs_write(self, auth: Optional[Dict[str, Any]], uid: str, job_id: str) -> bool:
         """Evaluate write on /users/{uid}/jobs/{jobId}."""
-        m = re.search(r"allow\s+(?:read,\s*)?write:\s*if\s+([^;]+);", self.jobs_block)
+        m = re.search(r"allow\s+(?:\w+,\s*)*(?:write|create)(?:,\s*\w+)*:\s*if\s+([^;]+);", self.jobs_block)
         if not m:
             return False
         cond = m.group(1).strip()
