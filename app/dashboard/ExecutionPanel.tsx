@@ -131,7 +131,7 @@ export default function ExecutionPanel({
                       Resume
                     </button>
                   )}
-                  {!terminal && (
+                  {!terminal && j.deadline_at && (
                     <button
                       onClick={() => setMoveOpen(moveOpen === j.job_id ? null : j.job_id)}
                       disabled={busy}
@@ -188,7 +188,7 @@ export default function ExecutionPanel({
                       disabled={busy}
                       onClick={() => {
                         setMoveOpen(null);
-                        onOverride(j.job_id, "MOVE", new Date(Math.max(Date.now(), new Date(j.deadline_at ?? j.scheduled_end ?? 0).getTime()) + h * 3600_000).toISOString());
+                        onOverride(j.job_id, "MOVE", new Date(Math.max(Date.now(), new Date(j.deadline_at ?? 0).getTime()) + h * 3600_000).toISOString());
                       }}
                       className={actionBtn}
                     >
