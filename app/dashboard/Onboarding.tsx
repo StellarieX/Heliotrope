@@ -1,13 +1,15 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { signOut, updateProfile, type User } from "firebase/auth";
 import { collection, doc, getDoc, writeBatch } from "firebase/firestore";
 import { getDb, getFirebaseAuth } from "../../lib/firebase";
 import { claimUsername, validUsername } from "../../lib/username";
-import { jevRank, classifyJob, type JobInput } from "../../lib/prioritize";
+import { classifyJob, type JobInput } from "../../lib/prioritize";
 import { detailNeeded, kindOf, type StoredJob } from "../../lib/loads/specs";
-import { useClassification } from "../../lib/loads/useClassification";
+import { useJevClassify } from "../../lib/onboarding/useJevClassify";
+import { useBackendRanking } from "../../lib/onboarding/useRanking";
+import { OCCUPATIONS, PLACES, profileFor, saveMaxPower, type LoadPreset } from "../../lib/occupations";
 import type { JobType } from "../../lib/api/types";
 
 type Draft = {
@@ -17,37 +19,28 @@ type Draft = {
   flexHours: number;
   energyKwh: string;
   durationMin: string;
-  // Filled in from the backend classification of `name` (AI or rules).
+  // Filled in from the backend classification of `name` (Jev or the built-in rules).
   jobType?: JobType;
   category?: string;
   confidence?: number;
 };
 type Availability = "free" | "mine" | "taken" | "unknown";
 
-const OCCUPATIONS = ["Student", "Hostel staff", "Homeowner", "Facility manager", "Researcher", "Other"];
-const PLACES = ["Hostel block", "Home", "Campus", "Other"];
-
 const BLANK: Draft = { name: "", powerKw: "", readyBy: "06:00", flexHours: 2, energyKwh: "", durationMin: "" };
-
-// One-click starting points so a first load takes seconds, not a form.
-const PRESETS: Array<Draft & { label: string }> = [
-  { label: "EV charger", name: "EV charger", powerKw: "7.4", readyBy: "07:00", flexHours: 3, energyKwh: "20", durationMin: "" },
-  { label: "Water heater", name: "Water heater", powerKw: "2", readyBy: "06:00", flexHours: 2, energyKwh: "", durationMin: "" },
-  { label: "Washing machine", name: "Washing machine", powerKw: "2", readyBy: "18:00", flexHours: 4, energyKwh: "", durationMin: "60" },
-  { label: "Borewell pump", name: "Borewell pump", powerKw: "1.5", readyBy: "08:00", flexHours: 3, energyKwh: "4", durationMin: "" },
-];
 
 const MAX_POWER_KW = 1000;
 
 const inputCls =
   "w-full rounded-xl border border-white/10 bg-black px-4 py-2.5 text-sm text-white placeholder:text-zinc-700 focus:border-white/30 focus:outline-none";
 
-const TYPE_NOTE: Record<string, string> = {
-  DEFERRABLE_INTERRUPTIBLE: "can pause and resume",
-  DEFERRABLE_ATOMIC: "one continuous run",
-  THERMAL: "holds a comfort band",
-  FIXED: "always-on, never shifted",
+const TYPE_NAME: Record<JobType, string> = {
+  DEFERRABLE_INTERRUPTIBLE: "Can pause and resume",
+  DEFERRABLE_ATOMIC: "Runs in one go",
+  THERMAL: "Keeps a temperature",
+  FIXED: "Always on",
 };
+
+const MAX_LOADS = 20;
 
 function toStored(d: Draft, id: string): StoredJob {
   const c = classifyJob(d.name);
@@ -80,26 +73,30 @@ function DraftCard({
   onChange: (patch: Partial<Draft>) => void;
   onRemove?: () => void;
 }) {
-  const cls = useClassification(d.name, d.readyBy);
-  const clsType = cls?.jobType;
-  const clsCategory = cls?.category;
-  const clsConfidence = cls?.confidence;
+  const cls = useJevClassify(d.name);
+  const answer = cls.status === "ok" ? cls.answer : null;
+  const ansType = answer?.jobType;
+  const ansCategory = answer?.category;
+  const ansConfidence = answer?.confidence;
 
-  // Keep the draft's type in step with what the classifier says about the current name.
+  // Keep the draft's type in step with what the backend says about the current name.
   useEffect(() => {
-    if (clsType && clsType !== d.jobType) {
-      onChange({ jobType: clsType, category: clsCategory, confidence: clsConfidence });
+    if (ansType && ansType !== d.jobType) {
+      onChange({ jobType: ansType, category: ansCategory, confidence: ansConfidence });
     }
     // onChange identity changes every render of the parent; only the result matters.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [clsType, clsCategory, clsConfidence, d.jobType]);
+  }, [ansType, ansCategory, ansConfidence, d.jobType]);
 
   const stored = toStored(d, `draft-${i}`);
-  const need = d.name.trim() ? detailNeeded(stored) : null;
+  const hasName = d.name.trim().length > 0;
+  const need = hasName ? detailNeeded(stored) : null;
   const kw = Number(d.powerKw);
-  const powerBad = Boolean(d.name.trim()) && !(kw > 0 && kw <= MAX_POWER_KW);
-  const local = classifyJob(d.name.trim() || "…");
-  const type = kindOf(stored);
+  const powerBad = hasName && !(kw > 0 && kw <= MAX_POWER_KW);
+  // What the plan will treat this load as. It matches the backend's answer except
+  // where the name itself marks a heater or cooler as a temperature-holding load.
+  const type: JobType = kindOf(stored);
+  const pct = answer ? Math.round(answer.confidence * 100) : 0;
 
   return (
     <div className="rounded-2xl border border-white/10 p-4">
@@ -115,30 +112,39 @@ function DraftCard({
         aria-label={`Load ${i + 1} name`}
         value={d.name}
         onChange={(e) => onChange({ name: e.target.value, jobType: undefined, category: undefined, confidence: undefined })}
-        placeholder="Name anything — e.g. hostel borewell pump"
+        placeholder="Name anything, e.g. hostel borewell pump"
         maxLength={40}
         className={`mt-3 ${inputCls}`}
       />
-      {d.name.trim() && (
-        <p className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[11px]">
-          <span className={`h-1.5 w-1.5 rounded-full ${type === "FIXED" ? "bg-zinc-600" : "bg-lime-300"}`} />
-          <span className={type === "FIXED" ? "text-zinc-500" : "text-zinc-400"}>
-            {(cls?.category ?? local.category)} · {TYPE_NOTE[type]}
-            {type === "FIXED" ? " — filtered out of Optimize" : ""}
-          </span>
-          {cls && (
-            <span
-              title={cls.provider === "jev" ? `Decided by Jev with ${Math.round(cls.confidence * 100)}% confidence` : "Classified by the built-in rules"}
-              className={`rounded-full px-2 py-0.5 text-[10px] uppercase tracking-wider ${cls.provider === "jev" ? "bg-violet-400/15 text-violet-300" : "bg-white/5 text-zinc-500"}`}
-            >
-              {cls.provider === "jev" ? "jev" : "rules"}
+      {hasName && (
+        <p aria-live="polite" className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[11px]">
+          <span className={`h-1.5 w-1.5 rounded-full ${cls.status === "offline" ? "bg-orange-300" : type === "FIXED" ? "bg-zinc-600" : "bg-lime-300"}`} />
+          {cls.status === "ok" && answer ? (
+            <>
+              <span className={answer.provider === "jev" ? "text-violet-300" : "text-zinc-400"}>
+                {answer.provider === "jev"
+                  ? `Jev: ${TYPE_NAME[answer.jobType]} · ${pct}% sure`
+                  : `Built-in rules: ${TYPE_NAME[answer.jobType]}`}
+              </span>
+              <span className="text-zinc-600">{answer.category}</span>
+              {type !== answer.jobType && <span className="text-zinc-500">· planned as &ldquo;{TYPE_NAME[type]}&rdquo;</span>}
+              {answer.ambiguous && <span className="text-amber-300">· not certain, check the details below</span>}
+            </>
+          ) : cls.status === "offline" ? (
+            <span className="text-orange-300">
+              The classifier is not reachable, so this is a rough guess made in this page: {TYPE_NAME[type]}.
             </span>
+          ) : (
+            <span className="text-zinc-600">Checking what kind of load this is…</span>
+          )}
+          {type === "FIXED" && cls.status !== "idle" && (
+            <span className="text-zinc-500">· counted in the plan, never moved</span>
           )}
         </p>
       )}
       <div className="mt-2 grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
         <label className={`rounded-xl border bg-black px-3 py-2 focus-within:border-white/30 ${powerBad ? "border-orange-300/50" : "border-white/10"}`}>
-          <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-600">power (kW)</span>
+          <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-600">Power (kW)</span>
           <input
             value={d.powerKw}
             onChange={(e) => onChange({ powerKw: e.target.value.replace(/[^0-9.]/g, "") })}
@@ -147,19 +153,21 @@ function DraftCard({
             className="w-full bg-transparent py-1 text-sm text-white placeholder:text-zinc-700 focus:outline-none"
           />
         </label>
-        <label className="rounded-xl border border-white/10 bg-black px-3 py-2">
-          <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-600">ready by</span>
-          <input
-            type="time"
-            value={d.readyBy}
-            onChange={(e) => onChange({ readyBy: e.target.value })}
-            className="w-full cursor-pointer bg-transparent py-1 text-sm text-white focus:outline-none [color-scheme:dark]"
-          />
-        </label>
+        {type !== "FIXED" && (
+          <label className="rounded-xl border border-white/10 bg-black px-3 py-2">
+            <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-600">Needed by</span>
+            <input
+              type="time"
+              value={d.readyBy}
+              onChange={(e) => onChange({ readyBy: e.target.value })}
+              className="w-full cursor-pointer bg-transparent py-1 text-sm text-white focus:outline-none [color-scheme:dark]"
+            />
+          </label>
+        )}
         {(type === "DEFERRABLE_INTERRUPTIBLE" || type === "DEFERRABLE_ATOMIC") && (
           <label className={`rounded-xl border bg-black px-3 py-2 focus-within:border-white/30 ${need ? "border-amber-400/50" : "border-white/10"}`}>
             <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-600">
-              {type === "DEFERRABLE_INTERRUPTIBLE" ? "energy needed (kWh)" : "one run takes (min)"}
+              {type === "DEFERRABLE_INTERRUPTIBLE" ? "Energy needed (kWh)" : "One run takes (min)"}
             </span>
             <input
               value={type === "DEFERRABLE_INTERRUPTIBLE" ? d.energyKwh : d.durationMin}
@@ -176,18 +184,25 @@ function DraftCard({
             />
           </label>
         )}
-        <label className="rounded-xl border border-white/10 bg-black px-3 py-2">
-          <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-600">may finish up to +{d.flexHours}h later</span>
-          <input
-            type="range"
-            min={0}
-            max={6}
-            value={d.flexHours}
-            onChange={(e) => onChange({ flexHours: Number(e.target.value) })}
-            className="mt-1 h-6 w-full cursor-pointer accent-lime-300"
-          />
-        </label>
+        {type !== "FIXED" && (
+          <label className="rounded-xl border border-white/10 bg-black px-3 py-2">
+            <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-600">Can finish up to {d.flexHours} h late</span>
+            <input
+              type="range"
+              min={0}
+              max={6}
+              value={d.flexHours}
+              onChange={(e) => onChange({ flexHours: Number(e.target.value) })}
+              className="mt-1 h-6 w-full cursor-pointer accent-lime-300"
+            />
+          </label>
+        )}
       </div>
+      {type === "THERMAL" && (
+        <p className="mt-2 font-mono text-[11px] text-zinc-600">
+          This load keeps a temperature, so the plan uses a typical comfort band and a typical heat-loss model. Both are estimates, not measurements of your equipment.
+        </p>
+      )}
       {(powerBad || need) && (
         <p className="mt-2 font-mono text-[11px] text-orange-300">
           {powerBad
@@ -250,20 +265,47 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
     };
   }, [uname, unameValid, user.uid]);
 
-  const stored: StoredJob[] = drafts.filter((d) => d.name.trim() && d.readyBy).map((d, i) => toStored(d, `draft-${i}`));
+  const stored: StoredJob[] = useMemo(
+    () => drafts.filter((d) => d.name.trim() && d.readyBy).map((d, i) => toStored(d, `draft-${i}`)),
+    [drafts]
+  );
   const jobs: JobInput[] = stored;
-  const ranked = jevRank(jobs);
+  // Step 4 asks the backend (Jev when it is available) which load matters first.
+  const ranking = useBackendRanking(jobs, step === 3);
   const loadsValid =
     stored.length > 0 && stored.every((j) => j.powerKw > 0 && j.powerKw <= MAX_POWER_KW && detailNeeded(j) === null);
+
+  // What the person told us about their building decides the presets, the starting
+  // "Max power at once" and the advice line.
+  const roomCount = rooms ? Number(rooms) : null;
+  const profile = useMemo(() => profileFor(occupation, place, roomCount), [occupation, place, roomCount]);
+  const [showMore, setShowMore] = useState(false);
+  const [maxPowerEdit, setMaxPowerEdit] = useState<string | null>(null);
+  const maxPowerText = maxPowerEdit ?? String(profile.capacityKw);
+  const maxPowerKw = Number(maxPowerText);
+  const biggestLoadKw = stored.reduce((m, j) => Math.max(m, j.powerKw), 0);
+  const maxPowerError =
+    !(maxPowerKw > 0 && maxPowerKw <= MAX_POWER_KW)
+      ? `Enter a number above 0 and up to ${MAX_POWER_KW} kW.`
+      : biggestLoadKw > maxPowerKw
+        ? `Your biggest load needs ${biggestLoadKw} kW, more than ${maxPowerKw} kW. Raise this limit or lower that load's power.`
+        : null;
 
   function patchDraft(i: number, patch: Partial<Draft>) {
     setDrafts((ds) => ds.map((d, j) => (j === i ? { ...d, ...patch } : d)));
   }
 
-  function addPreset(p: (typeof PRESETS)[number]) {
-    const { label: _label, ...next } = p;
-    void _label;
+  function addPreset(p: LoadPreset) {
+    const next: Draft = {
+      name: p.name,
+      powerKw: String(p.powerKw),
+      readyBy: p.readyBy,
+      flexHours: p.flexHours,
+      energyKwh: p.energyKwh !== undefined ? String(p.energyKwh) : "",
+      durationMin: p.durationMin !== undefined ? String(p.durationMin) : "",
+    };
     setDrafts((ds) => {
+      if (ds.length >= MAX_LOADS && !ds.some((d) => !d.name.trim() && !d.powerKw)) return ds;
       // Reuse the untouched blank row instead of leaving an empty card behind.
       const blank = ds.findIndex((d) => !d.name.trim() && !d.powerKw);
       if (blank >= 0) return ds.map((d, j) => (j === blank ? next : d));
@@ -275,7 +317,7 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
     if (step === 0) return name.trim().length > 0 && unameValid && availability !== "taken" && availability !== "checking";
     if (step === 1) return occupation !== "" && place !== "";
     if (step === 2) return loadsValid;
-    return true;
+    return maxPowerError === null;
   }
 
   function onSubmit(e: React.FormEvent) {
@@ -309,6 +351,10 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
     }
     if (!loadsValid) {
       setErr("Add at least one load, each with its power rating and the detail it asks for.");
+      return;
+    }
+    if (maxPowerError) {
+      setErr(maxPowerError);
       return;
     }
     const db = getDb();
@@ -361,6 +407,7 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
         { merge: true }
       );
       await batch.commit();
+      saveMaxPower(user.uid, maxPowerKw);
       onDone();
     } catch (e) {
       const msg = e instanceof Error ? e.message : "";
@@ -437,7 +484,9 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
         {step === 1 && (
           <div>
             <h2 id="onboarding-title" className="mt-3 text-2xl font-semibold tracking-tight">What do you do?</h2>
-            <p className="mt-2 text-sm leading-6 text-zinc-500">So we size the advice to your building, not a generic home.</p>
+            <p className="mt-2 text-sm leading-6 text-zinc-500">
+              Your answers decide which appliances we offer first, what we suggest for the most power your site can draw at once, and the advice below.
+            </p>
             <p className="mt-6 text-[13px] text-zinc-400">Occupation</p>
             <div className="mt-2 flex flex-wrap gap-2" role="radiogroup" aria-label="Occupation">
               {OCCUPATIONS.map((o) => (
@@ -474,6 +523,17 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
             </div>
             <label htmlFor="ob-rooms" className="mt-6 block text-[13px] text-zinc-400">Rooms (optional)</label>
             <input id="ob-rooms" value={rooms} onChange={(e) => setRooms(e.target.value.replace(/[^0-9]/g, "").slice(0, 4))} inputMode="numeric" placeholder="e.g. 40" className={`mt-2 ${inputCls}`} />
+            {occupation && place ? (
+              <div className="mt-6 rounded-xl border border-lime-300/20 bg-lime-300/[0.03] px-4 py-3">
+                <p className="text-[13px] leading-6 text-zinc-300">{profile.advice}</p>
+                <p className="mt-2 font-mono text-[11px] text-zinc-500">
+                  Suggested max power at once: {profile.capacityKw} kW. {profile.capacityNote}
+                </p>
+              </div>
+            ) : null}
+            <p className="mt-5 font-mono text-[11px] leading-5 text-zinc-600">
+              Occupation, place and rooms are saved in your profile record, which the database allows anyone to read. Your loads stay private to your account.
+            </p>
           </div>
         )}
 
@@ -483,19 +543,35 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
             <p className="mt-2 text-sm leading-6 text-zinc-500">
               Add what you have. We work out what kind of load each one is and ask only for the numbers that kind needs.
             </p>
-            <div className="mt-5 flex flex-wrap items-center gap-2">
+            <p className="mt-3 text-[13px] leading-6 text-zinc-400">{profile.advice}</p>
+            <div className="mt-4 flex flex-wrap items-center gap-2">
               <span className="font-mono text-[11px] text-zinc-600">quick add</span>
-              {PRESETS.map((p) => (
-                <button
-                  key={p.label}
-                  type="button"
-                  onClick={() => addPreset(p)}
-                  className="min-h-10 cursor-pointer rounded-full border border-white/15 px-3.5 py-2 text-[12px] text-zinc-300 transition hover:border-lime-300/60 hover:text-white active:scale-[0.96]"
-                >
-                  + {p.label}
-                </button>
-              ))}
+              {(showMore ? [...profile.primary, ...profile.more] : profile.primary).map((p) => {
+                const added = drafts.some((d) => d.name.trim().toLowerCase() === p.name.toLowerCase());
+                return (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => addPreset(p)}
+                    disabled={added}
+                    className="min-h-10 cursor-pointer rounded-full border border-white/15 px-3.5 py-2 text-[12px] text-zinc-300 transition hover:border-lime-300/60 hover:text-white active:scale-[0.96] disabled:cursor-default disabled:border-white/5 disabled:text-zinc-600 disabled:hover:border-white/5"
+                  >
+                    {added ? "✓" : "+"} {p.label}
+                  </button>
+                );
+              })}
+              <button
+                type="button"
+                onClick={() => setShowMore((v) => !v)}
+                aria-expanded={showMore}
+                className="min-h-10 cursor-pointer px-2 text-[12px] text-zinc-500 underline decoration-white/20 underline-offset-4 transition hover:text-white"
+              >
+                {showMore ? "Fewer loads" : "More loads"}
+              </button>
             </div>
+            <p className="mt-2 font-mono text-[11px] leading-5 text-zinc-600">
+              Preset numbers are typical values for that appliance. Replace them with what is on your appliance&apos;s label.
+            </p>
             <div className="mt-4 space-y-3">
               {drafts.map((d, i) => (
                 <DraftCard
@@ -509,8 +585,9 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
             </div>
             <button
               type="button"
+              disabled={drafts.length >= MAX_LOADS}
               onClick={() => setDrafts((ds) => [...ds, { ...BLANK, readyBy: "18:00" }])}
-              className="mt-3 min-h-12 w-full cursor-pointer rounded-xl border border-dashed border-white/15 py-3 text-sm text-zinc-400 transition hover:border-white/40 hover:text-white active:scale-[0.99]"
+              className="mt-3 min-h-12 w-full cursor-pointer rounded-xl border border-dashed border-white/15 py-3 text-sm text-zinc-400 transition hover:border-white/40 hover:text-white active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40"
             >
               + Add another load
             </button>
@@ -522,19 +599,40 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
             <h2 id="onboarding-title" className="mt-3 text-2xl font-semibold tracking-tight">Review and save</h2>
             <p className="mt-2 text-sm leading-6 text-zinc-500">
               @{uname} · {occupation} · {place}
-              {rooms ? ` · ${rooms} rooms` : ""}. Next, the dashboard plans these into the cleanest hours of the grid.
+              {rooms ? ` · ${rooms} rooms` : ""}. Next, the dashboard can plan these into the cleaner hours of the day.
             </p>
-            {ranked.length > 0 ? (
+            <label htmlFor="ob-maxpower" className="mt-5 block text-[13px] text-zinc-400">Max power at once (kW)</label>
+            <input
+              id="ob-maxpower"
+              value={maxPowerText}
+              onChange={(e) => setMaxPowerEdit(e.target.value.replace(/[^0-9.]/g, ""))}
+              inputMode="decimal"
+              aria-invalid={maxPowerError !== null}
+              className={`mt-2 ${inputCls} ${maxPowerError ? "border-orange-300/50" : ""}`}
+            />
+            <p className={`mt-2 font-mono text-[11px] leading-5 ${maxPowerError ? "text-orange-300" : "text-zinc-600"}`}>
+              {maxPowerError ??
+                `The most all your loads may draw together. ${maxPowerEdit === null ? profile.capacityNote : "Set to your own value."} It is kept in this browser and the dashboard uses it when you plan.`}
+            </p>
+            {ranking.status === "loading" ? (
+              <p className="mt-5 flex items-center gap-2 font-mono text-[11px] text-zinc-500">
+                <span className="spinner" /> Asking the backend which load matters first…
+              </p>
+            ) : ranking.ranked.length > 0 ? (
               <>
                 <p className="mt-5 font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-600">Priority order</p>
+                <p className={`mt-1 font-mono text-[11px] leading-5 ${ranking.status === "fallback" ? "text-orange-300" : "text-zinc-500"}`}>{ranking.label}</p>
                 <ol className="mt-2 space-y-2">
-                  {ranked.map((j, i) => (
+                  {ranking.ranked.map((j, i) => (
                     <li key={j.id} className="flex items-center gap-3 rounded-xl border border-white/10 px-3.5 py-3 sm:gap-4 sm:px-4">
                       <span className="font-mono text-[12px] text-zinc-600">{String(i + 1).padStart(2, "0")}</span>
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-sm font-medium">{j.name}</p>
                         <p className="mt-0.5 line-clamp-2 font-mono text-[11px] text-zinc-500">{j.reason}</p>
                       </div>
+                      {j.source === "jev" && (
+                        <span className="shrink-0 rounded-full bg-violet-400/15 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-violet-300">jev</span>
+                      )}
                       <span className={`shrink-0 rounded-full px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider ${j.band === "Critical" ? "bg-red-500/15 text-red-300" : j.band === "High" ? "bg-orange-400/15 text-orange-300" : j.band === "Normal" ? "bg-white/10 text-zinc-300" : "bg-white/5 text-zinc-500"}`}>
                         {j.band}
                       </span>
@@ -544,7 +642,7 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
               </>
             ) : (
               <p className="mt-5 rounded-xl border border-white/10 px-4 py-3 text-sm leading-6 text-zinc-400">
-                Everything you added is always-on (like a fridge), so there is nothing to shift yet. Go back and add a
+                Everything you added is always on (like a fridge), so there is nothing to shift yet. Go back and add a
                 flexible load such as EV charging or water heating to see savings.
               </p>
             )}
@@ -584,7 +682,7 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
           ) : (
             <button
               type="submit"
-              disabled={working || !loadsValid}
+              disabled={working || !loadsValid || maxPowerError !== null}
               className="flex min-h-11 cursor-pointer items-center gap-2 rounded-full bg-lime-300 px-8 py-2.5 text-sm font-medium text-black transition hover:bg-lime-200 active:scale-[0.98] disabled:cursor-wait disabled:opacity-60"
             >
               {working && <span className="spinner" />}
