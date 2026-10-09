@@ -39,6 +39,7 @@ import BuildingChart from "./BuildingChart";
 import CarbonChart from "./CarbonChart";
 import ExecutionPanel from "./ExecutionPanel";
 import PoolPanel from "./PoolPanel";
+import Hint from "./Hint";
 import { AC_RE, buildSpecs, detailNeeded, kindOf, latestFinish, nextSlot, type Detail, type StoredJob } from "../../lib/loads/specs";
 import { useLoadClassification } from "./useLoadClassification";
 import { FORECAST_MODE_LABEL, loadTypeLabel, signalTypeLabel, solverLabel } from "./labels";
@@ -71,14 +72,14 @@ function fieldsFor(jobType: JobType | undefined): {
         energy: false,
         duration: false,
         thermal: true,
-        note: "Keeps a temperature: tell us the range that is comfortable and we heat or cool inside it.",
+        note: "Keeps a temperature: set the comfortable range.",
       };
     case "DEFERRABLE_INTERRUPTIBLE":
-      return { energy: true, duration: false, thermal: false, note: "Can be paused and resumed any time before it is needed." };
+      return { energy: true, duration: false, thermal: false, note: "Can pause and resume before it is needed." };
     case "DEFERRABLE_ATOMIC":
-      return { energy: false, duration: true, thermal: false, note: "Once it starts, it runs straight through without stopping." };
+      return { energy: false, duration: true, thermal: false, note: "Runs straight through once started." };
     case "FIXED":
-      return { energy: false, duration: false, thermal: false, note: "Always on: it is counted as background use and never moved." };
+      return { energy: false, duration: false, thermal: false, note: "Always on: counted, never moved." };
     default:
       return { energy: false, duration: false, thermal: false, note: "" };
   }
@@ -136,7 +137,7 @@ function KindIcon({ kind }: { kind: string }) {
   );
 }
 
-function BandChip({ band }: { band: RankedJob["band"] }) {
+function BandChip({ band, reason }: { band: RankedJob["band"]; reason?: string }) {
   const cls =
     band === "Critical"
       ? "bg-red-500/15 text-red-300"
@@ -146,7 +147,9 @@ function BandChip({ band }: { band: RankedJob["band"] }) {
           ? "bg-white/10 text-zinc-300"
           : "bg-white/5 text-zinc-500";
   return (
-    <span className={`shrink-0 rounded-full px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider ${cls}`}>{band}</span>
+    <span title={reason} className={`shrink-0 rounded-full px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider ${cls} ${reason ? "cursor-help" : ""}`}>
+      {band}
+    </span>
   );
 }
 
@@ -208,13 +211,6 @@ function parseCapacity(raw: string, fallback: number): { value?: number; error?:
   if (!Number.isFinite(n) || n <= 0) return { error: "Enter a power limit greater than 0 kW." };
   if (n > 1000) return { error: "Enter a power limit up to 1000 kW." };
   return { value: n };
-}
-
-/** "06:00" + 2h -> "08:00" (wraps past midnight). */
-function addHoursToClock(hhmm: string, hours: number): string {
-  const [h, m] = hhmm.split(":").map(Number);
-  const total = (((h || 0) * 60 + (m || 0) + Math.round(hours * 60)) % 1440 + 1440) % 1440;
-  return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
 }
 
 /** Inline prompt for the one number a load still needs before it can be planned. */
@@ -1016,7 +1012,7 @@ export default function Dashboard() {
           local.map((j) => [j.id, { score: j.score, band: j.band, reason: j.reason, source: "local" as const }])
         ),
         provider: "local",
-        note: "The planner isn't reachable, so this order is a rough local estimate. Press “Refresh ranking” to try again.",
+        note: "The planner isn't reachable, so this order is a rough local estimate.",
       });
     } finally {
       if (seq === rankSeq.current) setRanking(false);
@@ -1162,6 +1158,45 @@ export default function Dashboard() {
   const nameOf: Record<string, string> = Object.fromEntries(jobs.map((j) => [j.id, j.name]));
   const shiftableCount = jobs.filter((j) => j.shiftable !== false).length;
 
+  // One-line footer: the short labels stay visible, the details sit in tooltips.
+  const gridShort = signal
+    ? signal.signal_type === "PROXY"
+      ? "live weather estimate"
+      : signal.signal_type === "SYNTHETIC"
+        ? "test data"
+        : signalTypeLabel(signal.signal_type)
+    : signalError
+      ? "unavailable"
+      : "loading…";
+  const gridDetail = signal
+    ? (signal.signal_type === "PROXY"
+        ? "Grid data: built from real solar and wind forecasts for your area, not metered grid data."
+        : signal.signal_type === "SYNTHETIC"
+          ? "Grid data: a fixed test curve, not real grid data. Savings shown against it are not real savings."
+          : `Grid data: ${signal.source}.`) +
+      ` ${signal.points.length} readings, one every ${signal.resolution_minutes} minutes` +
+      (signal.quality.interpolated_points > 0 ? `; ${signal.quality.interpolated_points} filled in between real readings` : "") +
+      (signal.quality.missing_points > 0 ? `; ${signal.quality.missing_points} missing` : "") +
+      "."
+    : `Grid data: ${signalError ?? "waiting for the planner"}.`;
+  const forecastShort = forecast
+    ? forecast.provenance.source_signal_type === "SYNTHETIC"
+      ? "rough guide (test history)"
+      : forecast.provenance.model === "seasonal"
+        ? "typical-day pattern"
+        : forecast.provenance.model
+    : "unavailable";
+  const forecastDetail = forecast
+    ? forecast.provenance.source_signal_type === "SYNTHETIC"
+      ? "Forecast: learned from placeholder history because real history was unavailable. Treat it as a rough guide only."
+      : `Forecast: learned from ${forecast.provenance.training_points} past readings. The likely range covers ${Math.round(forecast.provenance.interval_nominal_coverage * 100)}% of what happened in that history. Planning with: ${FORECAST_MODE_LABEL[forecastMode]}.`
+    : `Forecast: ${forecastError ?? "none yet; “Now” planning still works."}`;
+  const trackingShort = liveState
+    ? `${liveState.jobs.filter((j) => j.status === "COMPLETED").length} of ${liveState.jobs.length} done`
+    : "you confirm it";
+  const trackingDetail =
+    "Progress: no smart meters or device control are connected, so you tell Heliotrope when a load starts and finishes. The schedule follows the real clock.";
+
   return (
     <main className="min-h-screen bg-black text-zinc-100">
       {needsOnboarding && <Onboarding user={user} onDone={() => void loadAll(user)} />}
@@ -1236,14 +1271,14 @@ export default function Dashboard() {
         </h1>
         <p className="mt-3 max-w-lg text-[15px] leading-7 text-zinc-500">
           {profile?.place ? `${profile.place}${profile.rooms ? ` · ${profile.rooms} rooms` : ""} — ` : ""}
-          add your loads, then schedule them into the cleanest hours of the grid.
+          add your loads, then schedule them into the cleanest hours.
         </p>
 
         {(backend === "waking" || backend === "offline") && (
           <div role="status" className="mt-6 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber-400/25 bg-amber-400/[0.04] px-5 py-4">
             <p className="text-[13px] leading-6 text-amber-200/90">
               {backend === "waking"
-                ? "Waking the planner. This can take up to a minute on the first visit; charts and scheduling unlock as soon as it answers."
+                ? "Waking the planner (up to a minute on the first visit)."
                 : "The planner isn't answering, so charts and scheduling are unavailable."}
             </p>
             {backend === "offline" && (
@@ -1259,7 +1294,7 @@ export default function Dashboard() {
           {[
             { n: 1, title: "Add loads", done: jobs.length > 0, note: jobs.length ? `${jobs.length} added` : "name what you run" },
             { n: 2, title: "Schedule", done: liveState !== null, note: liveState ? `version ${liveState.version} · ${solverLabel(liveState.solver_status)}` : shiftableCount ? "ready to schedule" : "needs a load that can move" },
-            { n: 3, title: "Track", done: liveState !== null && liveState.jobs.some((j) => j.status !== "PENDING"), note: liveState ? "tell us when each load starts and ends" : "after you schedule" },
+            { n: 3, title: "Track", done: liveState !== null && liveState.jobs.some((j) => j.status !== "PENDING"), note: liveState ? "confirm starts and ends" : "after you schedule" },
           ].map((st) => (
             <li key={st.n} className={`flex items-center gap-3 rounded-2xl border px-4 py-3 ${st.done ? "border-lime-300/30 bg-lime-300/[0.04]" : "border-white/10"}`}>
               <span className={`grid h-6 w-6 shrink-0 place-items-center rounded-full font-mono text-[11px] ${st.done ? "bg-lime-300 text-black" : "border border-white/15 text-zinc-500"}`}>
@@ -1278,26 +1313,39 @@ export default function Dashboard() {
           <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-5 sm:px-8">
             <div>
               <h2 className="text-[15px] font-medium">Your loads</h2>
-              <p className="mt-0.5 font-mono text-[11px] text-zinc-600">
+              <p title={rank?.note} className="mt-0.5 font-mono text-[11px] text-zinc-600">
                 {jobs.length === 0
                   ? "nothing added yet"
-                  : `${jobs.length} load${jobs.length > 1 ? "s" : ""}${rank ? " · most important first" : ""}`}
+                  : `${jobs.length} load${jobs.length > 1 ? "s" : ""}${
+                      ranking && !rank
+                        ? " · ranking…"
+                        : rank
+                          ? ` · ranked by ${
+                              rank.provider === "jev"
+                                ? "Jev"
+                                : rank.provider === "mixed"
+                                  ? "Jev and built-in rules"
+                                  : rank.provider === "local"
+                                    ? "a rough local estimate"
+                                    : "built-in rules"
+                            }${ranking ? " · updating…" : ""}`
+                          : ""
+                    }`}
               </p>
             </div>
             <button
               onClick={() => void runRanking(jobs, rankKey)}
               disabled={ranking || rankKey === ""}
-              title="Ask again which load matters first. Jev judges how essential each appliance is; time pressure, size and flexibility are added. The actual start times come from “Schedule my loads” below."
-              className="min-h-11 cursor-pointer rounded-full border border-white/15 px-5 py-2 text-[13px] text-zinc-300 transition hover:border-white/40 hover:text-white active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-30"
+              title="Ask again which load matters first. Jev judges how essential each appliance is; time pressure, size and flexibility are added. Start times come from “Schedule my loads”."
+              className="min-h-11 cursor-pointer rounded-full px-4 py-2 text-[13px] text-zinc-400 transition hover:text-white active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-30"
             >
               {ranking ? "Ranking…" : "Refresh ranking"}
             </button>
           </div>
 
-          {rankKey !== "" && (ranking || rank) && (
-            <p aria-live="polite" className="border-t border-white/5 px-4 py-3 font-mono text-[11px] text-zinc-500 sm:px-8">
-              {ranking && !rank ? "Working out which of your loads matters most…" : rank?.note}
-              {ranking && rank ? " Updating…" : ""}
+          {rankKey !== "" && rank?.provider === "local" && (
+            <p aria-live="polite" className="border-t border-white/5 px-4 py-3 font-mono text-[11px] text-amber-400/80 sm:px-8">
+              {rank.note}
             </p>
           )}
           {loadError && (
@@ -1323,17 +1371,15 @@ export default function Dashboard() {
                     ) : (
                       isRanked && j.band && (
                         <>
-                          <BandChip band={j.band} />
-                          {j.source === "jev" ? (
-                            <span title="Jev judged how essential this appliance is" className="shrink-0 rounded-full bg-violet-400/15 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-violet-300">
-                              Jev
-                            </span>
-                          ) : (
+                          <BandChip band={j.band} reason={j.reason} />
+                          {rank?.provider === "mixed" && (
                             <span
-                              title={j.source === "local" ? "Rough estimate made in your browser" : "Built-in rules, not Jev"}
-                              className="shrink-0 rounded-full bg-white/5 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-zinc-500"
+                              title={j.source === "jev" ? "Jev judged how essential this appliance is" : "Built-in rules, not Jev"}
+                              className={`shrink-0 rounded-full px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${
+                                j.source === "jev" ? "bg-violet-400/15 text-violet-300" : "bg-white/5 text-zinc-500"
+                              }`}
                             >
-                              {j.source === "local" ? "estimate" : "rules"}
+                              {j.source === "jev" ? "Jev" : "rules"}
                             </span>
                           )}
                         </>
@@ -1341,26 +1387,18 @@ export default function Dashboard() {
                     )}
                   </div>
                   <p className="mt-1.5 text-[13px] text-zinc-500">
-                    {j.kind || "Load"} · {loadTypeLabel(kindOf(j as StoredJob))} · {j.powerKw} kW · needed by {clockLabel(j.readyBy)}
-                    {j.flexHours > 0 ? ` (can finish up to ${j.flexHours} h late, by ${clockLabel(addHoursToClock(j.readyBy, j.flexHours))})` : " (must finish on time)"}
-                    {j.energyKwh ? ` · needs ${j.energyKwh} kWh` : ""}
-                    {j.durationMin ? ` · runs ${j.durationMin} min` : ""}
-                    {j.tempMinC !== undefined && j.tempMaxC !== undefined ? ` · keeps ${j.tempMinC}°C–${j.tempMaxC}°C` : ""}
+                    {loadTypeLabel(kindOf(j as StoredJob)) || j.kind || "Load"} · {j.powerKw} kW · needed by {clockLabel(j.readyBy)}
+                    {j.flexHours > 0 ? ` · can finish up to ${j.flexHours} h late` : " · must finish on time"}
+                    {j.energyKwh ? ` · ${j.energyKwh} kWh` : ""}
+                    {j.durationMin ? ` · ${j.durationMin} min run` : ""}
+                    {j.tempMinC !== undefined && j.tempMaxC !== undefined ? ` · ${j.tempMinC}–${j.tempMaxC}°C` : ""}
                   </p>
                   {(() => {
                     const need = detailNeeded(j as StoredJob);
                     return need ? <DetailPrompt need={need} onSave={(v) => void saveDetail(j.id, need, v)} /> : null;
                   })()}
-                  {isRanked && (
-                    <>
-                      <div className="mt-2.5 h-1 max-w-md overflow-hidden rounded-full bg-white/10">
-                        <div className="h-full rounded-full bg-lime-300 transition-[width] duration-700" style={{ width: `${j.score ?? 0}%` }} />
-                      </div>
-                      <p className="mt-1.5 text-[13px] text-zinc-500">{j.reason}</p>
-                    </>
-                  )}
                 </div>
-                <button onClick={() => void removeJob(j.id)} aria-label={`Remove ${j.name}`} className="-mr-2 shrink-0 cursor-pointer px-2 py-2.5 font-mono text-[12px] text-zinc-500 transition hover:text-red-300 focus-visible:opacity-100 focus-visible:text-red-300 ">
+                <button onClick={() => void removeJob(j.id)} aria-label={`Remove ${j.name}`} className="-mr-2 min-h-10 shrink-0 cursor-pointer px-2 py-2.5 font-mono text-[12px] text-zinc-500 transition hover:text-red-300 focus-visible:opacity-100 focus-visible:text-red-300 ">
                   remove
                 </button>
               </div>
@@ -1369,15 +1407,14 @@ export default function Dashboard() {
 
           {jobs.length === 0 && (
             <p className="border-t border-white/5 px-4 py-6 text-sm leading-6 text-zinc-500 sm:px-8">
-              No loads yet. Name your first one below — it takes ten seconds.
+              No loads yet. Add your first one below.
             </p>
           )}
 
           {/* add */}
           <div className="border-t border-white/10 bg-white/[0.015] px-4 py-6 sm:px-8">
-            <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-600">Add a load — name anything</p>
+            <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-600">Add a load</p>
             <div className="mt-3 flex flex-wrap items-center gap-2">
-              <span className="font-mono text-[11px] text-zinc-600">quick examples</span>
               {PRESETS.map((p) => (
                 <button
                   key={p.label}
@@ -1408,7 +1445,9 @@ export default function Dashboard() {
                 <span
                   className="min-w-0 flex-1 text-sm leading-5 text-zinc-200"
                   title={
-                    activePreview
+                    !activePreview && cls.status === "unavailable"
+                      ? `${backend === "online" ? "Couldn't reach the classifier" : "The planner isn't reachable yet"}, so this is only a guess made from the name.${backend === "online" ? " Edit the name to try again." : ""}`
+                      : activePreview
                       ? activePreview.provider === "jev"
                         ? `Category: ${activePreview.category}. Decided by Jev.`
                         : activePreview.fallbackReason
@@ -1418,9 +1457,9 @@ export default function Dashboard() {
                   }
                 >
                   {cls.status === "idle"
-                    ? "Type a name and we'll work out what kind of load it is."
+                    ? "Type a name and we'll work out the kind."
                     : cls.status === "loading"
-                      ? "Working out what kind of load this is…"
+                      ? "Working out the kind…"
                       : activePreview
                         ? `${
                             activePreview.provider === "jev"
@@ -1429,27 +1468,15 @@ export default function Dashboard() {
                                 ? "Built-in rules (Jev unavailable)"
                                 : "Built-in rules"
                           }: ${loadTypeLabel(activePreview.jobType)} · ${Math.round(activePreview.confidence * 100)}% sure`
-                        : `${backend === "online" ? "Couldn't reach the classifier" : "The planner isn't reachable yet"}, so this is only a rough guess from the name: ${loadTypeLabel(guessedType)}.${backend === "online" ? " Edit the name to try again." : ""}`}
+                        : `Rough guess from the name: ${loadTypeLabel(guessedType)}`}
                 </span>
-                {activePreview && (
-                  <span
-                    className={`shrink-0 rounded-full px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${
-                      activePreview.provider === "jev" ? "bg-violet-400/15 text-violet-300" : "bg-white/5 text-zinc-500"
-                    }`}
-                  >
-                    {activePreview.provider === "jev" ? "Jev" : "rules"}
-                  </span>
-                )}
-                {cls.status === "unavailable" && (
-                  <span className="shrink-0 rounded-full bg-amber-400/10 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-amber-300/90">guess</span>
-                )}
               </div>
             </div>
             <div className="mt-3 flex flex-wrap items-start gap-x-5 gap-y-3">
               <label className="flex flex-col gap-1 text-[13px] text-zinc-400">
                 <span className="flex items-center gap-2">
-                  <input value={fPower} onChange={(e) => { setFPower(e.target.value.replace(/[^0-9.]/g, "")); if (fPowerError) setFPowerError(null); }} inputMode="decimal" placeholder="kW" className={`w-20 ${inputCls}`} />
-                  <span className="font-mono text-[11px] text-zinc-600">power it draws (kW)</span>
+                  <input value={fPower} onChange={(e) => { setFPower(e.target.value.replace(/[^0-9.]/g, "")); if (fPowerError) setFPowerError(null); }} inputMode="decimal" placeholder="kW" aria-label="Power in kilowatts" title="Power it uses while running (kW), usually printed on the appliance label" className={`w-20 ${inputCls}`} />
+                  <span className="font-mono text-[11px] text-zinc-600">power (kW)</span>
                 </span>
                 {fPowerError && (
                   <span className="font-mono text-[11px] text-orange-300">{fPowerError}</span>
@@ -1481,9 +1508,6 @@ export default function Dashboard() {
                 {adding ? "Adding…" : "Add load"}
               </button>
             </div>
-            <p className="mt-2 font-mono text-[11px] leading-5 text-zinc-700">
-              kW is how much power it uses while running; it is usually printed on the appliance label.
-            </p>
 
             {/* Progressive disclosure: only the fields this kind of load actually needs. */}
             {(formFields.energy || formFields.duration || formFields.thermal || formFields.note) && (
@@ -1495,9 +1519,10 @@ export default function Dashboard() {
                       onChange={(e) => setFEnergy(e.target.value.replace(/[^0-9.]/g, ""))}
                       inputMode="decimal"
                       placeholder="kWh"
+                      title="Electricity it needs in total (kWh)"
                       className={`w-20 ${inputCls}`}
                     />
-                    <span className="font-mono text-[11px] text-zinc-600">electricity it needs in total (kWh)</span>
+                    <span className="font-mono text-[11px] text-zinc-600">total energy (kWh)</span>
                   </label>
                 )}
                 {formFields.duration && (
@@ -1507,9 +1532,10 @@ export default function Dashboard() {
                       onChange={(e) => setFDuration(e.target.value.replace(/[^0-9]/g, ""))}
                       inputMode="numeric"
                       placeholder="min"
+                      title="How long one run takes (minutes)"
                       className={`w-20 ${inputCls}`}
                     />
-                    <span className="font-mono text-[11px] text-zinc-600">how long one run takes (minutes)</span>
+                    <span className="font-mono text-[11px] text-zinc-600">one run (min)</span>
                   </label>
                 )}
                 {formFields.thermal && (
@@ -1522,7 +1548,7 @@ export default function Dashboard() {
                         placeholder={AC_RE.test(`${fName} ${effectiveCategory}`) ? "22" : "40"}
                         className={`w-20 ${inputCls}`}
                       />
-                      <span className="font-mono text-[11px] text-zinc-600">lowest comfortable temp (°C)</span>
+                      <span title="Lowest comfortable temperature" className="font-mono text-[11px] text-zinc-600">comfort min (°C)</span>
                     </label>
                     <label className="flex items-center gap-2 text-[13px] text-zinc-400">
                       <input
@@ -1532,24 +1558,19 @@ export default function Dashboard() {
                         placeholder={AC_RE.test(`${fName} ${effectiveCategory}`) ? "26" : "65"}
                         className={`w-20 ${inputCls}`}
                       />
-                      <span className="font-mono text-[11px] text-zinc-600">highest comfortable temp (°C)</span>
+                      <span title="Highest comfortable temperature" className="font-mono text-[11px] text-zinc-600">comfort max (°C)</span>
                     </label>
                   </>
                 )}
                 {formFields.note && <span className="font-mono text-[11px] text-zinc-600">{formFields.note}</span>}
                 {activePreview?.ambiguous && (
                   <span className="font-mono text-[11px] text-amber-400/80">
-                    Might be something else ({Math.round(activePreview.confidence * 100)}% sure). Check the details.
+                    Not certain ({Math.round(activePreview.confidence * 100)}% sure). Check the details.
                   </span>
                 )}
               </div>
             )}
             {addError && <p role="alert" className="mt-3 font-mono text-[12px] text-orange-300">{addError}</p>}
-            {addErrors.length > 0 && (
-              <p className="mt-3 font-mono text-[11px] text-zinc-500">
-                Fix the problem below to enable “Add load”.
-              </p>
-            )}
             {(addErrors.length > 0 || addWarnings.length > 0) && (
               <div className="mt-3 space-y-1 border-t border-white/5 pt-3">
                 {addErrors.map((m, i) => (
@@ -1590,20 +1611,20 @@ export default function Dashboard() {
             <div>
               <h2 className="text-[15px] font-medium">Your schedule</h2>
               <p className="mt-0.5 font-mono text-[11px] text-zinc-600">
-                {liveState ? `${solverLabel(liveState.solver_status)} · checked every minute` : "picks the cleanest time for each load, then helps you track it"}
+                {liveState ? `${solverLabel(liveState.solver_status)} · checked every minute` : "picks the cleanest time for each load"}
               </p>
               {liveState && poolInfo?.applied && (
                 <p className="mt-0.5 font-mono text-[11px] text-sky-300/80">
                   {poolInfo.active_schedules > 0
-                    ? `Scheduled around ${poolInfo.active_schedules} other active schedule${poolInfo.active_schedules === 1 ? "" : "s"} (their busiest moment: ${poolInfo.peak_pooled_kw.toFixed(1)} kW), so yours doesn't pile onto the same hour.`
-                    : "No other active schedules to plan around right now."}
+                    ? `Planned around ${poolInfo.active_schedules} other active schedule${poolInfo.active_schedules === 1 ? "" : "s"} (their peak: ${poolInfo.peak_pooled_kw.toFixed(1)} kW).`
+                    : "No other active schedules to plan around."}
                 </p>
               )}
             </div>
             <div className="flex flex-wrap items-start gap-2">
               <label className="flex flex-col gap-1 text-[13px] text-zinc-400">
                 <span className="flex items-center gap-2">
-                  <input value={liveCapacity} aria-label="Max power at once (kW)" onChange={(e) => { capTouched.current.live = true; setLiveCapacity(e.target.value.replace(/[^0-9.]/g, "")); }} inputMode="decimal" className={`w-20 ${inputCls}`} />
+                  <input value={liveCapacity} aria-label="Max power at once (kW)" title="The most your loads may draw together" onChange={(e) => { capTouched.current.live = true; setLiveCapacity(e.target.value.replace(/[^0-9.]/g, "")); }} inputMode="decimal" className={`w-20 ${inputCls}`} />
                   <span className="font-mono text-[11px] text-zinc-600">Max power at once (kW)</span>
                 </span>
                 {liveCapacityError && (
@@ -1629,13 +1650,11 @@ export default function Dashboard() {
             </div>
           </div>
           {liveError && <p aria-live="polite" className="mt-3 font-mono text-[12px] text-orange-300">{liveError}</p>}
-          {!liveState && !liveError && (
+          {!liveState && !liveError && (jobs.length === 0 || needsDetail.length > 0) && (
             <p className="mt-3 text-[13px] leading-6 text-zinc-500">
               {jobs.length === 0
                 ? "Add a load above, then schedule it here."
-                : needsDetail.length > 0
-                  ? `${needsDetail.length} load${needsDetail.length > 1 ? "s" : ""} still need${needsDetail.length > 1 ? "" : "s"} a detail (see your loads above) and will be left out of the schedule.`
-                  : "“Schedule my loads” finds the cleanest start time for every load that can move while keeping each deadline. Then you can track it and press “Update schedule” as the day changes. “Max power at once” is the most your loads may draw together."}
+                : `${needsDetail.length} load${needsDetail.length > 1 ? "s" : ""} still need${needsDetail.length > 1 ? "" : "s"} a detail (see your loads above) and will be left out.`}
             </p>
           )}
           {loadsStale && liveState && (
@@ -1648,8 +1667,8 @@ export default function Dashboard() {
               <div className="flex flex-wrap items-end justify-between gap-3">
                 <div>
                   <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-lime-300/80">
-                    CO₂ saved vs starting everything now
-                    {liveState.version > 1 ? " · as first scheduled (version 1)" : ""}
+                    CO₂ saved vs running everything now
+                    {liveState.version > 1 ? " · as first planned" : ""}
                   </p>
                   {impact.metrics.co2_saved_percent !== null && impact.metrics.co2_saved_percent > 0.05 ? (
                     <p className="mt-1.5 text-3xl font-semibold tracking-tight">
@@ -1665,29 +1684,35 @@ export default function Dashboard() {
                   )}
                 </div>
                 <p className="font-mono text-[11px] text-zinc-600">
-                  {impact.signal?.signal_type
-                    ? `${signalTypeLabel(impact.signal.signal_type)} grid signal · ${impact.metrics.co2_basis === "FORECAST" ? "forecast-based estimate · " : "estimate · "}`
-                    : "estimate · "}
+                  {impact.signal?.signal_type ? `${signalTypeLabel(impact.signal.signal_type)} · ` : ""}
+                  {impact.metrics.co2_basis === "FORECAST" ? "forecast estimate · " : "estimate · "}
                   {impact.metrics.deadline_misses === 0
                     ? "every deadline met"
                     : `${impact.metrics.deadline_misses} deadline${impact.metrics.deadline_misses === 1 ? "" : "s"} missed`}
                 </p>
               </div>
-              <ul className="mt-4 divide-y divide-white/5">
-                {impact.schedule.map((sj) => {
-                  const ex = impact.explanations.find((e) => e.job_id === sj.job_id);
-                  const wins = runWindows(sj.allocations);
-                  return (
-                    <li key={sj.job_id} className="py-2.5">
-                      <p className="text-[13px] font-medium">{nameOf[sj.job_id] ?? sj.name}</p>
-                      <p className="mt-0.5 font-mono text-[11px] text-zinc-500">
-                        runs {wins.length > 0 ? wins.join(" · ") : "—"}
-                        {ex && ex.co2_saved_kg !== null && ex.co2_saved_kg > 0.005 ? ` · saves ${ex.co2_saved_kg.toFixed(2)} kg` : ""}
-                      </p>
-                    </li>
-                  );
-                })}
-              </ul>
+              <details className="group mt-3">
+                <summary className="inline-flex min-h-10 cursor-pointer list-none items-center gap-2 font-mono text-[11px] text-zinc-500 transition hover:text-white [&::-webkit-details-marker]:hidden">
+                  <span className="transition group-open:rotate-90">›</span>
+                  <span className="group-open:hidden">Show details</span>
+                  <span className="hidden group-open:inline">Hide details</span>
+                </summary>
+                <ul className="divide-y divide-white/5">
+                  {impact.schedule.map((sj) => {
+                    const ex = impact.explanations.find((e) => e.job_id === sj.job_id);
+                    const wins = runWindows(sj.allocations);
+                    return (
+                      <li key={sj.job_id} className="py-2.5">
+                        <p className="text-[13px] font-medium">{nameOf[sj.job_id] ?? sj.name}</p>
+                        <p className="mt-0.5 font-mono text-[11px] text-zinc-500">
+                          runs {wins.length > 0 ? wins.join(" · ") : "—"}
+                          {ex && ex.co2_saved_kg !== null && ex.co2_saved_kg > 0.005 ? ` · saves ${ex.co2_saved_kg.toFixed(2)} kg` : ""}
+                        </p>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </details>
             </div>
           )}
           {liveState && (
@@ -1718,7 +1743,7 @@ export default function Dashboard() {
                 </span>
               </div>
               <p className="mt-0.5 font-mono text-[11px] text-zinc-600">
-                All your loads checked together against one power limit, so they never draw more than it allows
+                All your loads checked together against one power limit
               </p>
             </div>
             <div className="flex flex-wrap items-start gap-2">
@@ -1757,9 +1782,6 @@ export default function Dashboard() {
                   Planned: <strong className="text-zinc-200">{coordResult.coordination_mode === "COORDINATED" ? "all loads together" : "each load on its own"}</strong>
                 </span>
                 <span>
-                  Loads: <strong className="text-zinc-200">{coordResult.jobs.length}</strong>
-                </span>
-                <span>
                   Highest use: <strong className="text-zinc-200">{coordResult.metrics.peak_kw?.toFixed(1) ?? "—"} kW</strong>
                 </span>
                 <span>
@@ -1775,70 +1797,33 @@ export default function Dashboard() {
             <div className="mt-4 border-t border-white/5 pt-4">
               <p className="mb-3 font-mono text-[11px] text-zinc-600">
                 {jobs.length === 0
-                  ? "Add a load above and the combined power use appears here."
+                  ? "Add a load above to see the combined power use."
                   : needsDetail.length === jobs.filter((j) => j.shiftable !== false).length && needsDetail.length > 0
-                    ? "Fill in the missing details on your loads to see the combined power use."
+                    ? "Fill in the missing load details to see the combined power use."
                     : coordBusy
                       ? "Working out the combined power use…"
-                      : "The combined power use appears here once the planner answers."}
+                      : "Combined power use appears once the planner answers."}
               </p>
               <BuildingChart points={[]} />
             </div>
           )}
         </div>
 
-        <div className="mt-3 grid gap-3 md:grid-cols-3">
-          <div className="rounded-2xl border border-white/10 bg-[#0a0a0a] p-6">
-            <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-600">Grid carbon data</p>
-            <h2 className="mt-2 text-[15px] font-medium">
-              {signal ? (signal.signal_type === "PROXY" ? "live weather estimate" : signal.signal_type === "SYNTHETIC" ? "test data" : signalTypeLabel(signal.signal_type)) : "—"}
-            </h2>
-            <p className="mt-2 text-sm leading-6 text-zinc-500">
-              {signal
-                ? signal.signal_type === "PROXY"
-                  ? "Built from real solar and wind forecasts for your area, not metered grid data. It rises and falls with the actual weather."
-                  : signal.signal_type === "SYNTHETIC"
-                    ? "A fixed test curve, not real grid data. Savings shown against it are not real savings."
-                    : `Source: ${signal.source}.`
-                : signalError ?? "Waiting for the planner."}
-              {signal
-                ? ` ${signal.points.length} readings, one every ${signal.resolution_minutes} minutes.${
-                    signal.quality.interpolated_points > 0
-                      ? ` ${signal.quality.interpolated_points} of them were filled in between real readings.`
-                      : ""
-                  }${signal.quality.missing_points > 0 ? ` ${signal.quality.missing_points} are missing.` : ""}`
-                : ""}
-            </p>
-          </div>
-          <div className="rounded-2xl border border-white/10 bg-[#0a0a0a] p-6">
-            <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-600">Forecast</p>
-            <h2 className="mt-2 text-[15px] font-medium">
-              {forecast ? (forecast.provenance.model === "seasonal" ? "typical-day pattern (seasonal)" : forecast.provenance.model) : "unavailable"}
-            </h2>
-            <p className="mt-2 text-sm leading-6 text-zinc-500">
-              {forecast
-                ? forecast.provenance.source_signal_type === "SYNTHETIC"
-                  ? "Learned from placeholder history because real history was unavailable. Treat it as a rough guide only."
-                  : `Learned from ${forecast.provenance.training_points} past readings. The likely range covers ${Math.round(forecast.provenance.interval_nominal_coverage * 100)}% of what happened in that history. “Cautious” plans against the high end of it.`
-                : forecastError ?? "No forecast yet. “Now” planning still works."}
-              {forecast ? ` Currently planning with: ${FORECAST_MODE_LABEL[forecastMode]}.` : ""}
-            </p>
-          </div>
-          <div className="rounded-2xl border border-white/10 bg-[#0a0a0a] p-6">
-            <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-600">Tracking</p>
-            <h2 className="mt-2 text-[15px] font-medium">
-              {liveState
-                ? `${liveState.jobs.filter((j) => j.status === "COMPLETED").length} of ${liveState.jobs.length} done`
-                : "you confirm it"}
-            </h2>
-            <p className="mt-2 text-sm leading-6 text-zinc-500">
-              {liveState
-                ? `${liveState.jobs.filter((j) => j.status === "RUNNING").length} running now. `
-                : ""}
-              No smart meters or device control are connected, so you tell Heliotrope when a load starts and finishes (“I started it”, “It&apos;s done”). The schedule follows the real clock.
-            </p>
-          </div>
-        </div>
+        <footer className="mt-4 flex flex-wrap items-center gap-x-2 gap-y-1 px-1 pb-6 font-mono text-[11px] text-zinc-600">
+          <span title={gridDetail}>
+            Grid data:{" "}
+            <span className={signal?.signal_type === "SYNTHETIC" ? "text-orange-300" : "text-zinc-400"}>{gridShort}</span>
+          </span>
+          <span aria-hidden="true">·</span>
+          <span title={forecastDetail}>
+            Forecast: <span className="text-zinc-400">{forecastShort}</span>
+          </span>
+          <span aria-hidden="true">·</span>
+          <span title={trackingDetail}>
+            Progress: <span className="text-zinc-400">{trackingShort}</span>
+          </span>
+          <Hint label="About these sources" text={`${gridDetail} ${forecastDetail} ${trackingDetail}`} />
+        </footer>
       </div>
     </main>
   );
