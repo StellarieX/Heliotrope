@@ -224,10 +224,13 @@ def diff_placements(
     for job in scheduler_input.jobs:
         # A missed job never ran its past slots, so its whole old plan is superseded.
         prev_from = 0 if job.id in whole_previous else from_slot
-        prev = sorted(s for s, p in previous.get(job.id, {}).items() if p > 0 and s >= prev_from)
-        new = sorted(s for s, p in current.get(job.id, {}).items() if p > 0 and s >= from_slot)
-        if prev == new:
+        prev_draw = {s: p for s, p in previous.get(job.id, {}).items() if p > 0 and s >= prev_from}
+        new_draw = {s: p for s, p in current.get(job.id, {}).items() if p > 0 and s >= from_slot}
+        # Same slots at different power is still a change (e.g. throttled under a lower cap).
+        if prev_draw == new_draw:
             continue
+        prev = sorted(prev_draw)
+        new = sorted(new_draw)
         ps = horizon.slot_start(prev[0]) if prev else None
         ns = horizon.slot_start(new[0]) if new else None
         shift = abs((new[0] - prev[0]) * slot_minutes) if prev and new else 0.0
