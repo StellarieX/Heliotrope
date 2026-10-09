@@ -131,6 +131,64 @@ def test_identical_requests_hit_the_cache_but_failures_do_not(monkeypatch):
             jev_client.ask("s", Q, api_key="K")
 
 
+def test_an_outage_is_remembered_so_the_next_call_does_not_wait(monkeypatch):
+    calls = {"n": 0}
+
+    def down(*a, **k):
+        calls["n"] += 1
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(httpx, "post", down)
+    with pytest.raises(JevError, match="network"):
+        jev_client.ask("s", Q, api_key="K")
+    first = calls["n"]
+    assert first == 2  # the documented single retry
+    with pytest.raises(JevError, match="skipping"):
+        jev_client.ask("other", Q, api_key="K")
+    assert calls["n"] == first  # no request at all while Jev is marked down
+
+
+def test_server_errors_and_exhausted_busy_retries_mark_jev_down(monkeypatch):
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _Resp(status=503))
+    with pytest.raises(JevError):
+        jev_client.ask("s", Q, api_key="K")
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: pytest.fail("must not call out"))
+    with pytest.raises(JevError, match="skipping"):
+        jev_client.ask("t", Q, api_key="K")
+
+    jev_client.clear_state()
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _Resp(status=529))
+    with pytest.raises(JevError):
+        jev_client.ask("s", Q, api_key="K")
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: pytest.fail("must not call out"))
+    with pytest.raises(JevError, match="skipping"):
+        jev_client.ask("t", Q, api_key="K")
+
+
+def test_jev_is_tried_again_after_the_negative_cache_expires(monkeypatch):
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _Resp(status=500))
+    with pytest.raises(JevError):
+        jev_client.ask("s", Q, api_key="K")
+    monkeypatch.setattr(jev_client, "_down_until", 0.0)
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _Resp(_answers(q={"type": "noul", "noul": 0.4})))
+    assert jev_client.ask("s", Q, api_key="K")["q"]["noul"] == 0.4
+
+
+def test_cached_answers_are_still_served_while_jev_is_marked_down(monkeypatch):
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _Resp(_answers(q={"type": "noul", "noul": 0.4})))
+    jev_client.ask("s", Q, api_key="K")
+    jev_client._mark_down("test")
+    assert jev_client.ask("s", Q, api_key="K")["q"]["noul"] == 0.4
+
+
+def test_client_validation_errors_do_not_mark_jev_down(monkeypatch):
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _Resp(status=422, text="bad"))
+    with pytest.raises(JevError, match="422"):
+        jev_client.ask("s", Q, api_key="K")
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _Resp(_answers(q={"type": "noul", "noul": 0.4})))
+    assert jev_client.ask("s2", Q, api_key="K")["q"]["noul"] == 0.4
+
+
 def test_call_cap_protects_the_key(monkeypatch):
     monkeypatch.setattr(config, "JEV_MAX_CALLS_PER_MIN", 2)
     calls = {"n": 0}
@@ -173,12 +231,31 @@ def test_a_jev_key_can_not_reach_any_other_provider():
 
 # ---- prioritization -----------------------------------------------------------------
 
-def _score_answer(score, conf):
-    return _Resp(_answers(importance={
+def _score_body(score, conf):
+    return {
         "type": "score", "score": score, "confidence": conf,
         "legend": {"0": "a", "1": "b", "2": "c", "3": "d"},
         "probabilities": {"0": 0.0, "1": 0.0, "2": 0.1, "3": 0.9},
-    }))
+    }
+
+
+def _batch_post(per_name, calls=None):
+    """Fake upstream: answers every question in the batch by appliance name.
+    `per_name` maps name -> (score, confidence) or an int HTTP status to fail with."""
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        if calls is not None:
+            calls.append(json)
+        answers = {}
+        for qid in json["questions"]:
+            name = json["state"]["appliances"][qid]["appliance"]
+            spec = per_name[name]
+            if isinstance(spec, int):
+                return _Resp(status=spec)
+            answers[qid] = _score_body(*spec)
+        return _Resp(_answers(**answers))
+
+    return fake_post
 
 
 LOADS = [
@@ -194,11 +271,7 @@ def test_without_a_key_ranking_is_the_labelled_heuristic():
 
 
 def test_jev_importance_changes_the_order_of_otherwise_equal_loads(monkeypatch):
-    def fake_post(url, headers=None, json=None, timeout=None):
-        name = json["state"]["appliance"]
-        return _score_answer(3.0 if name == "Borewell pump" else 0.0, 0.9)
-
-    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr(httpx, "post", _batch_post({"Borewell pump": (3.0, 0.9), "Decor lights": (0.0, 0.9)}))
     r = prioritize(
         [LOADS[1].model_copy(update={"power_kw": 1.5}), LOADS[0]], api_key="K"
     )
@@ -209,24 +282,54 @@ def test_jev_importance_changes_the_order_of_otherwise_equal_loads(monkeypatch):
     assert "Jev: essential" in top.reason
 
 
+def test_all_loads_go_to_jev_in_a_single_request(monkeypatch):
+    calls = []
+    many = [
+        PriorityLoad(id=f"l{i}", name=f"Appliance {i}", power_kw=1, hours_until_ready=4)
+        for i in range(8)
+    ]
+    monkeypatch.setattr(httpx, "post", _batch_post({f"Appliance {i}": (2.0, 0.9) for i in range(8)}, calls))
+    r = prioritize(many, api_key="K")
+    assert len(calls) == 1
+    assert len(calls[0]["questions"]) == 8
+    assert r.provider == "jev" and all(i.source == "jev" for i in r.items)
+
+
 def test_low_confidence_importance_is_not_trusted(monkeypatch):
-    monkeypatch.setattr(httpx, "post", lambda *a, **k: _score_answer(3.0, 0.2))
+    monkeypatch.setattr(httpx, "post", _batch_post({"Borewell pump": (3.0, 0.2), "Decor lights": (3.0, 0.2)}))
     r = prioritize(LOADS, api_key="K")
     assert r.provider == "heuristic"
     assert all(i.source == "heuristic" and "unsure" in i.reason for i in r.items)
 
 
-def test_one_failed_load_does_not_fail_the_ranking(monkeypatch):
+def test_mixed_when_only_some_loads_are_trusted(monkeypatch):
+    monkeypatch.setattr(httpx, "post", _batch_post({"Borewell pump": (3.0, 0.9), "Decor lights": (1.0, 0.2)}))
+    r = prioritize(LOADS, api_key="K")
+    by = {i.id: i for i in r.items}
+    assert by["pump"].source == "jev" and by["lamp"].source == "heuristic"
+    assert r.provider == "mixed"
+
+
+def test_an_unusable_answer_for_one_load_falls_back_for_that_load(monkeypatch):
     def fake_post(url, headers=None, json=None, timeout=None):
-        if json["state"]["appliance"] == "Decor lights":
-            return _Resp(status=500)
-        return _score_answer(2.0, 0.9)
+        answers = {}
+        for qid in json["questions"]:
+            name = json["state"]["appliances"][qid]["appliance"]
+            answers[qid] = _score_body(9.0 if name == "Decor lights" else 2.0, 0.9)
+        return _Resp(_answers(**answers))
 
     monkeypatch.setattr(httpx, "post", fake_post)
     r = prioritize(LOADS, api_key="K")
     by = {i.id: i for i in r.items}
     assert by["pump"].source == "jev" and by["lamp"].source == "heuristic"
-    assert r.provider == "jev" and r.notes
+    assert r.provider == "mixed" and r.notes
+
+
+def test_a_jev_outage_falls_back_to_the_heuristic_with_a_note(monkeypatch):
+    monkeypatch.setattr(httpx, "post", _batch_post({"Borewell pump": 500, "Decor lights": 500}))
+    r = prioritize(LOADS, api_key="K")
+    assert r.provider == "heuristic" and all(i.source == "heuristic" for i in r.items)
+    assert any("Jev unavailable" in n for n in r.notes)
 
 
 def test_weights_sum_to_one():
@@ -258,6 +361,54 @@ def test_classify_endpoint_reports_rule_based_when_jev_fails(client, monkeypatch
     r = client.post("/api/v1/loads/classify", json={"name": "geyser at night"})
     assert r.status_code == 200
     assert r.json()["provider"] == "rule_based"
+
+
+def _jev_classify_answers():
+    return _answers(
+        job_type={"type": "choice", "choice": "THERMAL", "confidence": 0.9,
+                  "probabilities": {"THERMAL": 0.9, "FIXED": 0.1}},
+        category={"type": "choice", "choice": "Water heating", "confidence": 0.8,
+                  "probabilities": {"Water heating": 0.8, "Cooling": 0.2}},
+    )
+
+
+def test_classify_endpoint_asks_jev_once_and_labels_it(client, monkeypatch):
+    monkeypatch.setattr(config, "LOAD_INTELLIGENCE_PROVIDER", "auto")
+    monkeypatch.setattr(config, "JEV_API_KEY", "k")
+    calls = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append(json)
+        return _Resp(_jev_classify_answers())
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    r = client.post("/api/v1/loads/classify", json={"name": "geyser at night"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["provider"] == "jev"
+    assert body["classification"]["matched_rule"] == "jev"
+    assert body["normalized_load_spec"]["category"] == "Water heating"
+    assert len(calls) == 1
+
+
+def test_classify_endpoint_does_not_double_the_wait_on_an_outage(client, monkeypatch):
+    """A failing Jev is asked once per request (plus its single retry), never twice,
+    and not at all for the next requests while it is marked down."""
+    monkeypatch.setattr(config, "LOAD_INTELLIGENCE_PROVIDER", "jev")
+    monkeypatch.setattr(config, "JEV_API_KEY", "k")
+    calls = {"n": 0}
+
+    def boom(*a, **k):
+        calls["n"] += 1
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(httpx, "post", boom)
+    r = client.post("/api/v1/loads/classify", json={"name": "geyser at night"})
+    assert r.status_code == 200 and r.json()["provider"] == "rule_based"
+    assert calls["n"] == 2
+    r2 = client.post("/api/v1/loads/classify", json={"name": "washing machine"})
+    assert r2.json()["provider"] == "rule_based"
+    assert calls["n"] == 2
 
 
 @pytest.mark.parametrize(

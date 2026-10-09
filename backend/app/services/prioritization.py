@@ -13,15 +13,16 @@ break a judgement into atomic parts and combine them with weights that stay in c
 
 Only importance needs semantic understanding ("a water pump" vs "a decorative
 light"), so only that is asked of Jev, as one Score question with an explicit
-rubric. A low-confidence answer is not trusted: below JEV_MIN_CONFIDENCE the load
+rubric. All loads' questions go to Jev in ONE request (the API takes a map of
+questions), so ranking ten appliances costs one round trip. A low-confidence answer is not trusted: below JEV_MIN_CONFIDENCE the load
 is scored without importance, and the item says so. If Jev is unconfigured or
 fails, every load is scored by the heuristic and the response is labelled
-`heuristic`, so a ranking is never presented as AI when it is not.
+`heuristic`; if only some loads were Jev-scored it is labelled `mixed`. A ranking is
+never presented as AI when it is not.
 """
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
@@ -70,7 +71,7 @@ class PriorityItem(BaseModel):
 
 
 class PriorityResponse(BaseModel):
-    provider: Literal["jev", "heuristic"]
+    provider: Literal["jev", "mixed", "heuristic"]
     items: list[PriorityItem]
     notes: list[str] = Field(default_factory=list)
 
@@ -83,25 +84,43 @@ def _band(score: int) -> str:
     return "Critical" if score >= 70 else "High" if score >= 50 else "Normal" if score >= 30 else "Low"
 
 
-def _ask_importance(load: PriorityLoad, api_key: str | None) -> tuple[float, float]:
+def _ask_importance_batch(
+    loads: list[PriorityLoad], api_key: str | None
+) -> dict[str, tuple[float, float] | str]:
+    """One Jev request for every load. Returns {load.id: (score, confidence)} or, for a
+    load whose answer could not be used, {load.id: reason}. Raises JevError when the
+    request as a whole fails."""
+    keys = {f"load_{i}": load for i, load in enumerate(loads)}
     state = {
-        "appliance": load.name,
-        "category": load.kind or "unspecified",
-        "power_kw": load.power_kw,
-        "must_be_ready_in_hours": round(load.hours_until_ready, 1),
-    }
-    answers = jev_client.ask(
-        state,
-        {
-            "importance": {
-                "type": "score",
-                "instructions": "How essential is it to the household that this appliance finishes its job on time?",
-                "criteria": _IMPORTANCE_LEVELS,
+        "appliances": {
+            k: {
+                "appliance": ld.name,
+                "category": ld.kind or "unspecified",
+                "power_kw": ld.power_kw,
+                "must_be_ready_in_hours": round(ld.hours_until_ready, 1),
             }
-        },
-        api_key=api_key,
-    )
-    return jev_client.score(answers["importance"], len(_IMPORTANCE_LEVELS))
+            for k, ld in keys.items()
+        }
+    }
+    questions = {
+        k: {
+            "type": "score",
+            "instructions": (
+                f"How essential is it to the household that the appliance state.appliances.{k} "
+                f"({ld.name}) finishes its job on time?"
+            ),
+            "criteria": _IMPORTANCE_LEVELS,
+        }
+        for k, ld in keys.items()
+    }
+    answers = jev_client.ask(state, questions, api_key=api_key)
+    out: dict[str, tuple[float, float] | str] = {}
+    for k, ld in keys.items():
+        try:
+            out[ld.id] = jev_client.score(answers[k], len(_IMPORTANCE_LEVELS))
+        except JevError as exc:
+            out[ld.id] = str(exc)
+    return out
 
 
 def _score_one(load: PriorityLoad, importance: Optional[tuple[float, float]]) -> PriorityItem:
@@ -148,22 +167,20 @@ def prioritize(loads: list[PriorityLoad], api_key: str | None = None) -> Priorit
     if not jev_client.resolve_api_key(api_key):
         notes.append("Jev is not configured; ranked with the built-in heuristic.")
     else:
-        def one(load: PriorityLoad) -> tuple[str, Optional[tuple[float, float]], Optional[str]]:
-            try:
-                return load.id, _ask_importance(load, api_key), None
-            except JevError as exc:
-                return load.id, None, str(exc)
-
-        with ThreadPoolExecutor(max_workers=6) as pool:
-            results = list(pool.map(one, loads))
-        errors = {err for _, _, err in results if err}
-        for lid, val, _err in results:
-            if val is not None:
-                importances[lid] = val
-        if errors:
-            notes.append(f"Jev unavailable for {sum(1 for _, v, _ in results if v is None)} load(s): {sorted(errors)[0]}.")
+        try:
+            results = _ask_importance_batch(loads, api_key)
+        except JevError as exc:
+            notes.append(f"Jev unavailable: {exc}; ranked with the built-in heuristic.")
+        else:
+            bad = [v for v in results.values() if isinstance(v, str)]
+            for lid, val in results.items():
+                if not isinstance(val, str):
+                    importances[lid] = val
+            if bad:
+                notes.append(f"Jev gave no usable answer for {len(bad)} load(s): {bad[0]}.")
 
     items = [_score_one(load, importances.get(load.id)) for load in loads]
     items.sort(key=lambda i: (-i.score, i.id))
-    provider = "jev" if any(i.source == "jev" for i in items) else "heuristic"
+    jev_count = sum(1 for i in items if i.source == "jev")
+    provider = "jev" if jev_count == len(items) else "mixed" if jev_count else "heuristic"
     return PriorityResponse(provider=provider, items=items, notes=notes)
