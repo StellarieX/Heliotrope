@@ -188,7 +188,7 @@ export default function ExecutionPanel({
                       disabled={busy}
                       onClick={() => {
                         setMoveOpen(null);
-                        onOverride(j.job_id, "MOVE", new Date(Math.max(Date.now(), j.scheduled_end ? new Date(j.scheduled_end).getTime() : 0) + h * 3600_000).toISOString());
+                        onOverride(j.job_id, "MOVE", new Date(Math.max(Date.now(), new Date(j.deadline_at ?? j.scheduled_end ?? 0).getTime()) + h * 3600_000).toISOString());
                       }}
                       className={actionBtn}
                     >

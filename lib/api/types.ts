@@ -181,6 +181,8 @@ export interface ExecutionJobState {
   status: string;
   scheduled_start: string | null;
   scheduled_end: string | null;
+  /** The job's current deadline (end of its last allowed slot). */
+  deadline_at?: string | null;
   energy_delivered_kwh: number;
   expected_energy_kwh: number;
   note: string;
