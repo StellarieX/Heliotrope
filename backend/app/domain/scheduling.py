@@ -73,14 +73,15 @@ class ObjectiveWeights(BaseModel):
     The peak and delay terms are NORMALIZED before they enter the model, so a
     weight of 1.0 is meaningful rather than arbitrary:
 
-      * peak:  one watt of extra peak is charged as if it ran for the whole
-                horizon at the horizon's MEAN carbon intensity
+      * peak:  the CP-SAT peak term charges the peak as if it ran for the whole
+                horizon: peak * mean_carbon * slot_minutes * slot_count
       * delay: one slot of delay for a job is charged as the carbon cost of
                 running that job for one more slot
 
     That keeps the peak and delay weights unit-free and comparable. The cost
-    weight is NOT normalized: the cost term is tariff micro-units x watt-minutes,
-    on a different scale from the carbon term, so it needs its own tuning.
+    weight is NOT normalized: the cost term is the raw tariff in micro-units
+    times watt-minutes, on a different scale from the carbon term, so it needs
+    its own tuning.
     """
 
     carbon: float = Field(default=1.0, ge=0.0)
