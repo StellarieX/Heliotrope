@@ -1455,7 +1455,10 @@ export default function Dashboard() {
             <div className="mt-4 rounded-2xl border border-lime-300/20 bg-lime-300/[0.03] p-5">
               <div className="flex flex-wrap items-end justify-between gap-3">
                 <div>
-                  <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-lime-300/80">Impact vs running everything now</p>
+                  <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-lime-300/80">
+                    Impact vs running everything now
+                    {liveState.version > 1 ? " · as first planned (v1)" : ""}
+                  </p>
                   {impact.metrics.co2_saved_percent !== null && impact.metrics.co2_saved_percent > 0.05 ? (
                     <p className="mt-1.5 text-3xl font-semibold tracking-tight">
                       −{impact.metrics.co2_saved_percent.toFixed(0)}% CO₂
