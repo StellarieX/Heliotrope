@@ -38,6 +38,7 @@ import type {
 import BuildingChart from "./BuildingChart";
 import CarbonChart from "./CarbonChart";
 import ExecutionPanel from "./ExecutionPanel";
+import PoolPanel from "./PoolPanel";
 import { AC_RE, buildSpecs, detailNeeded, kindOf, latestFinish, nextSlot, type Detail, type StoredJob } from "../../lib/loads/specs";
 import { useLoadClassification } from "./useLoadClassification";
 import { loadTypeLabel } from "./labels";
@@ -310,6 +311,8 @@ export default function Dashboard() {
   const [impact, setImpact] = useState<CompareSchedulerResult | null>(null);
   const impactSeq = useRef(0);
   const [poolInfo, setPoolInfo] = useState<PoolSummary | null>(null);
+  // Bumped after every change to a schedule so the "everyone's planned load" panel refreshes right away.
+  const [poolRefresh, setPoolRefresh] = useState(0);
   const [liveId, setLiveId] = useState<string | null>(null);
   const [liveState, setLiveState] = useState<ExecutionState | null>(null);
   const [liveHistory, setLiveHistory] = useState<ScheduleHistory | null>(null);
@@ -520,6 +523,7 @@ export default function Dashboard() {
       // Replacing our own plan: the backend cancels it so it doesn't count as someone else's load.
       const state = await planSchedule({ ...planBody, ...(liveId ? { replaces_schedule_id: liveId } : {}) });
       setPoolInfo(state.pool ?? null);
+      setPoolRefresh((n) => n + 1);
       // Fire-and-forget: the impact card is a bonus and must never block or fail the plan.
       // It shares the same pool (minus our new plan) so its numbers match what was optimized.
       void compareSchedulers({
@@ -566,6 +570,7 @@ export default function Dashboard() {
     setLiveBusy(true);
     try {
       await replanSchedule(liveId, { reason: "MANUAL" });
+      setPoolRefresh((n) => n + 1);
       await refreshLive(liveId);
     } catch (e) {
       liveFailure(e, "Replan failed.");
@@ -579,6 +584,7 @@ export default function Dashboard() {
     setLiveBusy(true);
     try {
       await postScheduleEvent(liveId, { event_type: type, job_id: jobId });
+      setPoolRefresh((n) => n + 1);
       await refreshLive(liveId);
     } catch (e) {
       liveFailure(e, "Event failed.");
@@ -597,6 +603,7 @@ export default function Dashboard() {
         command,
         ...(newDeadlineAt ? { new_deadline_at: newDeadlineAt } : {}),
       });
+      setPoolRefresh((n) => n + 1);
       await refreshLive(liveId);
     } catch (e) {
       liveFailure(e, "That change couldn't be applied.");
@@ -1508,10 +1515,11 @@ export default function Dashboard() {
               <p className="mt-0.5 font-mono text-[11px] text-zinc-600">
                 {liveState ? `solver ${liveState.solver_status.toLowerCase()} · refreshes every minute` : "plans your loads on the backend, then tracks execution"}
               </p>
-              {liveState && poolInfo?.applied && poolInfo.active_schedules > 0 && (
+              {liveState && poolInfo?.applied && (
                 <p className="mt-0.5 font-mono text-[11px] text-sky-300/80">
-                  spread around {poolInfo.active_schedules} other active plan{poolInfo.active_schedules === 1 ? "" : "s"} · their peak{" "}
-                  {poolInfo.peak_pooled_kw.toFixed(1)} kW
+                  {poolInfo.active_schedules > 0
+                    ? `Scheduled around ${poolInfo.active_schedules} other active schedule${poolInfo.active_schedules === 1 ? "" : "s"} (their busiest moment: ${poolInfo.peak_pooled_kw.toFixed(1)} kW), so yours doesn't pile onto the same hour.`
+                    : "No other active schedules to plan around right now."}
                 </p>
               )}
             </div>
@@ -1618,7 +1626,9 @@ export default function Dashboard() {
           )}
         </div>
 
-        {/* Multi-user building coordination */}
+        <PoolPanel enabled={backend === "online"} refreshKey={poolRefresh} />
+
+        {/* All of your loads together under one power limit */}
         <div className="mt-3 rounded-2xl border border-white/10 bg-[#0a0a0a] p-4 sm:p-8">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
