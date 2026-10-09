@@ -1,6 +1,7 @@
 "use client";
 
-import type { ExecutionState, ScheduleHistory } from "../../lib/api/types";
+import { useState } from "react";
+import type { ExecutionState, OverrideCommand, ScheduleHistory } from "../../lib/api/types";
 
 const STATUS_STYLE: Record<string, string> = {
   PENDING: "bg-white/5 text-zinc-400",
@@ -40,6 +41,7 @@ export default function ExecutionPanel({
   names = {},
   onReplan,
   onEvent,
+  onOverride,
   busy,
 }: {
   state: ExecutionState;
@@ -48,8 +50,11 @@ export default function ExecutionPanel({
   names?: Record<string, string>;
   onReplan: () => void;
   onEvent: (jobId: string, type: string) => void;
+  onOverride: (jobId: string, command: OverrideCommand, newDeadlineAt?: string) => void;
   busy: boolean;
 }) {
+  const [confirmCancel, setConfirmCancel] = useState<string | null>(null);
+  const [moveOpen, setMoveOpen] = useState<string | null>(null);
   return (
     <div>
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -77,6 +82,7 @@ export default function ExecutionPanel({
               : j.status === "COMPLETED"
                 ? 100
                 : 0;
+          const terminal = ["COMPLETED", "CANCELLED", "FAILED"].includes(j.status);
           return (
             <li key={j.job_id} className="py-3.5">
               <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2.5">
@@ -100,17 +106,43 @@ export default function ExecutionPanel({
                   </div>
                 </div>
                 <div className="flex shrink-0 flex-wrap gap-2">
-                  {(j.status === "PENDING" || j.status === "READY" || j.status === "MISSED") && (
-                    <button onClick={() => onEvent(j.job_id, "JOB_STARTED")} disabled={busy} className={actionBtn}>
-                      Mark started
-                    </button>
-                  )}
+                  {j.status === "PENDING" || j.status === "READY" || j.status === "MISSED" ? (
+                    <>
+                      <button onClick={() => onOverride(j.job_id, "START_NOW")} disabled={busy} className={actionBtn}>
+                        Run now
+                      </button>
+                      <button onClick={() => onEvent(j.job_id, "JOB_STARTED")} disabled={busy} className={actionBtn}>
+                        Mark started
+                      </button>
+                    </>
+                  ) : null}
                   {j.status === "RUNNING" && (
-                    <button onClick={() => onEvent(j.job_id, "JOB_COMPLETED")} disabled={busy} className={actionBtn}>
-                      Mark done
+                    <>
+                      <button onClick={() => onOverride(j.job_id, "PAUSE")} disabled={busy} className={actionBtn}>
+                        Pause
+                      </button>
+                      <button onClick={() => onEvent(j.job_id, "JOB_COMPLETED")} disabled={busy} className={actionBtn}>
+                        Mark done
+                      </button>
+                    </>
+                  )}
+                  {j.status === "PAUSED" && (
+                    <button onClick={() => onOverride(j.job_id, "START_NOW")} disabled={busy} className={actionBtn}>
+                      Resume
                     </button>
                   )}
-                  {!["COMPLETED", "CANCELLED", "FAILED"].includes(j.status) && (
+                  {!terminal && (
+                    <button
+                      onClick={() => setMoveOpen(moveOpen === j.job_id ? null : j.job_id)}
+                      disabled={busy}
+                      aria-expanded={moveOpen === j.job_id}
+                      title="Allow this load to finish later"
+                      className={actionBtn}
+                    >
+                      Move
+                    </button>
+                  )}
+                  {!terminal && j.status !== "FAILED" && (
                     <button
                       onClick={() => onEvent(j.job_id, "JOB_FAILED")}
                       disabled={busy}
@@ -119,8 +151,52 @@ export default function ExecutionPanel({
                       Didn&apos;t run
                     </button>
                   )}
+                  {!terminal && confirmCancel !== j.job_id && (
+                    <button
+                      onClick={() => setConfirmCancel(j.job_id)}
+                      disabled={busy}
+                      className={`${actionBtn} text-zinc-500 hover:border-red-500/40 hover:text-red-300`}
+                    >
+                      Cancel
+                    </button>
+                  )}
+                  {!terminal && confirmCancel === j.job_id && (
+                    <>
+                      <button
+                        onClick={() => {
+                          setConfirmCancel(null);
+                          onOverride(j.job_id, "CANCEL");
+                        }}
+                        disabled={busy}
+                        className={`${actionBtn} border-red-500/40 text-red-300 hover:border-red-400 hover:text-red-200`}
+                      >
+                        Confirm cancel
+                      </button>
+                      <button onClick={() => setConfirmCancel(null)} className={actionBtn}>
+                        Keep
+                      </button>
+                    </>
+                  )}
                 </div>
               </div>
+              {!terminal && moveOpen === j.job_id && (
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <span className="text-[12px] text-zinc-500">Allow it to finish later, up to</span>
+                  {[1, 3].map((h) => (
+                    <button
+                      key={h}
+                      disabled={busy}
+                      onClick={() => {
+                        setMoveOpen(null);
+                        onOverride(j.job_id, "MOVE", new Date(Math.max(Date.now(), j.scheduled_end ? new Date(j.scheduled_end).getTime() : 0) + h * 3600_000).toISOString());
+                      }}
+                      className={actionBtn}
+                    >
+                      +{h}h
+                    </button>
+                  ))}
+                </div>
+              )}
             </li>
           );
         })}

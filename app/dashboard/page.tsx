@@ -16,6 +16,7 @@ import {
   prioritizeLoads,
   planSchedule,
   postScheduleEvent,
+  overrideSchedule,
   replanSchedule,
   tickSchedule,
   validateLoad,
@@ -30,6 +31,7 @@ import type {
   ExecutionState,
   JobType,
   LoadSpec,
+  OverrideCommand,
   ScheduleHistory,
 } from "../../lib/api/types";
 import BuildingChart from "./BuildingChart";
@@ -553,6 +555,24 @@ export default function Dashboard() {
       await refreshLive(liveId);
     } catch (e) {
       liveFailure(e, "Event failed.");
+    } finally {
+      setLiveBusy(false);
+    }
+  }
+
+  async function liveOverride(jobId: string, command: OverrideCommand, newDeadlineAt?: string) {
+    if (!liveId) return;
+    setLiveBusy(true);
+    setLiveError(null);
+    try {
+      await overrideSchedule(liveId, {
+        job_id: jobId,
+        command,
+        ...(newDeadlineAt ? { new_deadline_at: newDeadlineAt } : {}),
+      });
+      await refreshLive(liveId);
+    } catch (e) {
+      liveFailure(e, "That change couldn't be applied.");
     } finally {
       setLiveBusy(false);
     }
@@ -1482,6 +1502,7 @@ export default function Dashboard() {
                 busy={liveBusy}
                 onReplan={() => void liveReplan()}
                 onEvent={(jobId, type) => void liveEvent(jobId, type)}
+                onOverride={(jobId, command, newDeadlineAt) => void liveOverride(jobId, command, newDeadlineAt)}
               />
             </div>
           )}
