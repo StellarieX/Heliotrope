@@ -391,7 +391,25 @@ class RecedingHorizon:
             return result
         return result.model_copy(update={"schedule": [*result.schedule, *extra]})
 
+    @staticmethod
+    def _breaks_capacity(scheduler_input, placement_slots: dict, from_slot: int) -> bool:
+        """True when a placement's future draw exceeds the current capacity in any slot."""
+        load: dict[int, int] = {}
+        for job in scheduler_input.jobs:
+            for slot, power in placement_slots.get(job.id, {}).items():
+                if slot >= from_slot and power > 0:
+                    load[slot] = load.get(slot, 0) + power
+        return any(
+            watts > scheduler_input.headroom_w(slot)
+            for slot, watts in load.items()
+            if slot < scheduler_input.horizon.slot_count
+        )
+
     def _worth_it(self, scheduler_input, previous, current, current_slot, changes) -> bool:
+        if self._breaks_capacity(scheduler_input, previous, current_slot):
+            # The standing version no longer fits (e.g. the capacity dropped): it must
+            # be replaced whatever the movement or carbon gain.
+            return True
         if not changes:
             return False
         max_shift = max(c.change_minutes for c in changes)
