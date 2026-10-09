@@ -289,7 +289,7 @@ export interface CoordinationAggregatePoint {
 
 export interface CoordinationCongestionPoint {
   timestamp: string;
-  aggregate_load: number;
+  aggregate_kw: number;
   capacity_kw: number;
   utilization: number;
   congestion_score: number;

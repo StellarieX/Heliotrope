@@ -67,15 +67,32 @@ def compute_pool(
     horizon,
     exclude_schedule_ids: Iterable[str] = (),
 ) -> PoolSnapshot:
-    """Pooled planned watts per slot of `horizon`, matched by slot timestamp."""
-    index = {horizon.slot_start(i): i for i in range(horizon.slot_count)}
-    pooled = [0] * horizon.slot_count
+    """Pooled planned watts per slot of `horizon`.
+
+    An allocation holds its power for the slot length of the plan it came from, so it
+    is spread over every horizon slot it overlaps by time (mean power per slot). Plans
+    on a different slot length or an unaligned start therefore still count; for an
+    identical grid this reduces to an exact per-slot sum.
+    """
+    count = horizon.slot_count
+    slot_len = timedelta(minutes=horizon.slot_minutes)
+    origin = horizon.slot_start(0)
+    energy_wh = [0.0] * count
     touched: set[str] = set()
-    for schedule_id, _job_id, alloc, _m in _live_allocations(store, exclude_schedule_ids):
-        i = index.get(alloc.timestamp)
-        if i is not None:
-            pooled[i] += alloc.power_w
-            touched.add(schedule_id)
+    for schedule_id, _job_id, alloc, slot_minutes in _live_allocations(store, exclude_schedule_ids):
+        a0 = alloc.timestamp
+        a1 = a0 + timedelta(minutes=slot_minutes)
+        first = max(0, int((a0 - origin) // slot_len))
+        for i in range(first, count):
+            b0 = origin + i * slot_len
+            if b0 >= a1:
+                break
+            overlap = (min(a1, b0 + slot_len) - max(a0, b0)).total_seconds() / 3600.0
+            if overlap > 0:
+                energy_wh[i] += alloc.power_w * overlap
+                touched.add(schedule_id)
+    hours = horizon.slot_minutes / 60.0
+    pooled = [int(round(e / hours)) for e in energy_wh]
     return PoolSnapshot(pooled_w=pooled, active_schedules=len(touched))
 
 

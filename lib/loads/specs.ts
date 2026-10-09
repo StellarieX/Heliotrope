@@ -163,7 +163,7 @@ export function buildSpecs(jobs: StoredJob[], now: Date = nextSlot()): BuiltSpec
           job_type: "DEFERRABLE_INTERRUPTIBLE",
           category: j.kind || "Flexible",
           energy_required_kwh: j.energyKwh!,
-          duration_minutes: positive(j.durationMin) ? Math.round(j.durationMin) : null,
+          duration_minutes: positive(j.durationMin) ? Math.max(1, Math.round(j.durationMin)) : null,
           min_chunk_minutes: 15,
           assumptions: [{ field: "energy_required_kwh", origin: "user-configured", detail: `${j.energyKwh} kWh entered by the user` }],
         })
@@ -173,7 +173,7 @@ export function buildSpecs(jobs: StoredJob[], now: Date = nextSlot()): BuiltSpec
         base(j, now, {
           job_type: "DEFERRABLE_ATOMIC",
           category: j.kind || "Flexible",
-          duration_minutes: Math.round(j.durationMin!),
+          duration_minutes: Math.max(1, Math.round(j.durationMin!)),
           energy_required_kwh: positive(j.energyKwh) ? j.energyKwh : null,
           assumptions: [{ field: "duration_minutes", origin: "user-configured", detail: `${j.durationMin} min entered by the user` }],
         })

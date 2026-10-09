@@ -4,7 +4,12 @@ import os
 
 
 def _get(name: str, default: str) -> str:
-    return os.environ.get(name, default)
+    # A blank value (e.g. `CARBON_LAT=` left in a deploy form) means "not set".
+    # Without this, float("") / int("") raise at import and the whole app fails to boot.
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw
 
 
 def _get_float(name: str, default: str) -> float:

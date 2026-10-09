@@ -221,3 +221,59 @@ def test_pool_stats_default_window_is_the_next_24_hours(store):
 def test_pool_stats_rejects_bad_windows(store, params):
     res = client.get("/api/v1/pool/stats", params={"start": "2024-01-01T00:00:00Z", **params})
     assert res.status_code == 422 and res.json()["code"] == "invalid_request"
+
+
+# --- mixed resolution / alignment --------------------------------------------------
+
+
+def test_pool_counts_plans_on_a_different_slot_length_or_offset(store):
+    from app.domain.horizon import SchedulingHorizon
+
+    service = SchedulerService()
+    inp, result, _ = solve(service, store, "a", pooled=False)
+    store.create(inp, result)
+    alloc_w = {a.timestamp: a.power_w for s in result.schedule for a in s.allocations}
+    assert alloc_w
+    energy_wh = sum(w * 0.25 for w in alloc_w.values())
+
+    # Same start, 30-minute slots: pooled watts are the mean power over each slot.
+    h30 = SchedulingHorizon(start=DAY_START, end=DAY_START + timedelta(hours=3), slot_minutes=30, slot_count=6)
+    snap30 = compute_pool(store, h30)
+    assert len(snap30.pooled_w) == 6 and snap30.active_schedules == 1
+    assert sum(snap30.pooled_w) * 0.5 == pytest.approx(energy_wh, abs=1.0)
+
+    # Unaligned start (7.5 min shift) with 15-minute slots: nothing may be dropped.
+    start = DAY_START + timedelta(minutes=7, seconds=30)
+    h15 = SchedulingHorizon(start=start, end=start + timedelta(hours=3), slot_minutes=15, slot_count=12)
+    snap15 = compute_pool(store, h15)
+    assert len(snap15.pooled_w) == 12 and snap15.active_schedules == 1
+    assert sum(snap15.pooled_w) * 0.25 == pytest.approx(energy_wh, abs=1.0)
+
+
+def test_end_to_end_second_plan_sees_the_first_in_its_pool(store):
+    from .fixtures import ev_job
+    from .test_execution import CARBON_END, CARBON_START, spec_dict
+
+    def body(job_id):
+        return {
+            "jobs": [spec_dict(ev_job(id=job_id, energy_required_kwh=7.2))],
+            "capacity_kw": 20.0,
+            "scheduler": "CPSAT",
+            "carbon_start": CARBON_START,
+            "carbon_end": CARBON_END,
+        }
+
+    a = client.post("/api/v1/schedules/plan", json=body("ev-a"))
+    assert a.status_code == 200, a.text
+    assert a.json()["pool"]["applied"] and a.json()["pool"]["active_schedules"] == 0
+    b = client.post("/api/v1/schedules/plan", json=body("ev-b"))
+    assert b.status_code == 200, b.text
+    pool = b.json()["pool"]
+    assert pool["applied"] and pool["active_schedules"] >= 1 and pool["peak_pooled_kw"] > 0
+
+    res = client.get(
+        "/api/v1/pool/stats",
+        params={"start": CARBON_START, "end": CARBON_END},
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["active_schedules"] == 2

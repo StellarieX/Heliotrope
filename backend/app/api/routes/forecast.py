@@ -22,7 +22,7 @@ from typing import Optional
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from ...services.forecast_backtest import BacktestConfig
 from ...services.forecast_service import ForecastService, ForecastServiceError
@@ -53,6 +53,18 @@ def _parsed(value: str, field: str) -> datetime:
     return parsed
 
 
+#: The grid the observed carbon signal supports (services/carbon_service.py). A forecast on
+#: any other grid could never be checked against real data, and the service would
+#: silently substitute synthetic history for it, so it is refused here instead.
+_RESOLUTIONS = (5, 15, 30, 60)
+
+
+def _check_resolution(value: int) -> int:
+    if value not in _RESOLUTIONS:
+        raise ValueError("resolution_minutes must be one of 5, 15, 30, 60")
+    return value
+
+
 class ForecastRequest(BaseModel):
     """§8. Note that nothing here is optional-but-defaulted into a claim: an
     omitted `model` means the seasonal baseline and says so in the response."""
@@ -67,6 +79,11 @@ class ForecastRequest(BaseModel):
     coverage: float = Field(default=0.9, gt=0.0, lt=1.0)
     #: how much observed history to pull for the forecast window
     history_days: int = Field(default=14, ge=1, le=60)
+
+    @field_validator("resolution_minutes")
+    @classmethod
+    def _resolution(cls, v: int) -> int:
+        return _check_resolution(v)
 
 
 class ObservedPointIn(BaseModel):
@@ -94,6 +111,11 @@ class EvaluateRequest(BaseModel):
     #: the observed values to score against
     actual: list[ObservedPointIn] = Field(default_factory=list)
 
+    @field_validator("resolution_minutes")
+    @classmethod
+    def _resolution(cls, v: int) -> int:
+        return _check_resolution(v)
+
 
 class BacktestRequest(BaseModel):
     """§40: bounded, because an unbounded backtest is a compute DoS vector.
@@ -115,6 +137,11 @@ class BacktestRequest(BaseModel):
     variant: str = "last_observation"
     #: §27, §28: run both baselines over the same evaluation period
     compare_models: bool = False
+
+    @field_validator("resolution_minutes")
+    @classmethod
+    def _resolution(cls, v: int) -> int:
+        return _check_resolution(v)
 
 
 def _forecast_from_dict(payload: dict):
