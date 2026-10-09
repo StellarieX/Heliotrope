@@ -69,6 +69,7 @@ Environment:
 | `CARBON_LAT` / `CARBON_LON` / `CARBON_UTC_OFFSET_HOURS` | no | Site for the weather proxy; defaults to Bhopal, India (`23.2599`, `77.4126`, `5.5`) |
 | `CARBON_WEATHER_BASE_GCO2` / `CARBON_WEATHER_SOLAR_SHARE` / `CARBON_WEATHER_WIND_SHARE` | no | Proxy calibration: intensity with no renewables (`700`) and the largest share full sun (`0.20`) / wind (`0.10`) can displace |
 | `CARBON_CSV_PATH` / `CARBON_MAX_RANGE_DAYS` / `CARBON_CACHE_TTL_S` / `CARBON_SYNTHETIC_SEED` | no | Defaults empty / `7` / `300` / `7` |
+| `POOL_ENABLED` / `POOL_BETA` / `POOL_REF_KW` / `POOL_SCALE_KW` | no (`true` / `0.3` / `20` / `10`) | Anti-herding pool: other active schedules' planned load adds a bounded logistic surcharge (at most `1 + POOL_BETA`) to the carbon a new plan minimizes, so users spread out instead of all taking the cleanest slot. Preference only: deadlines and capacity are unchanged and reported CO2 uses the real signal |
 | `SOLVER_RELATIVE_GAP` | `0.0001` in `render.yaml` | Library default `0` (always prove optimality). A small tolerance returns a schedule within that fraction of the proven optimum in a fraction of a second; such a result is `FEASIBLE` with `solver.relative_gap` set, never `OPTIMAL`. A request's own `solver_config.relative_gap_limit` wins |
 | `LOAD_INTELLIGENCE_PROVIDER` | `auto` in `render.yaml` | `auto`/`jev`: Jev when a key is set, else rules. `rule_based` never calls Jev |
 | `DEFAULT_LOAD_TIMEZONE` | no (`UTC`) | |
