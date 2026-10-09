@@ -78,6 +78,7 @@ class CoordinatedCPSATScheduler(CPSATScheduler):
         self._delay_vars: dict[str, cp_model.IntVar] = {}
         self._fairness_var: cp_model.IntVar | None = None
         self._delay_bound = 1
+        self._delay_ub: dict[str, int] = {}
 
     def solver_info(self, status: SolverStatus, elapsed_ms: int) -> SolverInfo:
         info = super().solver_info(status, elapsed_ms)
@@ -153,6 +154,7 @@ class CoordinatedCPSATScheduler(CPSATScheduler):
             var = model.NewIntVar(0, bound, f"delay_{job.id}")
             model.Add(var * ref >= delay_num * MILLI)
             self._delay_vars[job.id] = var
+            self._delay_ub[var.Name()] = bound
             self._delay_bound = max(getattr(self, "_delay_bound", 1), bound)
 
     def _extra_terms(self, model, scheduler_input, ctx) -> list:
@@ -197,10 +199,18 @@ class CoordinatedCPSATScheduler(CPSATScheduler):
                 w100 = max(1, int(round(self.priority_weight.get(pid, 1.0) * 100)))
                 by_participant.setdefault(pid, []).append((var, w100))
             if self.fairness_mode is FairnessMode.MAX:
-                # F never needs to exceed the largest single-job delay; a lazy
+                # F is the worst per-participant weighted mean delay, so its
+                # domain is the largest such mean at every variable's own upper
+                # bound. A priority weight above 1 can push that past the largest
+                # single-job delay, and an under-sized domain would silently cap
+                # the delay instead of reporting it. It stays bounded (a lazy
                 # 10**12 domain times the objective coefficient overflows int64
-                # and the model is rejected as MODEL_INVALID.
-                fvar = model.NewIntVar(0, max(1, getattr(self, "_delay_bound", 1)), "max_inconvenience")
+                # and the model is rejected as MODEL_INVALID).
+                f_bound = 1
+                for items in by_participant.values():
+                    weighted = sum(w100 * self._delay_ub[v.Name()] for v, w100 in items)
+                    f_bound = max(f_bound, -(-weighted // (100 * len(items))))
+                fvar = model.NewIntVar(0, f_bound, "max_inconvenience")
                 for pid, items in by_participant.items():
                     count = max(1, len(items))
                     # F >= weighted mean delay: F * count * 100 >= sum(W * D).
@@ -211,8 +221,13 @@ class CoordinatedCPSATScheduler(CPSATScheduler):
                 self._fairness_var = fvar
                 terms.append(coef * fvar)
             else:
+                # Same per-participant quantity as MAX: the weighted MEAN delay
+                # of a participant's jobs, summed over participants. Dividing by
+                # the job count (rounded to the nearest integer coefficient; the
+                # weight scale makes the rounding negligible) stops a participant
+                # with five jobs from counting five times as much as one with one.
                 flat = [
-                    (coef * w100) // 100 * v
+                    max(1, (coef * w100 + 50 * len(items)) // (100 * len(items))) * v
                     for items in by_participant.values()
                     for v, w100 in items
                 ]
