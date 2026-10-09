@@ -8,6 +8,8 @@ import type {
   HealthResponse,
   LoadSpec,
   ScheduleEventResult,
+  ScheduleOverrideBody,
+  ScheduleOverrideResult,
   ScheduleHistory,
   ScheduleRequest,
   ValidateResponse,
@@ -342,6 +344,14 @@ export async function postScheduleEvent(
   body: Record<string, unknown>
 ): Promise<ScheduleEventResult> {
   return postJson<ScheduleEventResult>(`/api/v1/schedules/${requireId(scheduleId)}/events`, body);
+}
+
+/** User override of one job (run now, pause, cancel, move window). 422 carries the reason. */
+export async function overrideSchedule(
+  scheduleId: string,
+  body: ScheduleOverrideBody
+): Promise<ScheduleOverrideResult> {
+  return postJson<ScheduleOverrideResult>(`/api/v1/schedules/${requireId(scheduleId)}/override`, body);
 }
 
 /** Phase 7: manual replan over remaining requirements. */

@@ -222,6 +222,25 @@ export interface ScheduleEventResult {
   [key: string]: unknown;
 }
 
+export type OverrideCommand = "START_NOW" | "PAUSE" | "CANCEL" | "MOVE" | "RUN_ASAP";
+
+export interface ScheduleOverrideBody {
+  job_id: string;
+  command: OverrideCommand;
+  /** ISO-8601 with offset; MOVE only. */
+  new_release_at?: string;
+  new_deadline_at?: string;
+}
+
+export interface ScheduleOverrideResult {
+  accepted: boolean;
+  state: ExecutionState;
+  replanned?: boolean;
+  note?: string;
+  explanation?: string;
+  [key: string]: unknown;
+}
+
 export interface CoordinationAggregatePoint {
   timestamp: string;
   baseline_kw: number;
