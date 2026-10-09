@@ -69,6 +69,10 @@ class LoadIntelligenceProvider:
 
     def normalize(self, request: LoadRequest, now=None) -> LoadSpec: ...
 
+    def analyze(self, request: LoadRequest, now=None) -> tuple[Classification, LoadSpec]:
+        """Classify once and normalize with that same classification."""
+        ...
+
 
 class RuleBasedLoadIntelligence(LoadIntelligenceService):
     """The default. Deterministic, offline, dependency-free."""
@@ -232,6 +236,10 @@ class JevLoadIntelligence:
         return self._classify_inner(text or "")
 
     def normalize(self, request: LoadRequest, now=None) -> LoadSpec:
+        return self.analyze(request, now=now)[1]
+
+    def analyze(self, request: LoadRequest, now=None) -> tuple[Classification, LoadSpec]:
+        """One classification (one Jev call at most), reused for normalization."""
         classification = self._classify_inner(request.name)
 
         class _Fixed:
@@ -246,9 +254,10 @@ class JevLoadIntelligence:
                     return self._fixed
                 return self._rules.classify(text)
 
-        return normalize_request(
+        spec = normalize_request(
             request, now=now, classifier=_Fixed(classification, self._rules)  # type: ignore[arg-type]
         )
+        return classification, spec
 
 
 def get_load_intelligence() -> LoadIntelligenceProvider:

@@ -2,8 +2,9 @@
 
     /classify   free text (+ whatever numbers the user has) -> classification
                 + confidence + assumptions + a canonical LoadSpec.
-                Never depends on an external service, so it works offline and
-                returns the same answer every time.
+                Asks Jev when a key is configured (one request, then a labelled
+                rule-based fallback), otherwise answers offline from the rules.
+                `provider` says who actually answered.
 
     /validate   a fully specified LoadSpec -> a structured feasibility verdict.
 
@@ -90,8 +91,7 @@ class ValidateResponse(BaseModel):
 def classify_load(body: LoadRequest) -> JSONResponse:
     provider = get_load_intelligence()
     try:
-        classification = provider.classify(body.name)
-        spec = provider.normalize(body)
+        classification, spec = provider.analyze(body)
     except IntelligenceUnavailable as exc:
         detail = str(exc)
         return _err(detail, "provider_unavailable", 503)

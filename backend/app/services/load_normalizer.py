@@ -87,6 +87,11 @@ class LoadIntelligenceService:
     def normalize(self, request: LoadRequest, now: Optional[datetime] = None) -> LoadSpec:
         return normalize_request(request, now=now, classifier=self.classifier)
 
+    def analyze(
+        self, request: LoadRequest, now: Optional[datetime] = None
+    ) -> tuple[Classification, LoadSpec]:
+        return self.classify(request.name), self.normalize(request, now=now)
+
 
 def _resolve_timezone(name: str) -> tuple[tzinfo, Optional[str]]:
     """Return (tz, warning). Unknown zones fall back to UTC and say so."""
