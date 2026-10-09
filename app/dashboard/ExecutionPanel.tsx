@@ -27,6 +27,9 @@ function fmtTime(iso: string | null) {
 
 const actionBtn =
   "min-h-11 cursor-pointer rounded-full border border-white/15 px-4 py-2 text-[12px] text-zinc-300 transition hover:border-white/40 hover:text-white active:scale-[0.97] disabled:cursor-wait disabled:opacity-50";
+const quietBtn =
+  "min-h-11 cursor-pointer rounded-full px-3 py-2 text-[12px] text-zinc-500 transition hover:text-white active:scale-[0.97] disabled:cursor-wait disabled:opacity-50";
+const dangerBtn = `${actionBtn} text-zinc-500 hover:border-red-500/40 hover:text-red-300`;
 
 /** Live execution state, rendered from the backend only. Progress is what the
  *  user reports (no meters are connected); the schedule itself follows the real clock. */
@@ -50,6 +53,8 @@ export default function ExecutionPanel({
 }) {
   const [confirmCancel, setConfirmCancel] = useState<string | null>(null);
   const [moveOpen, setMoveOpen] = useState<string | null>(null);
+  // Which row has its secondary actions (give more time, didn't run, cancel) open.
+  const [moreOpen, setMoreOpen] = useState<string | null>(null);
   return (
     <div>
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -78,6 +83,8 @@ export default function ExecutionPanel({
                 ? 100
                 : 0;
           const terminal = ["COMPLETED", "CANCELLED", "FAILED"].includes(j.status);
+          const canExtend = !terminal && Boolean(j.deadline_at);
+          const isOpen = moreOpen === j.job_id;
           return (
             <li key={j.job_id} className="py-3.5">
               <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2.5">
@@ -88,36 +95,42 @@ export default function ExecutionPanel({
                       {jobStatusLabel(j.status)}
                     </span>
                   </div>
-                  <p className="mt-1 font-mono text-[11px] text-zinc-500">
-                    {fmtTime(j.scheduled_start)} → {fmtTime(j.scheduled_end)} · {j.energy_delivered_kwh.toFixed(2)} of {j.expected_energy_kwh.toFixed(2)} kWh used
+                  <p
+                    title="kWh (kilowatt-hours) is the electricity used over time, the unit your meter counts."
+                    className="mt-1 font-mono text-[11px] text-zinc-500"
+                  >
+                    {fmtTime(j.scheduled_start)} → {fmtTime(j.scheduled_end)} · {j.energy_delivered_kwh.toFixed(2)} / {j.expected_energy_kwh.toFixed(2)} kWh
                   </p>
                   {j.status === "MISSED" && (
-                    <p className="mt-1 text-[12px] leading-5 text-red-300/90">
-                      Its planned start time has passed. Start it now, or press “Update schedule” to find a new time.
-                    </p>
+                    <p className="mt-1 text-[12px] leading-5 text-red-300/90">Start it now, or update the schedule for a new time.</p>
                   )}
                   <div className="mt-1.5 h-1 max-w-md overflow-hidden rounded-full bg-white/10">
                     <div className="h-full rounded-full bg-lime-300 transition-[width] duration-500" style={{ width: `${pct}%` }} />
                   </div>
                 </div>
-                <div className="flex shrink-0 flex-wrap gap-2">
-                  {j.status === "PENDING" || j.status === "READY" || j.status === "MISSED" ? (
+                <div className="flex shrink-0 flex-wrap items-center gap-2">
+                  {(j.status === "PENDING" || j.status === "READY") && (
                     <>
-                      <button onClick={() => onOverride(j.job_id, "START_NOW")} disabled={busy} className={actionBtn}>
-                        Start now
-                      </button>
                       <button onClick={() => onEvent(j.job_id, "JOB_STARTED")} disabled={busy} className={actionBtn}>
                         I started it
                       </button>
+                      <button onClick={() => onOverride(j.job_id, "START_NOW")} disabled={busy} className={actionBtn}>
+                        Start now
+                      </button>
                     </>
-                  ) : null}
+                  )}
+                  {j.status === "MISSED" && (
+                    <button onClick={() => onOverride(j.job_id, "START_NOW")} disabled={busy} className={actionBtn}>
+                      Start now
+                    </button>
+                  )}
                   {j.status === "RUNNING" && (
                     <>
-                      <button onClick={() => onOverride(j.job_id, "PAUSE")} disabled={busy} className={actionBtn}>
-                        Pause
-                      </button>
                       <button onClick={() => onEvent(j.job_id, "JOB_COMPLETED")} disabled={busy} className={actionBtn}>
                         It&apos;s done
+                      </button>
+                      <button onClick={() => onOverride(j.job_id, "PAUSE")} disabled={busy} className={actionBtn}>
+                        Pause
                       </button>
                     </>
                   )}
@@ -126,7 +139,29 @@ export default function ExecutionPanel({
                       Resume
                     </button>
                   )}
-                  {!terminal && j.deadline_at && (
+                  {!terminal && (
+                    <button
+                      onClick={() => {
+                        setMoreOpen(isOpen ? null : j.job_id);
+                        setMoveOpen(null);
+                        setConfirmCancel(null);
+                      }}
+                      aria-expanded={isOpen}
+                      className={quietBtn}
+                    >
+                      {isOpen ? "Less" : "More"}
+                    </button>
+                  )}
+                </div>
+              </div>
+              {!terminal && isOpen && (
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  {j.status === "MISSED" && (
+                    <button onClick={() => onEvent(j.job_id, "JOB_STARTED")} disabled={busy} className={actionBtn}>
+                      I started it
+                    </button>
+                  )}
+                  {canExtend && (
                     <button
                       onClick={() => setMoveOpen(moveOpen === j.job_id ? null : j.job_id)}
                       disabled={busy}
@@ -137,29 +172,19 @@ export default function ExecutionPanel({
                       Give more time
                     </button>
                   )}
-                  {!terminal && j.status !== "FAILED" && (
-                    <button
-                      onClick={() => onEvent(j.job_id, "JOB_FAILED")}
-                      disabled={busy}
-                      className={`${actionBtn} text-zinc-500 hover:border-red-500/40 hover:text-red-300`}
-                    >
-                      It didn&apos;t run
-                    </button>
-                  )}
-                  {!terminal && confirmCancel !== j.job_id && (
-                    <button
-                      onClick={() => setConfirmCancel(j.job_id)}
-                      disabled={busy}
-                      className={`${actionBtn} text-zinc-500 hover:border-red-500/40 hover:text-red-300`}
-                    >
+                  <button onClick={() => onEvent(j.job_id, "JOB_FAILED")} disabled={busy} className={dangerBtn}>
+                    It didn&apos;t run
+                  </button>
+                  {confirmCancel !== j.job_id ? (
+                    <button onClick={() => setConfirmCancel(j.job_id)} disabled={busy} className={dangerBtn}>
                       Cancel
                     </button>
-                  )}
-                  {!terminal && confirmCancel === j.job_id && (
+                  ) : (
                     <>
                       <button
                         onClick={() => {
                           setConfirmCancel(null);
+                          setMoreOpen(null);
                           onOverride(j.job_id, "CANCEL");
                         }}
                         disabled={busy}
@@ -173,16 +198,17 @@ export default function ExecutionPanel({
                     </>
                   )}
                 </div>
-              </div>
-              {!terminal && moveOpen === j.job_id && (
+              )}
+              {canExtend && isOpen && moveOpen === j.job_id && (
                 <div className="mt-2 flex flex-wrap items-center gap-2">
-                  <span className="text-[12px] text-zinc-500">Let it finish later than planned, by up to</span>
+                  <span className="text-[12px] text-zinc-500">Finish later, by up to</span>
                   {[1, 3].map((h) => (
                     <button
                       key={h}
                       disabled={busy}
                       onClick={() => {
                         setMoveOpen(null);
+                        setMoreOpen(null);
                         onOverride(j.job_id, "MOVE", new Date(Math.max(Date.now(), new Date(j.deadline_at ?? 0).getTime()) + h * 3600_000).toISOString());
                       }}
                       className={actionBtn}
@@ -198,8 +224,11 @@ export default function ExecutionPanel({
       </ul>
 
       {history && history.versions.length > 1 && (
-        <div className="mt-4">
-          <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-600">Changes since the first plan</p>
+        <details className="group mt-3">
+          <summary className="inline-flex min-h-10 cursor-pointer list-none items-center gap-2 font-mono text-[11px] text-zinc-500 transition hover:text-white [&::-webkit-details-marker]:hidden">
+            <span className="transition group-open:rotate-90">›</span>
+            What changed ({history.versions.length - 1})
+          </summary>
           {history.versions.slice(1).map((v) => (
             <div key={v.version} className="mt-2 rounded-xl border border-white/10 p-4">
               <p className="font-mono text-[11px] text-zinc-500">
@@ -213,11 +242,9 @@ export default function ExecutionPanel({
               ))}
             </div>
           ))}
-        </div>
+        </details>
       )}
-      <p className="mt-3 text-[11px] leading-5 text-zinc-600">
-        Progress is what you report. No meters or devices are connected yet, so nothing here is read from hardware. kWh (kilowatt-hours) is the unit your electricity meter counts.
-      </p>
+      <p className="mt-3 text-[11px] leading-5 text-zinc-600">Progress is what you report; no meters are connected.</p>
     </div>
   );
 }
