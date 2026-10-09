@@ -68,5 +68,6 @@ next-env.d.ts
 # assistant / editor tooling
 .claude/
 CLAUDE.md
+AGENTS.md
 .vscode/
 .idea/
