@@ -328,6 +328,13 @@ class SchedulerInput(BaseModel):
     #: Advisory only (they add no constraint) and excluded from serialization, so a
     #: stored schedule never carries a copy of the previous schedule inside it.
     hints: Optional[dict[str, list[tuple[datetime, int]]]] = Field(default=None, exclude=True, repr=False)
+    #: optional anti-herding pool: aggregate planned watts of other active schedules
+    #: per horizon slot. Objective-only (see `objective_carbon`), never serialized or
+    #: fingerprinted, so a stored schedule does not carry other users' load.
+    pooled_load_w: Optional[list[int]] = Field(default=None, exclude=True, repr=False)
+    pool_beta: float = Field(default=0.3, ge=0.0, exclude=True, repr=False)
+    pool_ref_w: float = Field(default=20000.0, exclude=True, repr=False)
+    pool_scale_w: float = Field(default=10000.0, gt=0.0, exclude=True, repr=False)
 
     def objective_carbon(self) -> "CarbonProfile":
         """The per-slot gCO2/kWh a scheduler minimizes against (§15, §16).
@@ -335,6 +342,31 @@ class SchedulerInput(BaseModel):
         In ACTUAL mode this is the observed profile itself, byte for byte, so the
         Phase 4 deterministic path is bit-for-bit unchanged.
         """
+        base = self._forecast_objective_carbon()
+        if not self.pooled_load_w or not any(self.pooled_load_w) or self.pool_beta <= 0:
+            return base
+        # Anti-herding surcharge: a logistic in the pooled load, shifted so an empty
+        # slot costs exactly x1 and a saturated one at most x(1 + beta). Rounded once.
+        import math
+
+        def sigmoid(z: float) -> float:
+            return 1.0 / (1.0 + math.exp(-max(-60.0, min(60.0, z))))
+
+        floor = sigmoid(-self.pool_ref_w / self.pool_scale_w)
+        pooled = self.pooled_load_w
+        surcharged: list[int] = []
+        for slot, value in enumerate(base.gco2_per_kwh):
+            p = pooled[slot] if slot < len(pooled) else 0
+            share = (sigmoid((p - self.pool_ref_w) / self.pool_scale_w) - floor) / (1.0 - floor)
+            surcharged.append(max(0, int(value * (1.0 + self.pool_beta * max(0.0, share)) + 0.5)))
+        return CarbonProfile(
+            gco2_per_kwh=surcharged,
+            signal_type=base.signal_type,
+            source=base.source,
+            is_forecast=base.is_forecast,
+        )
+
+    def _forecast_objective_carbon(self) -> "CarbonProfile":
         if self.forecast_mode is ForecastMode.ACTUAL or self.uncertainty is None:
             return self.carbon
         adjusted: list[int] = []

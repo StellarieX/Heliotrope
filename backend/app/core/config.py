@@ -113,3 +113,12 @@ JEV_MAX_CALLS_PER_MIN = _get_int("JEV_MAX_CALLS_PER_MIN", "120")
 # OPTIMAL. A request that sets `solver_config.relative_gap_limit` itself wins.
 SOLVER_RELATIVE_GAP = _get_float("SOLVER_RELATIVE_GAP", "0")
 DEFAULT_LOAD_TIMEZONE = _get("DEFAULT_LOAD_TIMEZONE", "UTC")
+
+# Anti-herding pool. Planned load of other active schedules adds a bounded
+# logistic surcharge (at most 1 + POOL_BETA) to the carbon the solver minimizes,
+# so users do not all pile into the same cleanest slot. It tilts preference only;
+# deadlines and capacity are untouched, and reported CO2 uses the real signal.
+POOL_ENABLED = _get("POOL_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+POOL_BETA = _get_float("POOL_BETA", "0.3")
+POOL_REF_KW = _get_float("POOL_REF_KW", "20")
+POOL_SCALE_KW = _get_float("POOL_SCALE_KW", "10")

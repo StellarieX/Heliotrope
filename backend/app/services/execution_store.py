@@ -153,6 +153,22 @@ class ExecutionStore:
                 return record
             return self._load(schedule_id)
 
+    def list_records(self) -> list[ScheduleRecord]:
+        """Every stored record (SQLite is the source of truth; cached copies win
+        because they carry in-flight mutations). Order is by schedule id."""
+        with self._lock:
+            with self._connect() as conn:
+                ids = [r[0] for r in conn.execute("SELECT schedule_id FROM schedules ORDER BY schedule_id")]
+            out: list[ScheduleRecord] = []
+            for sid in ids:
+                record = self._records.get(sid) or self._load(sid)
+                if record is not None:
+                    out.append(record)
+            for sid, record in self._records.items():
+                if sid not in ids:
+                    out.append(record)
+            return out
+
     def append_version(
         self,
         record: ScheduleRecord,
