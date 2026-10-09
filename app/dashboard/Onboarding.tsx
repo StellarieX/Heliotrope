@@ -200,7 +200,7 @@ function DraftCard({
       </div>
       {type === "THERMAL" && (
         <p className="mt-2 font-mono text-[11px] text-zinc-600">
-          This load keeps a temperature, so the plan uses a typical comfort band and a typical heat-loss model. Both are estimates, not measurements of your equipment.
+          Keeps a temperature: the plan uses a typical comfort band and heat-loss model (estimates, not measurements).
         </p>
       )}
       {(powerBad || need) && (
@@ -210,7 +210,7 @@ function DraftCard({
               ? `Keep it at or under ${MAX_POWER_KW} kW.`
               : "Add the power rating in kW (check the appliance label)."
             : type === "DEFERRABLE_INTERRUPTIBLE"
-              ? "How much energy does it need in total, in kWh? Roughly its kW rating × the hours it runs."
+              ? "Total energy in kWh (roughly its kW rating × hours it runs)."
               : "How long does one run take, in minutes?"}
         </p>
       )}
@@ -272,6 +272,8 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
   const jobs: JobInput[] = stored;
   // Step 4 asks the backend (Jev when it is available) which load matters first.
   const ranking = useBackendRanking(jobs, step === 3);
+  const rankedNow = ranking.status === "loading" ? [] : ranking.ranked;
+  const mixedSources = rankedNow.some((j) => j.source === "jev") && rankedNow.some((j) => j.source !== "jev");
   const loadsValid =
     stored.length > 0 && stored.every((j) => j.powerKw > 0 && j.powerKw <= MAX_POWER_KW && detailNeeded(j) === null);
 
@@ -443,7 +445,7 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
         {step === 0 && (
           <div>
             <h2 id="onboarding-title" className="mt-3 text-2xl font-semibold tracking-tight">What should we call you?</h2>
-            <p className="mt-2 text-sm leading-6 text-zinc-500">Your name, and a unique username for your public page.</p>
+            <p className="mt-2 text-sm leading-6 text-zinc-500">Your name and a username for your public page.</p>
             <label htmlFor="ob-name" className="mt-6 block text-[13px] text-zinc-400">Display name</label>
             <input id="ob-name" autoFocus value={name} onChange={(e) => setName(e.target.value)} maxLength={40} placeholder="Your name" className={`mt-2 ${inputCls}`} />
             <label htmlFor="ob-username" className="mt-5 block text-[13px] text-zinc-400">Username</label>
@@ -463,7 +465,7 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
             </div>
             <p aria-live="polite" className="mt-2 min-h-4 font-mono text-[11px]">
               {!username ? (
-                <span className="text-zinc-600">3–20 chars · lowercase, numbers, underscore · your public page is /username</span>
+                <span className="text-zinc-600">3–20 letters, numbers or _ · your page is /username</span>
               ) : !unameValid ? (
                 <span className="text-orange-300">
                   {uname.length < 3 ? "At least 3 characters." : "That name is reserved — pick another."}
@@ -485,7 +487,7 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
           <div>
             <h2 id="onboarding-title" className="mt-3 text-2xl font-semibold tracking-tight">What do you do?</h2>
             <p className="mt-2 text-sm leading-6 text-zinc-500">
-              Your answers decide which appliances we offer first, what we suggest for the most power your site can draw at once, and the advice below.
+              This picks your starter appliances and a suggested power limit.
             </p>
             <p className="mt-6 text-[13px] text-zinc-400">Occupation</p>
             <div className="mt-2 flex flex-wrap gap-2" role="radiogroup" aria-label="Occupation">
@@ -526,13 +528,13 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
             {occupation && place ? (
               <div className="mt-6 rounded-xl border border-lime-300/20 bg-lime-300/[0.03] px-4 py-3">
                 <p className="text-[13px] leading-6 text-zinc-300">{profile.advice}</p>
-                <p className="mt-2 font-mono text-[11px] text-zinc-500">
-                  Suggested max power at once: {profile.capacityKw} kW. {profile.capacityNote}
+                <p title={profile.capacityNote} className="mt-2 font-mono text-[11px] text-zinc-500">
+                  Suggested max power at once: {profile.capacityKw} kW
                 </p>
               </div>
             ) : null}
             <p className="mt-5 font-mono text-[11px] leading-5 text-zinc-600">
-              Occupation, place and rooms are saved in your profile record, which the database allows anyone to read. Your loads stay private to your account.
+              Occupation, place and rooms are public on your profile; your loads stay private.
             </p>
           </div>
         )}
@@ -541,9 +543,8 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
           <div>
             <h2 id="onboarding-title" className="mt-3 text-2xl font-semibold tracking-tight">Which loads should we optimize?</h2>
             <p className="mt-2 text-sm leading-6 text-zinc-500">
-              Add what you have. We work out what kind of load each one is and ask only for the numbers that kind needs.
+              Add what you have; we ask only for the numbers each kind needs.
             </p>
-            <p className="mt-3 text-[13px] leading-6 text-zinc-400">{profile.advice}</p>
             <div className="mt-4 flex flex-wrap items-center gap-2">
               <span className="font-mono text-[11px] text-zinc-600">quick add</span>
               {(showMore ? [...profile.primary, ...profile.more] : profile.primary).map((p) => {
@@ -570,7 +571,7 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
               </button>
             </div>
             <p className="mt-2 font-mono text-[11px] leading-5 text-zinc-600">
-              Preset numbers are typical values for that appliance. Replace them with what is on your appliance&apos;s label.
+              Presets use typical numbers; check them against your appliance label.
             </p>
             <div className="mt-4 space-y-3">
               {drafts.map((d, i) => (
@@ -599,7 +600,7 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
             <h2 id="onboarding-title" className="mt-3 text-2xl font-semibold tracking-tight">Review and save</h2>
             <p className="mt-2 text-sm leading-6 text-zinc-500">
               @{uname} · {occupation} · {place}
-              {rooms ? ` · ${rooms} rooms` : ""}. Next, the dashboard can plan these into the cleaner hours of the day.
+              {rooms ? ` · ${rooms} rooms` : ""}
             </p>
             <label htmlFor="ob-maxpower" className="mt-5 block text-[13px] text-zinc-400">Max power at once (kW)</label>
             <input
@@ -610,9 +611,11 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
               aria-invalid={maxPowerError !== null}
               className={`mt-2 ${inputCls} ${maxPowerError ? "border-orange-300/50" : ""}`}
             />
-            <p className={`mt-2 font-mono text-[11px] leading-5 ${maxPowerError ? "text-orange-300" : "text-zinc-600"}`}>
-              {maxPowerError ??
-                `The most all your loads may draw together. ${maxPowerEdit === null ? profile.capacityNote : "Set to your own value."} It is kept in this browser and the dashboard uses it when you plan.`}
+            <p
+              title={maxPowerEdit === null ? profile.capacityNote : undefined}
+              className={`mt-2 font-mono text-[11px] leading-5 ${maxPowerError ? "text-orange-300" : "text-zinc-600"}`}
+            >
+              {maxPowerError ?? "The most all your loads may draw together. The dashboard plans within it."}
             </p>
             {ranking.status === "loading" ? (
               <p className="mt-5 flex items-center gap-2 font-mono text-[11px] text-zinc-500">
@@ -624,13 +627,12 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
                 <p className={`mt-1 font-mono text-[11px] leading-5 ${ranking.status === "fallback" ? "text-orange-300" : "text-zinc-500"}`}>{ranking.label}</p>
                 <ol className="mt-2 space-y-2">
                   {ranking.ranked.map((j, i) => (
-                    <li key={j.id} className="flex items-center gap-3 rounded-xl border border-white/10 px-3.5 py-3 sm:gap-4 sm:px-4">
+                    <li key={j.id} title={j.reason} className="flex items-center gap-3 rounded-xl border border-white/10 px-3.5 py-3 sm:gap-4 sm:px-4">
                       <span className="font-mono text-[12px] text-zinc-600">{String(i + 1).padStart(2, "0")}</span>
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-sm font-medium">{j.name}</p>
-                        <p className="mt-0.5 line-clamp-2 font-mono text-[11px] text-zinc-500">{j.reason}</p>
                       </div>
-                      {j.source === "jev" && (
+                      {mixedSources && j.source === "jev" && (
                         <span className="shrink-0 rounded-full bg-violet-400/15 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-violet-300">jev</span>
                       )}
                       <span className={`shrink-0 rounded-full px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider ${j.band === "Critical" ? "bg-red-500/15 text-red-300" : j.band === "High" ? "bg-orange-400/15 text-orange-300" : j.band === "Normal" ? "bg-white/10 text-zinc-300" : "bg-white/5 text-zinc-500"}`}>
@@ -642,8 +644,7 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
               </>
             ) : (
               <p className="mt-5 rounded-xl border border-white/10 px-4 py-3 text-sm leading-6 text-zinc-400">
-                Everything you added is always on (like a fridge), so there is nothing to shift yet. Go back and add a
-                flexible load such as EV charging or water heating to see savings.
+                Everything here is always on (like a fridge), so nothing can shift yet. Go back and add a flexible load such as EV charging.
               </p>
             )}
             <p className="mt-4 font-mono text-[11px] text-zinc-600">
