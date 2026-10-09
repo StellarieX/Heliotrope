@@ -8,6 +8,7 @@ import { deleteDoc, doc, getDoc, getDocs, collection, serverTimestamp, setDoc } 
 import { getDb, getFirebaseAuth, getGoogleProvider } from "../../lib/firebase";
 import { claimUsername as claimUsernameFor, validUsername } from "../../lib/username";
 import { scrubLegacyEmail } from "../../lib/profile";
+import { OCCUPATIONS, PLACES, profileFor, readMaxPower, saveMaxPower } from "../../lib/occupations";
 
 type Status = { kind: "idle" | "ok" | "err"; text: string };
 
@@ -27,6 +28,15 @@ export default function Account() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  // The profile document loads after sign-in; until it has, username controls stay off
+  // so a slow load can never be mistaken for "no username yet".
+  const [profileState, setProfileState] = useState<"loading" | "ready" | "error">("loading");
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const [occupation, setOccupation] = useState("");
+  const [place, setPlace] = useState("");
+  const [maxPower, setMaxPower] = useState("");
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [aboutStatus, setAboutStatus] = useState<Status>({ kind: "idle", text: "" });
 
   useEffect(() => {
     if (!auth) {
@@ -36,22 +46,50 @@ export default function Account() {
     queueMicrotask(() => setReady(true));
     return;
     }
-    return onAuthStateChanged(auth, async (u) => {
+    let cancelled = false;
+    const unsub = onAuthStateChanged(auth, async (u) => {
       setUser(u);
       setReady(true);
-      if (u) {
-        setName(u.displayName ?? "");
-        const db = getDb();
-        if (db) {
-          const snap = await getDoc(doc(db, "users", u.uid));
-          if (snap.exists()) void scrubLegacyEmail(db, u.uid, snap.data());
-          const un = snap.exists() ? (snap.data().username as string | undefined) : undefined;
-          setCurrentUsername(un ?? null);
-          setUsername(un ?? "");
-        }
+      if (!u) {
+        // Signed out (or switched account): drop everything that belonged to the last user.
+        setName("");
+        setUsername("");
+        setCurrentUsername(null);
+        setOccupation("");
+        setPlace("");
+        setMaxPower("");
+        setProfileState("loading");
+        return;
+      }
+      setName(u.displayName ?? "");
+      const saved = readMaxPower(u.uid);
+      setMaxPower(saved !== null ? String(saved) : "");
+      const db = getDb();
+      if (!db) {
+        setProfileState("ready");
+        return;
+      }
+      setProfileState("loading");
+      try {
+        const snap = await getDoc(doc(db, "users", u.uid));
+        if (cancelled) return;
+        const data = snap.exists() ? snap.data() : null;
+        if (data) void scrubLegacyEmail(db, u.uid, data);
+        const un = typeof data?.username === "string" ? data.username : null;
+        setCurrentUsername(un);
+        setUsername(un ?? "");
+        setOccupation(typeof data?.occupation === "string" ? data.occupation : "");
+        setPlace(typeof data?.place === "string" ? data.place : "");
+        setProfileState("ready");
+      } catch {
+        if (!cancelled) setProfileState("error");
       }
     });
-  }, [auth]);
+    return () => {
+      cancelled = true;
+      unsub();
+    };
+  }, [auth, loadAttempt]);
 
   if (!ready) {
     return (
@@ -82,13 +120,20 @@ export default function Account() {
       return;
     }
     setSaving(true);
+    let signInUpdated = false;
     try {
       await updateProfile(user!, { displayName: v });
+      signInUpdated = true;
       const db = getDb();
       if (db) await setDoc(doc(db, "users", user!.uid), { displayName: v, updatedAt: serverTimestamp() }, { merge: true });
       setNameStatus({ kind: "ok", text: "Name updated." });
     } catch {
-      setNameStatus({ kind: "err", text: "Couldn't save. Try again." });
+      setNameStatus({
+        kind: "err",
+        text: signInUpdated
+          ? "Your name changed on your account but not on your public page. Save again to retry."
+          : "Couldn't save. Try again.",
+      });
     } finally {
       setSaving(false);
     }
@@ -99,6 +144,10 @@ export default function Account() {
     const v = username.trim().toLowerCase();
     if (!validUsername(v)) {
       setUserStatus({ kind: "err", text: "3–20 chars: lowercase letters, numbers, underscore." });
+      return;
+    }
+    if (v === currentUsername) {
+      setUserStatus({ kind: "ok", text: `@${v} is already yours.` });
       return;
     }
     const db = getDb();
@@ -113,8 +162,12 @@ export default function Account() {
         displayName: user!.displayName ?? null,
         photoURL: user!.photoURL ?? null,
       });
+      const old = currentUsername;
       setCurrentUsername(v);
-      setUserStatus({ kind: "ok", text: `@${v} is yours.` });
+      setUserStatus({
+        kind: "ok",
+        text: old ? `@${v} is yours. /${old} no longer leads to your page.` : `@${v} is yours.`,
+      });
     } catch (e) {
       const code = e instanceof Error && "code" in e ? (e as { code?: string }).code : undefined;
       const msg = e instanceof Error ? e.message : "";
@@ -132,11 +185,42 @@ export default function Account() {
     }
   }
 
+  async function saveAbout() {
+    setAboutStatus({ kind: "idle", text: "" });
+    const kw = maxPower === "" ? null : Number(maxPower);
+    if (kw !== null && !(kw > 0 && kw <= 1000)) {
+      setAboutStatus({ kind: "err", text: "Max power at once must be above 0 and at most 1000 kW." });
+      return;
+    }
+    const db = getDb();
+    if (!db) {
+      setAboutStatus({ kind: "err", text: "Database not configured." });
+      return;
+    }
+    setProfileSaving(true);
+    try {
+      await setDoc(doc(db, "users", user!.uid), { occupation, place, updatedAt: serverTimestamp() }, { merge: true });
+      if (kw !== null) saveMaxPower(user!.uid, kw);
+      setAboutStatus({ kind: "ok", text: "Saved." });
+    } catch {
+      setAboutStatus({ kind: "err", text: "Couldn't save. Try again." });
+    } finally {
+      setProfileSaving(false);
+    }
+  }
+
   async function handleDelete() {
     setDeleteStatus({ kind: "idle", text: "" });
     const auth = getFirebaseAuth();
     const db = getDb();
     if (!auth?.currentUser) return;
+    if (profileState !== "ready") {
+      setDeleteStatus({
+        kind: "err",
+        text: "Your saved profile hasn't loaded, so we can't tell which username to release. Reload this page and try again.",
+      });
+      return;
+    }
     setDeleting(true);
     try {
       // Re-authenticate FIRST: deleteUser needs a recent login, and if that
@@ -163,11 +247,20 @@ export default function Account() {
       router.push("/");
     } catch (e) {
       const cleanup = e instanceof Error && e.message === "cleanup";
+      const code = e instanceof Error && "code" in e ? (e as { code?: string }).code : undefined;
       setDeleteStatus({
         kind: "err",
         text: cleanup
           ? "Couldn't remove your saved data, so your account was kept. Check your connection and try again."
-          : "Deletion needs a fresh sign-in — it failed. Try again.",
+          : code === "auth/popup-closed-by-user" || code === "auth/cancelled-popup-request"
+            ? "The sign-in window was closed, so nothing was deleted."
+            : code === "auth/popup-blocked"
+              ? "Your browser blocked the sign-in window. Allow pop-ups for this site and try again."
+              : code === "auth/network-request-failed" || code === "unavailable"
+                ? "You appear to be offline, so nothing was deleted. Check your connection and try again."
+                : code === "permission-denied"
+                  ? "The database refused the request, so your account was kept. If this is your own project, deploy firestore.rules."
+                  : "Couldn't delete the account. Your data may be partly removed; try again to finish.",
       });
       setDeleting(false);
     }
@@ -232,14 +325,26 @@ export default function Account() {
             )}
             <div>
               <p className="text-[15px] font-medium">{user.displayName ?? "No name set"}</p>
-              <p className="font-mono text-[12px] text-zinc-500">{currentUsername ? `@${currentUsername}` : "no username yet"}</p>
+              <p className="font-mono text-[12px] text-zinc-500">
+                {profileState === "loading" ? "loading…" : currentUsername ? `@${currentUsername}` : "no username yet"}
+              </p>
             </div>
           </div>
 
+          {profileState === "error" && (
+            <p role="alert" className="mt-6 font-mono text-[12px] text-orange-300">
+              Couldn&apos;t load your saved profile, so the username below may be out of date.{" "}
+              <button onClick={() => setLoadAttempt((n) => n + 1)} className="cursor-pointer text-zinc-200 underline underline-offset-4 hover:text-white">
+                Try again
+              </button>
+            </p>
+          )}
+
           <div className="mt-7">
-            <label className="text-[13px] text-zinc-400">Display name</label>
+            <label htmlFor="acc-name" className="text-[13px] text-zinc-400">Display name</label>
             <div className="mt-2 flex flex-col gap-2 sm:flex-row">
               <input
+                id="acc-name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 maxLength={40}
@@ -255,11 +360,12 @@ export default function Account() {
           </div>
 
           <div className="mt-7 border-t border-white/10 pt-7">
-            <label className="text-[13px] text-zinc-400">Username — unique across Heliotrope</label>
+            <label htmlFor="acc-username" className="text-[13px] text-zinc-400">Username (unique across Heliotrope)</label>
             <div className="mt-2 flex flex-col gap-2 sm:flex-row">
               <div className="flex flex-1 items-center rounded-xl border border-white/10 bg-black px-4 focus-within:border-white/30">
                 <span className="font-mono text-sm text-zinc-600">@</span>
                 <input
+                  id="acc-username"
                   value={username}
                   onChange={(e) => setUsername(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ""))}
                   maxLength={20}
@@ -269,19 +375,83 @@ export default function Account() {
               </div>
               <button
                 onClick={claimUsername}
-                disabled={checking || saving}
+                disabled={checking || saving || profileState !== "ready"}
                 className="flex cursor-pointer items-center justify-center gap-2 rounded-xl bg-white px-5 py-2.5 text-sm font-medium text-black transition hover:bg-zinc-200 active:scale-[0.98] disabled:cursor-wait disabled:opacity-60"
               >
                 {checking && <span className="spinner" />}
-                {checking ? "Checking…" : currentUsername ? "Change" : "Claim"}
+                {checking ? "Checking…" : profileState === "loading" ? "Loading…" : currentUsername ? "Change" : "Claim"}
               </button>
             </div>
             {userStatus.text && <p className={`mt-2 font-mono text-[12px] ${userStatus.kind === "ok" ? "text-lime-300" : "text-orange-300"}`}>{userStatus.text}</p>}
             {currentUsername && (
               <p className="mt-2 text-[13px] text-zinc-500">
-                Public page: <a href={`/${currentUsername}`} className="inline-block py-2 font-mono text-[12px] text-zinc-200 underline decoration-white/20 underline-offset-4 hover:decoration-white/60">/{currentUsername}</a>
+                Public page: <Link href={`/${currentUsername}`} className="inline-block py-2 font-mono text-[12px] text-zinc-200 underline decoration-white/20 underline-offset-4 hover:decoration-white/60">/{currentUsername}</Link>
               </p>
             )}
+          </div>
+        </section>
+
+        {/* about: occupation, place, max power */}
+        <section className="mt-3 rounded-2xl border border-white/10 bg-[#0a0a0a] p-4 sm:p-8">
+          <h2 className="text-[15px] font-medium">Your setup</h2>
+          <p className="mt-2 text-sm leading-6 text-zinc-500">
+            These choose which appliances are offered first and what we suggest for the most power your site can draw at once.
+            Occupation and place are saved in your profile record, which the database allows anyone to read.
+          </p>
+          <p className="mt-5 text-[13px] text-zinc-400">Occupation</p>
+          <div className="mt-2 flex flex-wrap gap-2" role="radiogroup" aria-label="Occupation">
+            {OCCUPATIONS.map((o) => (
+              <button
+                key={o}
+                type="button"
+                role="radio"
+                aria-checked={occupation === o}
+                onClick={() => setOccupation(o)}
+                className={`min-h-11 cursor-pointer rounded-full border px-4 py-2 text-[13px] transition active:scale-[0.96] ${
+                  occupation === o ? "border-lime-300 bg-lime-300 font-medium text-black" : "border-white/15 text-zinc-400 hover:border-white/40 hover:text-white"
+                }`}
+              >
+                {o}
+              </button>
+            ))}
+          </div>
+          <p className="mt-5 text-[13px] text-zinc-400">Where this runs</p>
+          <div className="mt-2 flex flex-wrap gap-2" role="radiogroup" aria-label="Place">
+            {PLACES.map((p) => (
+              <button
+                key={p}
+                type="button"
+                role="radio"
+                aria-checked={place === p}
+                onClick={() => setPlace(p)}
+                className={`min-h-11 cursor-pointer rounded-full border px-4 py-2 text-[13px] transition active:scale-[0.96] ${
+                  place === p ? "border-lime-300 bg-lime-300 font-medium text-black" : "border-white/15 text-zinc-400 hover:border-white/40 hover:text-white"
+                }`}
+              >
+                {p}
+              </button>
+            ))}
+          </div>
+          <label htmlFor="acc-maxpower" className="mt-5 block text-[13px] text-zinc-400">Max power at once (kW)</label>
+          <input
+            id="acc-maxpower"
+            value={maxPower}
+            onChange={(e) => setMaxPower(e.target.value.replace(/[^0-9.]/g, ""))}
+            inputMode="decimal"
+            placeholder={occupation && place ? `Suggested: ${profileFor(occupation, place).capacityKw}` : "e.g. 10"}
+            className="mt-2 w-full rounded-xl border border-white/10 bg-black px-4 py-2.5 text-sm text-white placeholder:text-zinc-700 focus:border-white/30 focus:outline-none sm:w-48"
+          />
+          <p className="mt-2 font-mono text-[11px] leading-5 text-zinc-600">Kept in this browser only. Set it to your sanctioned load or breaker rating.</p>
+          <div className="mt-4 flex items-center gap-3">
+            <button
+              onClick={saveAbout}
+              disabled={profileSaving || profileState !== "ready"}
+              className="flex cursor-pointer items-center justify-center gap-2 rounded-xl bg-white px-5 py-2.5 text-sm font-medium text-black transition hover:bg-zinc-200 active:scale-[0.98] disabled:cursor-wait disabled:opacity-60"
+            >
+              {profileSaving && <span className="spinner" />}
+              {profileSaving ? "Saving…" : "Save"}
+            </button>
+            {aboutStatus.text && <p className={`font-mono text-[12px] ${aboutStatus.kind === "ok" ? "text-lime-300" : "text-orange-300"}`}>{aboutStatus.text}</p>}
           </div>
         </section>
 
