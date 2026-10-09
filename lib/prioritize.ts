@@ -15,23 +15,43 @@
 
 export type JobClass = { category: string; shiftable: boolean; why: string };
 
+// Whole-word matching only: "ev" must not fire inside "level", "ac" inside "lilac",
+// "iron" inside "environment". Plurals are listed where they matter.
+const w = (...words: string[]) => new RegExp("\\b(?:" + words.join("|") + ")\\b");
+
+const DEVICE_RE = w("laptops?", "phones?", "mobiles?", "tablets?", "power ?banks?");
+const CHARGE_RE = w("charging", "charger", "chargers", "charge");
+const EV_RE = w("evs?", "e-?bikes?", "e-?scooters?", "scooters?", "bikes?", "cars?", "vehicles?", "tesla", "chargers?");
+const SPACE_HEAT_RE = w("room heaters?", "space heaters?", "blowers?", "fan heaters?");
+const WATER_HEAT_RE = w("geysers?", "water heaters?", "heaters?", "boilers?", "baths?", "hot water", "immersion");
+const LAUNDRY_RE = w("wash(?:ing)?", "washers?", "laundry", "dryers?", "clothes", "dishwash(?:er|ing)?");
+const COOLING_RE = w("acs?", "coolers?", "cooling", "air[- ]?con(?:ditioner|ditioning)?", "pre-?cool(?:ing)?");
+const PUMP_RE = w("pumps?", "motors?", "borewells?", "tanks?");
+const HEATING_APPLIANCE_RE = w("ovens?", "kilns?", "furnaces?", "stoves?", "cook(?:ing|er|top)?", "cooktops?", "kettles?", "induction", "irons?");
+const REFRIGERATION_RE = w("fridges?", "refrigerators?", "freezers?");
+const ALWAYS_ON_RE = w("lights?", "lighting", "fans?", "tvs?", "wifi", "routers?", "computers?", "laptops?", "projectors?");
+
 export function classifyJob(name: string): JobClass {
   const k = name.toLowerCase();
-  if (/ev|cars?|bike|scooter|charger|vehicle|tesla/.test(k))
+  if (DEVICE_RE.test(k) && CHARGE_RE.test(k))
+    return { category: "Device charging", shiftable: true, why: "charges in a movable block" };
+  if (EV_RE.test(k))
     return { category: "EV charging", shiftable: true, why: "charges in a movable block" };
-  if (/geyser|heater|water|boiler|bath/.test(k))
+  if (SPACE_HEAT_RE.test(k))
+    return { category: "Space heating", shiftable: true, why: "pre-heats ahead of when it is needed" };
+  if (WATER_HEAT_RE.test(k))
     return { category: "Water heating", shiftable: true, why: "heats once, stays hot for hours" };
-  if (/wash|laundry|dryer|clothes|dishwash/.test(k))
-    return { category: "Laundry", shiftable: true, why: "runs a fixed cycle any time before done-by" };
-  if (/ac\b|cool|air|pre-?cool/.test(k))
-    return { category: "Cooling", shiftable: true, why: "pre-cools ahead of the peak" };
-  if (/pump|motor|borewell|tank/.test(k))
-    return { category: "Pumping", shiftable: true, why: "fills the tank in one movable run" };
-  if (/oven|kiln|furnace|stove|cook|iron/.test(k))
-    return { category: "Heating appliance", shiftable: true, why: "runs a fixed cycle that can slide" };
-  if (/fridge|refrigerator|freezer/.test(k))
+  if (LAUNDRY_RE.test(k))
+    return { category: "Laundry", shiftable: true, why: "runs a fixed cycle any time before it is needed" };
+  if (REFRIGERATION_RE.test(k))
     return { category: "Refrigeration", shiftable: false, why: "must stay powered around the clock" };
-  if (/light|fan\b|tv|wifi|router|computer|laptop|projector|fan(?=s)/.test(k))
+  if (COOLING_RE.test(k))
+    return { category: "Cooling", shiftable: true, why: "pre-cools ahead of the peak" };
+  if (PUMP_RE.test(k))
+    return { category: "Pumping", shiftable: true, why: "fills the tank in one movable run" };
+  if (HEATING_APPLIANCE_RE.test(k))
+    return { category: "Heating appliance", shiftable: true, why: "runs a fixed cycle that can slide" };
+  if (ALWAYS_ON_RE.test(k))
     return { category: "Always-on", shiftable: false, why: "needed continuously while in use" };
   return { category: "Other", shiftable: true, why: "treated as one movable block — correct us if always-on" };
 }
@@ -96,7 +116,7 @@ export function jevRank(jobs: JobInput[], now = new Date()): RankedJob[] {
       const reason =
         hrs < 0.1
           ? "Needed right now — lock it first."
-          : `Ready by ${j.readyBy} (${hrs.toFixed(1)}h out) · ${j.powerKw} kW · +${j.flexHours}h flexible — ${
+          : `Needed by ${j.readyBy} (${hrs.toFixed(1)} h away) · ${j.powerKw} kW · can finish up to ${j.flexHours} h late — ${
               band === "Critical" || band === "High" ? "schedule first." : "fits around the big ones."
             }`;
       return { ...j, score, band, reason, source: "local" as const };
