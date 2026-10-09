@@ -44,6 +44,7 @@ from ...services.carbon_service import CarbonBadRequest, CarbonUnavailable
 from ...services.coordinator import CoordinationError, MultiUserCoordinator
 from ...services.execution_events import apply_event, check_override, transition
 from ...services.execution_store import ExecutionStore, utcnow
+from ...services.load_pool import attach_pool, pool_summary
 from ...services.meter_provider import InMemoryMeterProvider
 from ...services.receding import RecedingHorizon, RemainingInfeasible, now_slot
 from ...services.scheduler_normalizer import NormalizationError
@@ -161,6 +162,11 @@ def _state_payload(record: ScheduleRecord) -> dict:
 
 class PlanRequest(ScheduleRequest):
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
+    #: live plans always join the pool, so later users steer around this one
+    share_pool: bool = True
+    #: the caller's previous live plan: cancelled first so it is not counted as
+    #: someone else's congestion
+    replaces_schedule_id: Optional[str] = None
 
 
 class CoordinatedPlanRequest(CoordinationRequest):
@@ -173,7 +179,18 @@ def plan_single(body: PlanRequest) -> JSONResponse:
     if error is not None:
         return error
     name, scheduler_input, warnings, _fc, _forecast = prepared
-    result = service.run(scheduler_input, name, config=body.solver_config, explain=True)
+    if body.replaces_schedule_id:
+        old = store.get(body.replaces_schedule_id)
+        if old is not None and old.lifecycle not in (
+            ScheduleLifecycle.COMPLETED, ScheduleLifecycle.CANCELLED, ScheduleLifecycle.FAILED
+        ):
+            old.lifecycle = ScheduleLifecycle.CANCELLED
+            store._persist(old)
+    pool = pool_summary(None)
+    solve_input = scheduler_input
+    if body.share_pool:
+        solve_input, pool = attach_pool(store, scheduler_input)
+    result = service.run(solve_input, name, config=body.solver_config, explain=True)
     record = store.create(scheduler_input, result, reason=RescheduleReason.MANUAL)
     record.lifecycle = ScheduleLifecycle.SCHEDULED
     record.context = {
@@ -185,6 +202,7 @@ def plan_single(body: PlanRequest) -> JSONResponse:
     store._persist(record)  # the context is what makes replans faithful after a restart
     payload = _state_payload(record)
     payload["warnings"] = warnings
+    payload["pool"] = pool
     return JSONResponse(status_code=200, content=payload)
 
 
@@ -631,6 +649,10 @@ def _do_replan(record: ScheduleRecord, now: datetime, reason: RescheduleReason, 
         solve_input, notes = receding.remaining_input(base_input, states, delivered, kwh, slot)
     except RemainingInfeasible as exc:
         return {"replanned": False, "error": exc.reason or str(exc), "job_id": exc.job_id}
+    pool = pool_summary(None)
+    if record.context.get("kind", "single") == "single":
+        # Steer around everyone else's live plans; this record is left out of its own pool.
+        solve_input, pool = attach_pool(store, solve_input, [record.schedule_id])
     previous = _placement_of(record)
     result, changes, notes2, lifted = receding.replan(
         base_input, previous, solve_input, slot, reason.value,
@@ -665,6 +687,7 @@ def _do_replan(record: ScheduleRecord, now: datetime, reason: RescheduleReason, 
         "notes": notes + notes2,
         "frozen_lifted": lifted,
         "status": result.status.value,
+        "pool": pool,
     }
 
 

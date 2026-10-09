@@ -127,6 +127,10 @@ class ScheduleRequest(BaseModel):
     carbon_start: Optional[str] = None
     carbon_end: Optional[str] = None
     carbon_resolution_minutes: int = Field(default=15, ge=5, le=60)
+    #: anti-herding: steer away from slots other users' active plans already crowd
+    share_pool: bool = False
+    #: a live schedule to leave out of the pool (e.g. the caller's own plan)
+    pool_exclude_schedule_id: Optional[str] = None
     #: §38. Optional and backward compatible: absent means observed carbon.
     carbon: Optional[CarbonForecastOptions] = None
     #: skip the per-job counterfactual explanations when they are not wanted
@@ -359,18 +363,31 @@ def _forecast_for(request: ScheduleRequest, end=None):
     )
 
 
+def _with_pool(request: ScheduleRequest, scheduler_input):
+    """Attach the anti-herding pool when the caller opts in (aggregate load only)."""
+    from ...services.load_pool import attach_pool, pool_summary
+    from .execution import store
+
+    if not request.share_pool:
+        return scheduler_input, pool_summary(None)
+    exclude = [request.pool_exclude_schedule_id] if request.pool_exclude_schedule_id else []
+    return attach_pool(store, scheduler_input, exclude)
+
+
 @router.post("/schedule")
 def create_schedule(request: ScheduleRequest) -> JSONResponse:
     prepared, error = _prepare(request)
     if error is not None:
         return error
     name, scheduler_input, warnings, forecast_config, forecast = prepared
+    scheduler_input, pool = _with_pool(request, scheduler_input)
 
     result = service.run(
         scheduler_input, name, config=request.solver_config, explain=request.explain
     )
     payload = result.model_dump(mode="json")
     payload["warnings"] = warnings
+    payload["pool"] = pool
     payload["forecast"] = _forecast_summary(request, forecast_config, forecast)
 
     # §35: when the caller supplies actuals, score the schedule against THEM.
@@ -500,9 +517,11 @@ def compare_schedules(request: CompareRequest) -> JSONResponse:
             detail = str(exc.args[0])
             return _err(detail, "invalid_scheduler", 400)
 
+    scheduler_input, pool = _with_pool(request, scheduler_input)
     comparison = service.compare(
         scheduler_input, schedulers=names, config=request.solver_config
     )
     payload = comparison.model_dump(mode="json")
     payload["warnings"] = warnings
+    payload["pool"] = pool
     return JSONResponse(status_code=200, content=payload)
