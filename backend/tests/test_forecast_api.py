@@ -476,3 +476,29 @@ def test_the_observed_carbon_endpoint_is_unchanged():
     )
     assert response.status_code == 200
     assert len(response.json()["points"]) == 96
+
+def test_forecast_mode_reports_co2_as_forecast_based():
+    response = client.post(
+        "/api/v1/schedule",
+        json={
+            "jobs": jobs_payload(),
+            "capacity_kw": 10.0,
+            "scheduler": "GREEDY",
+            "carbon": {"mode": "FORECAST"},
+        },
+    )
+    payload = response.json()
+    assert payload["metrics"]["co2_basis"] == "FORECAST"
+    assert payload["signal"]["basis"] == "FORECAST"
+    assert payload["signal"]["signal_type"] in ("FORECAST", "SYNTHETIC")
+    assert payload["forecast"]["co2_basis"] == "FORECAST"
+
+
+def test_actual_mode_reports_co2_as_observed():
+    response = client.post(
+        "/api/v1/schedule",
+        json={"jobs": jobs_payload(), "capacity_kw": 10.0, "scheduler": "GREEDY"},
+    )
+    payload = response.json()
+    assert payload["metrics"]["co2_basis"] == "OBSERVED"
+    assert payload["forecast"]["co2_basis"] == "OBSERVED"

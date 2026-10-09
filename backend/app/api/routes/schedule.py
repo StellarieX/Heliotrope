@@ -452,6 +452,7 @@ def _forecast_summary(
     if request.carbon is None or forecast is None:
         return {
             "mode": "ACTUAL",
+            "co2_basis": "OBSERVED",
             "note": "no forecast was requested; this schedule was built against the "
             "observed carbon signal, exactly as in Phase 4",
         }
@@ -471,6 +472,13 @@ def _forecast_summary(
         "resolution_minutes": p.resolution_minutes,
         "interval_nominal_coverage": p.interval_nominal_coverage,
         "uncertainty_method": p.uncertainty_method,
+        # The solver minimizes the objective carbon (EXPECTED: the point
+        # forecast; ROBUST: forecast + risk_weight * (upper - forecast)). The
+        # reporting ledger behind metrics.total_co2_kg and co2_saved_* is the
+        # point forecast itself, so those figures are estimates, not readings.
+        "co2_basis": "FORECAST",
+        "co2_note": "total_co2_kg and co2_saved_* are computed from the forecast, not "
+        "from measured grid data; supply carbon.actual_signal to get realized CO2",
         "note": "forecast uncertainty changes which schedule is preferred, not whether "
         "one is feasible; deadlines, energy, capacity, thermal comfort and atomicity "
         "are unchanged",

@@ -799,3 +799,62 @@ def test_the_experiment_runs_both_modes_over_one_forecast_and_one_actual(service
         assert payload["results"][mode]["feasibility_violations"] == 0
         assert payload["results"][mode]["deadline_misses"] == 0
     assert "not a general claim" in payload["verdict"]
+
+# --- ledger vs objective, and the basis label --------------------------------
+
+
+def _forecast_labelled_signal(pairs, start):
+    base = signal_from_pairs(pairs, start=start)
+    return base.model_copy(
+        update={
+            "points": [
+                p.model_copy(update={"signal_type": SignalType.FORECAST, "is_forecast": True})
+                for p in base.points
+            ]
+        }
+    )
+
+
+def test_expected_and_robust_objectives_differ_when_upper_bounds_differ(service):
+    jobs = [washing_machine_job()]
+    horizon = horizon_for(jobs)
+    signal = _forecast_labelled_signal([100.0, 200.0] * horizon.slot_count, horizon.start)
+    upper = repeat_pattern([300, 500], horizon.slot_count)
+    expected, _ = build(
+        service,
+        ForecastConfig(forecast_mode=ForecastMode.EXPECTED, risk_weight=1.0),
+        uncertainty=upper, jobs=jobs, signal=signal,
+    )
+    robust, _ = build(
+        service,
+        ForecastConfig(forecast_mode=ForecastMode.ROBUST, risk_weight=1.0),
+        uncertainty=upper, jobs=jobs, signal=signal,
+    )
+    assert expected.objective_carbon().gco2_per_kwh[:2] == [100, 200]
+    assert robust.objective_carbon().gco2_per_kwh[:2] == [300, 500]
+    # the reporting ledger is the same point forecast in both
+    assert expected.carbon.gco2_per_kwh == robust.carbon.gco2_per_kwh
+
+
+def test_forecast_ledger_is_labelled_forecast_basis_in_the_result(service):
+    jobs = [washing_machine_job()]
+    horizon = horizon_for(jobs)
+    signal = _forecast_labelled_signal([100.0, 200.0] * horizon.slot_count, horizon.start)
+    scheduler_input, _ = build(
+        service,
+        ForecastConfig(forecast_mode=ForecastMode.EXPECTED),
+        uncertainty=repeat_pattern([300, 500], horizon.slot_count),
+        jobs=jobs, signal=signal,
+    )
+    assert scheduler_input.carbon.basis == "FORECAST"
+    result = service.run(scheduler_input, SchedulerName.GREEDY, explain=False)
+    assert result.signal.basis == "FORECAST"
+    assert result.metrics.co2_basis == "FORECAST"
+
+
+def test_observed_ledger_is_labelled_observed_basis(service):
+    scheduler_input, _ = build(service, ForecastConfig())
+    assert scheduler_input.carbon.basis == "OBSERVED"
+    result = service.run(scheduler_input, SchedulerName.GREEDY, explain=False)
+    assert result.metrics.co2_basis == "OBSERVED"
+    assert result.signal.basis == "OBSERVED"

@@ -24,7 +24,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
 from .forecasting import ForecastMode
 from .horizon import SchedulingHorizon
@@ -209,6 +209,15 @@ class BaselineProfile(BaseModel):
         return max(self.power_w) if self.power_w else 0
 
 
+def carbon_basis(is_forecast: bool, signal_type: str = "") -> str:
+    """What a carbon figure is based on: "FORECAST" (predicted) or "OBSERVED".
+
+    Any CO2 total computed from a FORECAST-basis profile is a forecast-based
+    estimate, not a measurement, and must be labelled as such.
+    """
+    return "FORECAST" if is_forecast or signal_type == "FORECAST" else "OBSERVED"
+
+
 class CarbonProfile(BaseModel):
     """Carbon intensity per slot, in integer gCO2/kWh, plus its provenance.
 
@@ -220,6 +229,12 @@ class CarbonProfile(BaseModel):
     signal_type: str = "SYNTHETIC"
     source: str = "unknown"
     is_forecast: bool = False
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def basis(self) -> str:
+        """"FORECAST" when these numbers are predictions, else "OBSERVED"."""
+        return carbon_basis(self.is_forecast, self.signal_type)
 
     def __len__(self) -> int:
         return len(self.gco2_per_kwh)
@@ -264,14 +279,20 @@ class SchedulerInput(BaseModel):
 
     TWO CARBON VIEWS, AND THE DIFFERENCE IS THE WHOLE OF PHASE 5 (§2, §19).
 
-        carbon          — the OBSERVED signal. Every emissions number in
-                          `ScheduleMetrics` is computed against this, because
-                          realized CO2 has to be measured against what actually
-                          happened, not against what we predicted (§35).
+        carbon          — the REPORTING LEDGER. Every emissions number in
+                          `ScheduleMetrics` is computed against this. In ACTUAL
+                          mode it is the observed signal. In FORECAST mode no
+                          observation exists yet, so it holds the PREDICTED
+                          series and `carbon.basis` is "FORECAST": the reported
+                          CO2 and co2_saved are then forecast-based estimates,
+                          and the result says so (`metrics.co2_basis`,
+                          `signal.basis`). Realized CO2 is only available by
+                          scoring against a supplied actual signal (§35).
         objective_carbon — what a scheduler should MINIMIZE. Identical to
                           `carbon` in ACTUAL mode. In EXPECTED mode it is the
                           point forecast; in ROBUST mode it is
-                          `forecast + risk_weight * (upper - forecast)`.
+                          `forecast + risk_weight * (upper - forecast)`, which
+                          differs from EXPECTED wherever upper != forecast.
 
     `objective_carbon()` is the single accessor every scheduler uses for its
     objective coefficients, so all three engines consume forecast uncertainty
@@ -382,6 +403,7 @@ class SchedulerInput(BaseModel):
             "signal_type": self.carbon.signal_type,
             "source": self.carbon.source,
             "is_forecast": self.carbon.is_forecast,
+            "basis": self.carbon.basis,
         }
 
 
@@ -483,6 +505,9 @@ class ScheduleMetrics(BaseModel):
     deadline_misses: Optional[int] = None
     feasibility_violations: Optional[int] = None
     solve_time_ms: Optional[int] = None
+    #: what the CO2 figures above are computed from: "OBSERVED" or "FORECAST".
+    #: "FORECAST" means total_co2_kg / co2_saved_* are forecast-based estimates.
+    co2_basis: Optional[str] = None
 
 
 class SolverInfo(BaseModel):
@@ -513,6 +538,12 @@ class CarbonProvenance(BaseModel):
     slot_count: int = 0
     mean_gco2_per_kwh: float = 0.0
 
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def basis(self) -> str:
+        """"FORECAST" when the CO2 reported against this signal is predicted."""
+        return carbon_basis(self.is_forecast, self.signal_type)
+
 
 class SchedulerResult(BaseModel):
     """The full result of one scheduler run."""
@@ -530,6 +561,15 @@ class SchedulerResult(BaseModel):
     #: per-slot total load in watts, including baseline — for §50 visualization
     slot_load_w: list[int] = Field(default_factory=list)
     baseline_slot_load_w: list[int] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _label_co2_basis(self) -> "SchedulerResult":
+        # The metrics are computed against the signal in `signal`; carry its
+        # basis onto them so a consumer reading only `metrics` cannot mistake
+        # forecast-based CO2 for a measurement.
+        if self.signal is not None and self.metrics.co2_basis is None:
+            self.metrics = self.metrics.model_copy(update={"co2_basis": self.signal.basis})
+        return self
 
 
 class SchedulerComparison(BaseModel):

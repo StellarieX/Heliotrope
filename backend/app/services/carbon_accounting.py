@@ -14,6 +14,12 @@ which is the whole point of an independent accounting layer.
     energy_kwh    = sum over slots of  power_w * slot_minutes / WMIN_PER_KWH
     total_co2_kg  = sum over slots of  power_w * slot_minutes * carbon[t] / CO2_KG_DIVISOR  (6e7)
 
+THE LEDGER IS `scheduler_input.carbon`, NOT `objective_carbon()`. Solvers minimize
+the objective carbon (which may carry a ROBUST risk premium); reported CO2 is
+always computed on the ledger so every engine is scored identically. In FORECAST
+mode the ledger is the predicted series (`carbon.basis == "FORECAST"`), so the
+totals here are forecast-based estimates and `ScheduleMetrics.co2_basis` says so.
+
 BASELINE IS ALWAYS INCLUDED. A fixed fridge emits whether or not anything was
 scheduled around it. Savings are therefore measured against the full ASAP
 baseline, not against a fictional zero-load world.
