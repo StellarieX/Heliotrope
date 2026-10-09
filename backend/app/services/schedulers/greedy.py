@@ -49,6 +49,7 @@ class GreedyScheduler(BaseScheduler):
                 self.place_thermal_control(scheduler_input, job, placement, prefer_low_carbon=True)
             else:
                 self._place_flexible(scheduler_input, job, placement)
+        self._improve(scheduler_input, placement)
         return placement
 
     def _place_flexible(self, scheduler_input: SchedulerInput, job, placement: Placement) -> None:
@@ -69,6 +70,79 @@ class GreedyScheduler(BaseScheduler):
                         "opportunities were taken and the remaining window cannot "
                         "deliver its energy target",
                     )
+
+    #: Passes of the improvement search below. One is usually enough; the bound
+    #: keeps greedy fast (each pass is O(jobs^2) re-placements).
+    improvement_passes = 2
+
+    def _objective_cost(self, scheduler_input: SchedulerInput, placement: Placement) -> float:
+        """Total objective carbon of a placement, in watt * gCO2/kWh * slot."""
+        objective = scheduler_input.objective_carbon()
+        return float(
+            sum(
+                power * objective.at(slot)
+                for slots in placement.power_by_job.values()
+                for slot, power in slots.items()
+                if power > 0
+            )
+        )
+
+    @staticmethod
+    def _take_row(placement: Placement, job_id: str) -> dict[int, int]:
+        row = dict(placement.power_by_job.get(job_id, {}))
+        for slot in row:
+            placement.clear_slot(job_id, slot)
+        placement.power_by_job[job_id] = {}
+        return row
+
+    @staticmethod
+    def _put_row(placement: Placement, job_id: str, row: dict[int, int]) -> None:
+        for slot in list(placement.power_by_job.get(job_id, {})):
+            placement.clear_slot(job_id, slot)
+        placement.power_by_job[job_id] = {}
+        for slot, power in row.items():
+            placement.set(job_id, slot, power)
+
+    def _improve(self, scheduler_input: SchedulerInput, placement: Placement) -> None:
+        """Pairwise ejection search over the EDF result.
+
+        Re-placing one job alone against the others can never help: the others
+        only removed options. The loss in EDF comes from an early job taking the
+        slot a later, less flexible job needed. So for each ordered pair (A, B)
+        with A placed before B, both are lifted out and re-placed with B first.
+        The swap is kept only if total objective carbon strictly drops and the
+        independent validator still accepts the whole schedule. Deterministic:
+        pairs are visited in EDF order.
+        """
+        movable = [
+            job
+            for job in self.job_order(scheduler_input)
+            if job.job_type in (LoadType.DEFERRABLE_ATOMIC, LoadType.DEFERRABLE_INTERRUPTIBLE)
+        ]
+        for _ in range(self.improvement_passes):
+            improved = False
+            for i, first in enumerate(movable):
+                for second in movable[i + 1 :]:
+                    before = self._objective_cost(scheduler_input, placement)
+                    old_first = self._take_row(placement, first.id)
+                    old_second = self._take_row(placement, second.id)
+                    ok = False
+                    try:
+                        self._place_flexible(scheduler_input, second, placement)
+                        self._place_flexible(scheduler_input, first, placement)
+                        ok = (
+                            self._objective_cost(scheduler_input, placement) < before - 1e-9
+                            and self.validator.validate(scheduler_input, placement).ok
+                        )
+                    except PlacementFailure:
+                        ok = False
+                    if ok:
+                        improved = True
+                    else:
+                        self._put_row(placement, first.id, old_first)
+                        self._put_row(placement, second.id, old_second)
+            if not improved:
+                break
 
     def run_order(
         self, scheduler_input: SchedulerInput, runs: list[tuple[int, int]]

@@ -6,6 +6,7 @@ from app.domain.carbon import CarbonPoint, CarbonSignal
 from app.domain.loads import LoadSpec, LoadType
 from app.services.scheduler_service import SchedulerService
 from app.services.schedulers import SchedulerName
+from app.services.schedulers.greedy import GreedyScheduler
 
 from .fixtures import DAY_START
 
@@ -65,3 +66,30 @@ def test_greedy_block_respects_min_chunk_and_trims_dirty_edges():
     slots = [a.slot for a in result.schedule[0].allocations]
     assert len(slots) >= 3 and slots == list(range(slots[0], slots[0] + len(slots)))
     assert {2, 3} <= set(slots)
+
+
+def _atomic(job_id: str, release: int, deadline: int) -> LoadSpec:
+    return LoadSpec(
+        id=job_id, normalized_name=job_id, category="Laundry",
+        job_type=LoadType.DEFERRABLE_ATOMIC, power_kw=2.0, duration_minutes=15,
+        release_at=slot_time(release), deadline_at=slot_time(deadline),
+    )
+
+
+def test_improvement_pass_lowers_co2_on_a_crafted_case():
+    # A is placed first and takes the clean slot 1; B can only use slots 1-2 and
+    # is left with dirty slot 2. Swapping (B on slot 1, A on slot 0) is cheaper.
+    jobs = [_atomic("a", 0, 3), _atomic("b", 1, 3)]
+    service = SchedulerService()
+    scheduler_input, _ = service.build_input(jobs, signal([50, 10, 100, 100]), capacity_kw=3.0)
+
+    plain = GreedyScheduler()
+    plain.improvement_passes = 0
+    before = plain.schedule(scheduler_input)
+    after = GreedyScheduler().schedule(scheduler_input)
+
+    assert before.status.value == after.status.value == "FEASIBLE"
+    assert after.metrics.total_co2_kg < before.metrics.total_co2_kg
+    assert after.metrics.peak_kw <= 3.0 + 1e-9
+    starts = {s.job_id: s.start_slot for s in after.schedule}
+    assert starts == {"a": 0, "b": 1}
