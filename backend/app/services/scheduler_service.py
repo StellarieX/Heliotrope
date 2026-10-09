@@ -200,6 +200,16 @@ class SchedulerService:
                 "CP-SAT found no schedule within its time limit; returning the Greedy "
                 "schedule, which satisfies every hard constraint but is not proven optimal.",
             )
+        if result.status in (ScheduleStatus.INTERNAL_ERROR, ScheduleStatus.INFEASIBLE):
+            # Greedy's schedule passed the independent validator, so a valid schedule
+            # exists; CP-SAT's failure (or withheld output) must not hide it.
+            return self._heuristic_incumbent(
+                greedy,
+                result,
+                f"CP-SAT returned {result.status.value}, but the Greedy schedule satisfies "
+                "every hard constraint (independently validated); returning it, not "
+                "proven optimal.",
+            )
         if result.status is ScheduleStatus.FEASIBLE:
             greedy_objective = placement_objective(scheduler_input, _powers_of(greedy))
             cpsat_objective = placement_objective(scheduler_input, _powers_of(result))
