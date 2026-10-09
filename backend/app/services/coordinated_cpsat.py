@@ -160,7 +160,7 @@ class CoordinatedCPSATScheduler(CPSATScheduler):
     def _extra_terms(self, model, scheduler_input, ctx) -> list:
         n = ctx["n"]
         slot_minutes = ctx["slot_minutes"]
-        mean_carbon = max(1, int(round(scheduler_input.carbon.mean())))
+        mean_carbon = max(1, int(round(scheduler_input.objective_carbon().mean())))
         terms = []
 
         if self.congestion_weight > 0 and self._over_vars:
