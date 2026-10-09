@@ -44,10 +44,11 @@ export function nextSlot(d = new Date()): Date {
 
 export function kindOf(j: StoredJob): LoadKind {
   if (j.shiftable === false || j.jobType === "FIXED") return "FIXED";
+  // The type stored from the backend's answer (Jev or its rules) always wins over the name.
+  if (j.jobType === "THERMAL" || j.jobType === "DEFERRABLE_INTERRUPTIBLE" || j.jobType === "DEFERRABLE_ATOMIC") return j.jobType;
+  // Documents written before the type was stored (or saved while the backend was unreachable): infer from the name.
   const text = `${j.name} ${j.kind || ""}`;
-  if (j.jobType === "THERMAL" || THERMAL_RE.test(text)) return "THERMAL";
-  if (j.jobType === "DEFERRABLE_INTERRUPTIBLE" || j.jobType === "DEFERRABLE_ATOMIC") return j.jobType;
-  // Documents written before the type was stored: infer from the name.
+  if (THERMAL_RE.test(text)) return "THERMAL";
   return INTERRUPTIBLE_RE.test(text) ? "DEFERRABLE_INTERRUPTIBLE" : "DEFERRABLE_ATOMIC";
 }
 
