@@ -852,6 +852,22 @@ def post_override(schedule_id: str, body: OverrideBody) -> JSONResponse:
                 update["deadline_slot"] = sum(
                     1 for s in range(horizon.slot_count) if horizon.slot_start(s) < body.new_deadline_at
                 )
+            if (
+                body.command in (OverrideCommand.START_NOW, OverrideCommand.RUN_ASAP)
+                and not body.new_deadline_at
+                and job.job_type is not LoadType.THERMAL
+                and not (state is not None and state.status is JobStatus.RUNNING)
+            ):
+                # "Run now" means run now: close the window right after the shortest run
+                # that can deliver the job, so the optimizer cannot slide it to a cleaner
+                # hour later. Thermal loads keep their window (their run length is physics).
+                start = update["release_slot"]
+                shortest = (
+                    job.duration_slots or 1
+                    if job.job_type is LoadType.DEFERRABLE_ATOMIC
+                    else max(1, job.minimum_slots())
+                )
+                update["deadline_slot"] = min(horizon.slot_count, max(start + shortest, start + 1))
             release = update.get("release_slot", job.release_slot)
             deadline = update.get("deadline_slot", job.deadline_slot)
             if (

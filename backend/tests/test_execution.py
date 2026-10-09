@@ -501,3 +501,16 @@ def test_override_move_to_empty_window_is_rejected_unchanged():
     )
     assert res.status_code == 422
     assert execution.store.get(sid).scheduler_input.jobs[0].deadline_slot == before
+
+
+def test_start_now_pins_an_atomic_job_to_start_at_once(monkeypatch):
+    """Run now must run now: the optimizer may not slide the job to a cleaner hour later."""
+    sid = plan([washing_machine_job()])
+    now = at(18).replace(minute=20)
+    monkeypatch.setattr(execution, "utcnow", lambda: now)
+    res = client.post(f"/api/v1/schedules/{sid}/override", json={"job_id": "wm-1", "command": "START_NOW"})
+    assert res.status_code == 200, res.text
+    job = next(j for j in res.json()["state"]["jobs"] if j["job_id"] == "wm-1")
+    start = datetime.fromisoformat(job["scheduled_start"])
+    # The slot holding `now` (18:15) or the next one: never a later, cleaner hour.
+    assert now.replace(minute=15) <= start <= now.replace(minute=30), job
