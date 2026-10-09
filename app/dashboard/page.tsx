@@ -29,6 +29,7 @@ import type {
   CarbonSignalResponse,
   CoordinationResult,
   ExecutionState,
+  PoolSummary,
   JobType,
   LoadSpec,
   OverrideCommand,
@@ -295,6 +296,7 @@ export default function Dashboard() {
   // Backend-computed "run now" vs planned comparison for the current plan.
   const [impact, setImpact] = useState<CompareSchedulerResult | null>(null);
   const impactSeq = useRef(0);
+  const [poolInfo, setPoolInfo] = useState<PoolSummary | null>(null);
   const [liveId, setLiveId] = useState<string | null>(null);
   const [liveState, setLiveState] = useState<ExecutionState | null>(null);
   const [liveHistory, setLiveHistory] = useState<ScheduleHistory | null>(null);
@@ -344,6 +346,7 @@ export default function Dashboard() {
       /* storage blocked: nothing persisted to clear */
     }
     setImpact(null);
+    setPoolInfo(null);
     setPlannedJobsSignature(null);
     setLiveId(null);
     setLiveState(null);
@@ -498,9 +501,17 @@ export default function Dashboard() {
       };
       setImpact(null);
       const seq = ++impactSeq.current;
-      const state = await planSchedule(planBody);
+      // Replacing our own plan: the backend cancels it so it doesn't count as someone else's load.
+      const state = await planSchedule({ ...planBody, ...(liveId ? { replaces_schedule_id: liveId } : {}) });
+      setPoolInfo(state.pool ?? null);
       // Fire-and-forget: the impact card is a bonus and must never block or fail the plan.
-      void compareSchedulers({ ...planBody, schedulers: ["ASAP", "CPSAT"] })
+      // It shares the same pool (minus our new plan) so its numbers match what was optimized.
+      void compareSchedulers({
+        ...planBody,
+        schedulers: ["ASAP", "CPSAT"],
+        share_pool: true,
+        pool_exclude_schedule_id: state.schedule_id,
+      })
         .then((cmp) => {
           // Only a real solution carries honest savings; INFEASIBLE/UNKNOWN shows no impact card.
           const raw = cmp.results.CPSAT ?? null;
@@ -1407,6 +1418,12 @@ export default function Dashboard() {
               <p className="mt-0.5 font-mono text-[11px] text-zinc-600">
                 {liveState ? `solver ${liveState.solver_status.toLowerCase()} · refreshes every minute` : "plans your loads on the backend, then tracks execution"}
               </p>
+              {liveState && poolInfo?.applied && poolInfo.active_schedules > 0 && (
+                <p className="mt-0.5 font-mono text-[11px] text-sky-300/80">
+                  spread around {poolInfo.active_schedules} other active plan{poolInfo.active_schedules === 1 ? "" : "s"} · their peak{" "}
+                  {poolInfo.peak_pooled_kw.toFixed(1)} kW
+                </p>
+              )}
             </div>
             <div className="flex items-start gap-2">
               <label className="flex flex-col gap-1 text-[13px] text-zinc-400">

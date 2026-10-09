@@ -188,12 +188,22 @@ export interface ExecutionJobState {
   note: string;
 }
 
+/** Anti-herding pool: aggregate planned load of other users' active plans. */
+export interface PoolSummary {
+  applied: boolean;
+  active_schedules: number;
+  peak_pooled_kw: number;
+  beta: number;
+}
+
 export interface ExecutionState {
   schedule_id: string;
   lifecycle: string;
   version: number;
   solver_status: string;
   jobs: ExecutionJobState[];
+  /** Present on plan responses. */
+  pool?: PoolSummary;
 }
 
 export interface ScheduleHistory {  schedule_id: string;
