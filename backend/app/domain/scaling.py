@@ -393,7 +393,12 @@ def energy_kwh_from_wmin_sum(total_wmin: int) -> float:
 
 
 def assert_objective_headroom(
-    max_jobs: int, max_slots: int, max_power_w: int, max_carbon: int, max_slot_minutes: int
+    max_jobs: int,
+    max_slots: int,
+    max_power_w: int,
+    max_carbon: int,
+    max_slot_minutes: int,
+    weight_factor: int = 1,
 ) -> None:
     """Fail loudly rather than let the solver return a wrapped-around objective."""
     if max_jobs > MAX_JOBS:
@@ -411,6 +416,7 @@ def assert_objective_headroom(
         * max_carbon
         * max_slot_minutes
         * OBJECTIVE_WEIGHT_SCALE
+        * max(1, weight_factor)
     )
     if worst > INT64_SAFETY:
         raise ScalingError(

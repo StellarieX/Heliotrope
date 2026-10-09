@@ -21,6 +21,7 @@ Flexible jobs are placed into that headroom, never into the raw capacity, so a
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
@@ -202,6 +203,7 @@ class SchedulerNormalizer:
             max_power_w=max_power_w,
             max_carbon=max_carbon,
             max_slot_minutes=horizon.slot_minutes,
+            weight_factor=self._weight_factor(objective or ObjectiveWeights(), horizon.slot_count),
         )
 
         scheduler_input = SchedulerInput(
@@ -304,6 +306,17 @@ class SchedulerNormalizer:
                 )
 
     # --- flexible jobs ------------------------------------------------------
+
+    @staticmethod
+    def _weight_factor(objective: ObjectiveWeights, slot_count: int) -> int:
+        """How many unit-weight carbon terms the weighted objective can add up to.
+
+        Peak is charged over the whole horizon (bounded like one carbon term) and
+        delay grows with lateness (up to `slot_count` per slot), so both scale the
+        worst case by their weights. The cost term is in tariff units and is not
+        covered here.
+        """
+        return int(math.ceil(objective.carbon + objective.peak + objective.delay * slot_count)) or 1
 
     def _normalize_job(
         self,

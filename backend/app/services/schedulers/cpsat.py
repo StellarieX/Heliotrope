@@ -593,8 +593,8 @@ class CPSATScheduler(BaseScheduler):
         peak weight of 1.0 puts one watt of peak on the same footing as one watt
         drawn in every slot. That keeps the term comparable with the carbon term.
         Worst case it is bounded by jobs x slots x power x carbon x slot_minutes
-        (the peak never exceeds the summed job powers), which is exactly the
-        bound `assert_objective_headroom` already checks.
+        per unit of peak weight (the peak never exceeds the summed job powers);
+        `assert_objective_headroom` scales its check by the objective weights.
         """
         mean_carbon = int(round(scheduler_input.objective_carbon().mean()))
         peak_cap = scheduler_input.capacity_w
