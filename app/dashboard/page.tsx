@@ -44,7 +44,7 @@ import { useLoadClassification } from "./useLoadClassification";
 import { FORECAST_MODE_LABEL, loadTypeLabel, signalTypeLabel, solverLabel } from "./labels";
 import Onboarding from "./Onboarding";
 import { scrubLegacyEmail } from "../../lib/profile";
-import { readMaxPower } from "../../lib/occupations";
+import { loadMaxPower, readMaxPower } from "../../lib/occupations";
 
 type Profile = { username?: string; occupation?: string; place?: string; rooms?: number | null; onboarded?: boolean };
 
@@ -431,12 +431,21 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (!user) return;
-    const kw = readMaxPower(user.uid);
-    if (kw === null) return;
-    queueMicrotask(() => {
+    const apply = (kw: number | null) => {
+      if (kw === null) return;
       if (!capTouched.current.live) setLiveCapacity(String(kw));
       if (!capTouched.current.coord) setCoordCapacity(String(kw));
+    };
+    const cached = readMaxPower(user.uid);
+    queueMicrotask(() => apply(cached));
+    // Then the account's saved value, so a second device gets it too.
+    let cancelled = false;
+    void loadMaxPower(user.uid).then((kw) => {
+      if (!cancelled && kw !== cached) apply(kw);
     });
+    return () => {
+      cancelled = true;
+    };
   }, [user, profile?.onboarded]);
 
   const refreshLive = useCallback(async (id: string) => {

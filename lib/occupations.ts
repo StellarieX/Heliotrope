@@ -1,3 +1,6 @@
+import { doc, getDoc, serverTimestamp, setDoc } from "firebase/firestore";
+import { getDb } from "./firebase";
+
 // What we know about the person's building, turned into starting points.
 //
 // Onboarding asks "what do you do" and "where will this run". This module is
@@ -158,16 +161,47 @@ export function profileFor(occupation: string, place: string, rooms?: number | n
   return { primary, more: [...placeFirst, ...rest], capacityKw: capacity, capacityNote: note, advice: ADVICE[key] };
 }
 
-// "Max power at once" has no field in the public profile document, so the chosen
-// value is kept in this browser. The dashboard can read it as its starting value.
+// "Max power at once" is private (it describes the site), so it never goes in the
+// world-readable profile. It lives in the owner-only `users/{uid}/settings/prefs`
+// document, with this browser's copy as a fast cache for the first render.
 const capacityKey = (uid: string) => `heliotrope.maxPowerKw.${uid}`;
 
-export function saveMaxPower(uid: string, kw: number): void {
+function cacheMaxPower(uid: string, kw: number): void {
   try {
     localStorage.setItem(capacityKey(uid), String(kw));
   } catch {
-    /* storage unavailable: the dashboard falls back to its own default */
+    /* storage unavailable: the account copy still holds it */
   }
+}
+
+export function saveMaxPower(uid: string, kw: number): void {
+  cacheMaxPower(uid, kw);
+  const db = getDb();
+  if (!db) return;
+  void setDoc(
+    doc(db, "users", uid, "settings", "prefs"),
+    { maxPowerKw: kw, updatedAt: serverTimestamp() },
+    { merge: true }
+  ).catch(() => {
+    /* offline or rules: the browser copy is still used */
+  });
+}
+
+/** The saved value from the account (any device), refreshing the browser cache. */
+export async function loadMaxPower(uid: string): Promise<number | null> {
+  const db = getDb();
+  if (!db) return readMaxPower(uid);
+  try {
+    const snap = await getDoc(doc(db, "users", uid, "settings", "prefs"));
+    const kw = snap.exists() ? Number(snap.data().maxPowerKw) : NaN;
+    if (Number.isFinite(kw) && kw > 0) {
+      cacheMaxPower(uid, kw);
+      return kw;
+    }
+  } catch {
+    /* fall back to the browser copy */
+  }
+  return readMaxPower(uid);
 }
 
 export function readMaxPower(uid: string): number | null {
