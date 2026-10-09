@@ -139,9 +139,9 @@ def _score_one(load: PriorityLoad, importance: Optional[tuple[float, float]]) ->
     score = int(round(100 * raw))
     band = _band(score)
 
-    when = "needed right now" if load.hours_until_ready < 0.1 else f"ready in {load.hours_until_ready:.1f}h"
-    flex = f"+{load.flex_hours:g}h flexible"
-    verdict = "schedule first." if band in ("Critical", "High") else "fits around the big ones."
+    when = "needed right now" if load.hours_until_ready < 0.1 else f"needed in {load.hours_until_ready:.1f} h"
+    flex = f"can finish up to {load.flex_hours:g} h late"
+    verdict = "scheduled first." if band in ("Critical", "High") else "fits around the bigger loads."
     if trusted:
         label = _IMPORTANCE_LABELS[min(3, max(0, round(importance[0])))]  # type: ignore[index]
         why = f"{when} · {load.power_kw:g} kW · {flex} · Jev: {label} ({importance[1]:.0%} sure) — {verdict}"  # type: ignore[index]

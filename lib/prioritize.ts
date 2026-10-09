@@ -117,7 +117,7 @@ export function jevRank(jobs: JobInput[], now = new Date()): RankedJob[] {
         hrs < 0.1
           ? "Needed right now — lock it first."
           : `Needed by ${j.readyBy} (${hrs.toFixed(1)} h away) · ${j.powerKw} kW · can finish up to ${j.flexHours} h late — ${
-              band === "Critical" || band === "High" ? "schedule first." : "fits around the big ones."
+              band === "Critical" || band === "High" ? "scheduled first." : "fits around the bigger loads."
             }`;
       return { ...j, score, band, reason, source: "local" as const };
     })
