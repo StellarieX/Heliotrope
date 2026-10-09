@@ -15,9 +15,9 @@ function clock(iso: string | null | undefined) {
   return d.toDateString() === new Date().toDateString() ? t : `${d.toLocaleDateString([], { weekday: "short" })} ${t}`;
 }
 
-function Tile({ label, value, note }: { label: string; value: string; note?: string }) {
+function Tile({ label, value, note, hint }: { label: string; value: string; note?: string; hint?: string }) {
   return (
-    <div className="min-w-0 rounded-xl border border-white/10 px-4 py-3">
+    <div title={hint} className="min-w-0 rounded-xl border border-white/10 px-4 py-3">
       <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-zinc-600">{label}</p>
       <p className="mt-1 truncate text-xl font-semibold tracking-tight">{value}</p>
       {note && <p className="mt-0.5 truncate font-mono text-[11px] text-zinc-600">{note}</p>}
@@ -65,7 +65,7 @@ function PoolChart({ stats }: { stats: PoolStats }) {
       <div className="mt-1 flex flex-wrap justify-between gap-x-3 gap-y-0.5 font-mono text-[10px] text-zinc-600">
         <span>{clock(stats.start)}</span>
         <span className="order-last w-full text-center sm:order-none sm:w-auto">
-          {geo.hasLoad ? "dashed white line = average · amber line = busiest moment" : "nothing planned in this window"}
+          {geo.hasLoad ? "dashed: average · amber: busiest" : "nothing planned in this window"}
         </span>
         <span>{clock(stats.end)}</span>
       </div>
@@ -126,7 +126,7 @@ export default function PoolPanel({ enabled, refreshKey }: { enabled: boolean; r
         <div>
           <h2 className="text-[15px] font-medium">Everyone&apos;s planned load</h2>
           <p className="mt-0.5 font-mono text-[11px] text-zinc-600">
-            all active schedules on this server · updated {clock(stats.generated_at)}
+            all active schedules · updated {clock(stats.generated_at)}
           </p>
         </div>
         {failure && (
@@ -137,37 +137,31 @@ export default function PoolPanel({ enabled, refreshKey }: { enabled: boolean; r
       </div>
 
       <div className="mt-4 grid grid-cols-2 gap-2 lg:grid-cols-4">
-        <Tile label="Active schedules" value={String(stats.active_schedules)} />
-        <Tile label="Loads planned" value={String(stats.active_loads)} />
-        <Tile label="Planned energy" value={`${stats.total_planned_kwh.toFixed(1)} kWh`} note="electricity they will use" />
+        <Tile label="Active schedules" value={String(stats.active_schedules)} hint="Schedules currently planned on this server." />
+        <Tile label="Loads planned" value={String(stats.active_loads)} hint="Individual loads across those schedules." />
+        <Tile label="Planned energy" value={`${stats.total_planned_kwh.toFixed(1)} kWh`} hint="kWh (kilowatt-hours) is the electricity used over time, the unit your meter counts." />
         <Tile
           label="Busiest moment"
           value={empty ? "—" : `${stats.peak_kw.toFixed(1)} kW`}
           note={empty ? "nothing planned yet" : `at ${clock(stats.peak_at)}`}
+          hint={
+            "kW is how much power is drawn at one moment." +
+            (stats.peak_to_average !== null && stats.peak_to_average > 0
+              ? ` The busiest moment draws ${stats.peak_to_average.toFixed(1)}× the average; the lower this is, the more evenly the load is spread.`
+              : "")
+          }
         />
       </div>
 
       {empty ? (
-        <p className="mt-4 text-[13px] leading-6 text-zinc-500">
-          No schedules are active right now. Once you (or anyone else) schedule loads, their combined power shows up here.
-        </p>
+        <p className="mt-4 text-[13px] leading-6 text-zinc-500">No schedules are active right now.</p>
       ) : (
-        <>
-          <PoolChart stats={stats} />
-          {stats.peak_to_average !== null && stats.peak_to_average > 0 && (
-            <p className="mt-2 font-mono text-[11px] text-zinc-500">
-              The busiest moment draws {stats.peak_to_average.toFixed(1)}× the average. The lower this is, the more evenly the load is spread.
-            </p>
-          )}
-        </>
+        <PoolChart stats={stats} />
       )}
 
       <p className="mt-4 text-[13px] leading-6 text-zinc-500">
-        When everyone picks the same clean hour, that hour becomes a new peak. Heliotrope nudges each new schedule away from crowded hours.
-        {!stats.pool.enabled ? " (That spreading is switched off on this server right now.)" : ""}
-      </p>
-      <p className="mt-1 font-mono text-[11px] leading-5 text-zinc-700">
-        kW is how much power is drawn at one moment; kWh is the electricity used over time.
+        Heliotrope nudges each new schedule away from crowded hours, so peaks don&apos;t stack up.
+        {!stats.pool.enabled ? " (Switched off on this server right now.)" : ""}
       </p>
     </div>
   );

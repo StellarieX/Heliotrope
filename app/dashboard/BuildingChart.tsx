@@ -39,7 +39,7 @@ export default function BuildingChart({ points }: { points: CoordinationAggregat
     return (
       <div>
         <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-500">
-          Power used at once · kilowatts (kW)
+          Power used at once · kW
         </p>
         <p className="mt-4 font-mono text-[12px] text-zinc-600">No combined profile yet.</p>
       </div>
@@ -50,11 +50,10 @@ export default function BuildingChart({ points }: { points: CoordinationAggregat
     <div>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-500">
-          Power used at once · kilowatts (kW)
+          Power used at once · kW
         </p>
-        <div className="flex items-center gap-3 font-mono text-[10px] text-zinc-500">
+        <div className="flex items-center gap-3 font-mono text-[10px] text-zinc-500" title="Green: all loads together. Grey: only the loads that can move. Dashed: your limit.">
           <span className="flex items-center gap-1"><i className="block h-[3px] w-4 rounded bg-lime-300 not-italic" /> all loads</span>
-          <span className="flex items-center gap-1"><i className="block h-[3px] w-4 rounded bg-zinc-500 not-italic" /> movable loads</span>
           <span className="flex items-center gap-1"><i className="block h-[3px] w-4 rounded bg-white/40 not-italic" /> limit</span>
         </div>
       </div>

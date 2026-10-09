@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { CarbonSignalResponse } from "../../lib/api/types";
 import type { CarbonForecastResponse, ForecastMode } from "../../lib/api/client";
 import { FORECAST_MODE_LABEL as MODE_LABEL, signalTypeLabel } from "./labels";
+import Hint from "./Hint";
 
 const MODE_HELP: Record<ForecastMode, string> = {
   ACTUAL: "Now: plans with the grid signal as it is reported today.",
@@ -195,13 +196,11 @@ export default function CarbonChart({
     <div>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-500">
-            Grid carbon · grams of CO₂ per kWh
+          <p className="flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-500">
+            Grid carbon · g CO₂ per kWh
+            <Hint text="How much CO₂ is released to make each unit of electricity (kWh). Lower is cleaner, so the planner runs your loads in the dips. The dashed line marks now." />
           </p>
-          <p className="mt-1 max-w-md text-[12px] leading-5 text-zinc-600">
-            How much CO₂ is released to make each unit of electricity (kWh). Lower is cleaner, so the planner runs your loads in the dips.
-          </p>
-          <div role="group" aria-label="Which signal to plan with" className="mt-2 flex flex-wrap items-center gap-1.5 font-mono text-[11px]">
+          <div role="group" aria-label="Which signal to plan with" className="mt-3 flex flex-wrap items-center gap-1.5 font-mono text-[11px]">
             {(["ACTUAL", "EXPECTED", "ROBUST"] as const).map((m) => (
               <button
                 key={m}
@@ -252,7 +251,7 @@ export default function CarbonChart({
             }`}
             title={
               isForecastActive
-                ? `forecast model: ${forecast?.provenance.model}`
+                ? `Forecast model: ${forecast?.provenance.model}.${forecast ? ` The likely range covers ${Math.round(forecast.provenance.interval_nominal_coverage * 100)}% of past outcomes.` : ""}`
                 : `source: ${signal.source}`
             }
           >
@@ -369,18 +368,15 @@ export default function CarbonChart({
       <div className="mt-1 flex flex-wrap justify-between gap-x-3 gap-y-0.5 font-mono text-[10px] text-zinc-600">
         <span>{clock(startTime)}</span>
         <span className="order-last w-full text-center sm:order-none sm:w-auto">
-          lowest {Math.round(min)} · highest {Math.round(max)} g CO₂ per kWh
-          {showNow ? " · dashed line = now" : ""}
-          {isForecastActive && forecast
-            ? ` · likely range covers ${Math.round(forecast.provenance.interval_nominal_coverage * 100)}% of past outcomes`
-            : ""}
+          lowest {Math.round(min)} · highest {Math.round(max)}
         </span>
         <span>{clock(endTime)}</span>
       </div>
-      <p className="mt-2 text-[12px] leading-5 text-zinc-600" aria-live="polite">
-        {MODE_HELP[activeMode]}
-        {activeMode !== "ACTUAL" && !isForecastActive ? " No forecast is available right now, so the chart shows the current signal." : ""}
-      </p>
+      {activeMode !== "ACTUAL" && !isForecastActive && (
+        <p className="mt-2 text-[12px] leading-5 text-zinc-600" aria-live="polite">
+          No forecast available right now, so the chart shows the current signal.
+        </p>
+      )}
     </div>
   );
 }
