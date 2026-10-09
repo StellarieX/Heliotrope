@@ -414,6 +414,9 @@ export default function Dashboard() {
     return onAuthStateChanged(auth, (u) => {
       setUser(u);
       setReady(true);
+      // A menu left open by the previous account would leave its invisible
+      // backdrop over the page and swallow the next user's first click.
+      setMenuOpen(false);
       if (u) {
         void loadAll(u);
       } else {
