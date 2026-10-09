@@ -854,6 +854,16 @@ def post_override(schedule_id: str, body: OverrideBody) -> JSONResponse:
                 )
             release = update.get("release_slot", job.release_slot)
             deadline = update.get("deadline_slot", job.deadline_slot)
+            if (
+                body.command is OverrideCommand.MOVE
+                and release == job.release_slot
+                and deadline == job.deadline_slot
+            ):
+                return _err(
+                    "cannot apply: the window is unchanged (the new time is past the end of "
+                    "the planning horizon or within the current slot); plan again for a longer window",
+                    "override_rejected", 422,
+                )
             if release >= deadline:
                 return _err(
                     f"cannot apply: the new window is empty (release slot {release}, "
