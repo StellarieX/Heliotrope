@@ -7,6 +7,7 @@ import type {
   ExecutionState,
   HealthResponse,
   LoadSpec,
+  PoolStats,
   ScheduleEventResult,
   ScheduleOverrideBody,
   ScheduleOverrideResult,
@@ -102,13 +103,13 @@ function requireId(scheduleId: string): string {
   return encodeURIComponent(scheduleId);
 }
 
-async function postJson<T>(path: string, body: unknown): Promise<T> {
+async function postJson<T>(path: string, body: unknown, timeoutMs?: number): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
     cache: "no-store",
-    signal: timeoutSignal(),
+    signal: timeoutMs ? AbortSignal.timeout(timeoutMs) : timeoutSignal(),
   });
   return read<T>(res);
 }
@@ -280,11 +281,28 @@ export async function compareSchedulers(body: Record<string, unknown>): Promise<
   return postJson<ScheduleCompareResponse>("/api/v1/schedule/compare", body);
 }
 
-/** Phase 3: free text -> classification + canonical LoadSpec + feasibility.
- *  Runs against the rules-first backend classifier, so it works offline and
- *  returns the same answer for the same input. */
+/** Free text -> classification + canonical LoadSpec + feasibility. Jev decides when the
+ *  backend has a key (`provider` = "jev"); otherwise the built-in rules answer
+ *  (`provider` = "rule_based"). Typed-as-you-go, so it gives up sooner than a plan. */
 export async function classifyLoad(body: ClassifyRequest): Promise<ClassifyResponse> {
-  return postJson<ClassifyResponse>("/api/v1/loads/classify", body);
+  return postJson<ClassifyResponse>("/api/v1/loads/classify", body, 15_000);
+}
+
+export interface PoolStatsParams {
+  start?: string;
+  end?: string;
+  resolution_minutes?: number;
+}
+
+/** Everyone's planned load: the aggregate of all active schedules on this server.
+ *  A 404 means the endpoint isn't deployed yet; callers treat that as "unavailable". */
+export async function getPoolStats(params: PoolStatsParams = {}): Promise<PoolStats> {
+  const q = new URLSearchParams();
+  if (params.start) q.set("start", params.start);
+  if (params.end) q.set("end", params.end);
+  if (params.resolution_minutes) q.set("resolution_minutes", String(params.resolution_minutes));
+  const qs = q.toString();
+  return getJson<PoolStats>(`/api/v1/pool/stats${qs ? `?${qs}` : ""}`);
 }
 
 export interface PriorityLoadIn {

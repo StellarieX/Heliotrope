@@ -196,6 +196,29 @@ export interface PoolSummary {
   beta: number;
 }
 
+/** GET /api/v1/pool/stats: the combined planned load of every active schedule. */
+export interface PoolStats {
+  generated_at: string;
+  start: string;
+  end: string;
+  resolution_minutes: number;
+  active_schedules: number;
+  active_loads: number;
+  total_planned_kwh: number;
+  peak_kw: number;
+  peak_at: string | null;
+  average_kw: number;
+  /** Peak divided by average; null when nothing is planned. */
+  peak_to_average: number | null;
+  slots: Array<{ timestamp: string; kw: number }>;
+  pool: {
+    enabled: boolean;
+    beta: number;
+    ref_kw: number;
+    scale_kw: number;
+  };
+}
+
 export interface ExecutionState {
   schedule_id: string;
   lifecycle: string;
