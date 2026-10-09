@@ -127,6 +127,12 @@ def _refresh_lifecycle(record: ScheduleRecord, now: datetime) -> None:
 
 def _state_payload(record: ScheduleRecord) -> dict:
     v = record.current_version()
+    base = record.scheduler_input
+    deadlines = (
+        {j.id: base.horizon.slot_end(j.deadline_slot - 1).isoformat() for j in base.jobs}
+        if base is not None
+        else {}
+    )
     return {
         "schedule_id": record.schedule_id,
         "lifecycle": record.lifecycle.value,
@@ -139,6 +145,7 @@ def _state_payload(record: ScheduleRecord) -> dict:
                 "status": s.status.value,
                 "scheduled_start": s.scheduled_start.isoformat() if s.scheduled_start else None,
                 "scheduled_end": s.scheduled_end.isoformat() if s.scheduled_end else None,
+                "deadline_at": deadlines.get(s.job_id),
                 "energy_delivered_kwh": s.energy_delivered_kwh,
                 "expected_energy_kwh": s.expected_energy_kwh,
                 "note": s.note,
