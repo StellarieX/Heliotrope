@@ -17,6 +17,9 @@ Behaviour this module guarantees:
   * Identical requests are served from a small cache. Only successes are cached.
   * A per-process cap on upstream calls per minute protects the key, because this
     API is public and unauthenticated.
+  * After a transport failure, a 5xx, a rejected key or an exhausted cap, Jev is
+    skipped for NEGATIVE_CACHE_S seconds and callers fall back immediately, so an
+    outage costs one slow request instead of a slow request every time.
 """
 
 from __future__ import annotations
@@ -32,10 +35,11 @@ import httpx
 
 from ..core import config
 
-REQUEST_TIMEOUT_S = 10.0
+REQUEST_TIMEOUT_S = 8.0
 RETRY_STATUSES = (429, 529)
 RETRY_DELAY_S = 0.6
 _CACHE_MAX = 512
+NEGATIVE_CACHE_S = 30.0
 
 
 class JevError(RuntimeError):
@@ -49,6 +53,8 @@ class JevNotConfigured(JevError):
 _cache: dict[str, dict[str, Any]] = {}
 _lock = threading.Lock()
 _call_times: deque[float] = deque()
+_down_until: float = 0.0
+_down_reason: str = ""
 
 
 def resolve_api_key(explicit: str | None = None) -> str | None:
@@ -58,9 +64,26 @@ def resolve_api_key(explicit: str | None = None) -> str | None:
 
 def clear_state() -> None:
     """Reset the cache and the call window (tests)."""
+    global _down_until, _down_reason
     with _lock:
         _cache.clear()
         _call_times.clear()
+        _down_until = 0.0
+        _down_reason = ""
+
+
+def _mark_down(reason: str) -> None:
+    global _down_until, _down_reason
+    with _lock:
+        _down_until = time.monotonic() + NEGATIVE_CACHE_S
+        _down_reason = reason
+
+
+def _down_message() -> str | None:
+    with _lock:
+        if time.monotonic() < _down_until:
+            return _down_reason
+    return None
 
 
 def _within_rate_limit() -> bool:
@@ -95,7 +118,12 @@ def ask(
     if hit is not None:
         return hit
 
+    down = _down_message()
+    if down is not None:
+        raise JevError(f"{down} (skipping Jev for a short while)")
+
     if not _within_rate_limit():
+        _mark_down("Jev call limit reached")
         raise JevError("Jev call limit reached; try again in a minute")
 
     url = f"{config.JEV_BASE_URL}/v1/systemone"
@@ -111,6 +139,7 @@ def ask(
             if resp.status_code in RETRY_STATUSES:
                 last = f"Jev is busy (HTTP {resp.status_code})"
             elif resp.status_code == 401:
+                _mark_down("Jev rejected the API key (HTTP 401)")
                 raise JevError("Jev rejected the API key (HTTP 401)")
             elif resp.status_code == 422:
                 raise JevError(f"Jev rejected the request (HTTP 422): {resp.text[:200]}")
@@ -119,11 +148,14 @@ def ask(
                     resp.raise_for_status()
                     payload = resp.json()
                 except (httpx.HTTPError, ValueError) as exc:
+                    if resp.status_code >= 500:
+                        _mark_down(f"Jev server error (HTTP {resp.status_code})")
                     raise JevError(f"Jev request failed: {exc}") from exc
                 break
         if attempt == 0:
             time.sleep(RETRY_DELAY_S)
     if payload is None:
+        _mark_down(last or "Jev did not answer")
         raise JevError(last or "Jev did not answer")
 
     answers = payload.get("answers") if isinstance(payload, dict) else None
