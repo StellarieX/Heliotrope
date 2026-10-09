@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { onAuthStateChanged, signInWithPopup, type User } from "firebase/auth";
 import { getFirebaseAuth, getGoogleProvider } from "../lib/firebase";
+import type { SignalType } from "../lib/api/types";
 import LivePlan from "./LivePlan";
 
 function Avatar({ name, email, photoURL }: { name: string | null; email: string | null; photoURL: string | null }) {
@@ -34,6 +35,8 @@ export default function Home() {
   const [authError, setAuthError] = useState<string | null>(null);
   const [signingIn, setSigningIn] = useState(false);
   const [navigating, setNavigating] = useState(false);
+  // Which kind of grid signal the backend reports, once the live demo has read it.
+  const [signalType, setSignalType] = useState<SignalType | null>(null);
   const navTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   function scrollToSection(hash: string) {
@@ -167,12 +170,13 @@ export default function Home() {
           </h1>
           <p className="rise mx-auto mt-8 max-w-xl text-[15px] leading-8 text-zinc-400 sm:text-base sm:leading-8" style={{ animationDelay: "240ms" }}>
             Named for the flower that leans toward the sun, Heliotrope leans your
-            loads the same way — solving every 15 minutes for the schedule that
-            minimizes carbon by favoring clean electricity. Always ready on time.
+            loads the same way: it plans each one on a 15-minute grid, favouring
+            the hours when the electricity is cleaner, and never past the time
+            you need it by.
           </p>
           <div className="rise mt-12 flex flex-col items-stretch justify-center gap-4 sm:flex-row sm:items-center" style={{ animationDelay: "360ms" }}>
             <a href="#live" onClick={scrollToSection("#live")} className="rounded-full bg-white px-8 py-3.5 text-center text-sm font-medium text-black transition hover:bg-zinc-200 active:scale-[0.98]">
-              See it on today&apos;s grid
+              See a live example
             </a>
             <a href="#how" onClick={scrollToSection("#how")} className="rounded-full border border-white/15 px-8 py-3.5 text-center text-sm text-zinc-300 transition hover:border-white/40 hover:text-white active:scale-[0.98]">
               How it works →
@@ -180,7 +184,7 @@ export default function Home() {
           </div>
         </section>
 
-        <LivePlan />
+        <LivePlan onSignalType={setSignalType} />
 
         {/* how */}
         <section id="how" className="mx-auto max-w-7xl px-6 py-24 sm:px-10 sm:py-32 lg:px-16">
@@ -193,9 +197,9 @@ export default function Home() {
             </div>
             <ol className="divide-y divide-white/10 border-y border-white/10">
               {[
-                ["You say what's needed", "“Car charged by 7am. Hot water by 6. Laundry tonight.” That's all it asks."],
-                ["It finds the clean window", "Power dips and peaks through the day. Heliotrope slides each load into a clean, cheap slot that still meets your time."],
-                ["It's ready, with proof", "Every run shows why: what moved, what it saved, and the guarantee it never misses your time."],
+                ["You say what's needed", "“Car charged by 7am. Hot water by 6. Laundry tonight.” Plus the power rating on each appliance's label."],
+                ["It finds the clean window", "The grid's carbon intensity rises and falls through the day. Heliotrope slides each load into a cleaner stretch that still meets your time."],
+                ["It's ready, with the reasons", "Every plan shows why: what moved and how much CO₂ it saves against running everything now. If a needed-by time can't be met, it says so instead of hiding it."],
               ].map(([t, d], i) => (
                 <li key={t} className="flex gap-6 py-8">
                   <span className="font-mono text-[12px] text-zinc-600">0{i + 1}</span>
@@ -222,27 +226,27 @@ export default function Home() {
               {[
                 {
                   title: "EV charging",
-                  kind: "Interruptible",
-                  desc: "Needs a total amount of energy by a deadline. It can pause and resume, so it fills the cleanest hours first.",
-                  need: "needs: kW, kWh, ready-by time",
+                  kind: "Can pause and resume",
+                  desc: "Needs a total amount of energy by a deadline. It can stop and start, so it fills the cleaner hours first.",
+                  need: "you give: power (kW), energy (kWh), needed-by time",
                 },
                 {
                   title: "Water heating",
-                  kind: "Thermal",
-                  desc: "Heat is stored. The solver heats ahead of time and keeps the water inside your comfort band.",
-                  need: "needs: kW, comfort band, ready-by time",
+                  kind: "Keeps a temperature",
+                  desc: "Heat is stored. The solver heats ahead of time and keeps the water inside a comfort band. The band and the heat-loss numbers are typical estimates, not measurements.",
+                  need: "you give: power (kW), needed-by time",
                 },
                 {
                   title: "Laundry",
-                  kind: "One continuous run",
-                  desc: "Once a cycle starts it must finish. The solver picks the single cleanest start that meets your time.",
-                  need: "needs: kW, cycle length, ready-by time",
+                  kind: "Runs in one go",
+                  desc: "Once a cycle starts it must finish. The solver picks the cleanest single start that meets your time.",
+                  need: "you give: power (kW), cycle length, needed-by time",
                 },
                 {
                   title: "Pumps and motors",
-                  kind: "Interruptible",
-                  desc: "Fills a tank in pieces. Runs when the grid is cleanest and stops before the dirty evening peak.",
-                  need: "needs: kW, kWh, ready-by time",
+                  kind: "Can pause and resume",
+                  desc: "Fills a tank in pieces. It runs in the cleaner hours and can stop in between.",
+                  need: "you give: power (kW), energy (kWh), needed-by time",
                 },
               ].map((c) => (
                 <li key={c.title} className="rounded-2xl border border-white/10 bg-[#0a0a0a] p-6">
@@ -256,7 +260,7 @@ export default function Home() {
               ))}
             </ul>
             <p className="mx-auto mt-8 max-w-lg text-center text-[13px] leading-6 text-zinc-600">
-              Several loads sharing one supply are scheduled together under a single capacity limit, so they never stack into a new peak.
+              Several loads sharing one supply are scheduled together under one &ldquo;Max power at once&rdquo; limit, so they never add up past it. Loads that must stay on, like a fridge, are marked &ldquo;Always on&rdquo;: they are counted but never moved.
             </p>
           </div>
         </section>
@@ -270,9 +274,17 @@ export default function Home() {
               <div className="rounded-2xl border border-lime-300/20 bg-lime-300/[0.03] p-6">
                 <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-lime-300/80">Works today</p>
                 <ul className="mt-3 space-y-2.5 text-[13px] leading-6 text-zinc-300">
-                  <li>Describe a load in plain words; an AI model or built-in rules classify it.</li>
+                  <li>Describe a load in plain words; Jev (an AI model) or built-in rules classify it, and each answer says which.</li>
                   <li>An exact solver (OR-Tools CP-SAT) places it with hard deadlines.</li>
-                  <li>A live grid-carbon estimate and forecast from real solar and wind data.</li>
+                  <li>
+                    {signalType === "PROXY"
+                      ? "A grid-carbon curve for the next 24 hours, estimated from real solar and wind forecasts."
+                      : signalType === "SYNTHETIC"
+                        ? "A grid-carbon curve for the next 24 hours. This deployment is serving made-up test data, and the demo above says so."
+                        : signalType
+                          ? "A grid-carbon curve for the next 24 hours from the configured source, labelled with its type in the demo above."
+                          : "A grid-carbon curve for the next 24 hours; the demo above shows which kind of signal this deployment uses."}
+                  </li>
                   <li>Track, replan and compare against running everything now.</li>
                 </ul>
               </div>
@@ -280,7 +292,13 @@ export default function Home() {
                 <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-500">Not yet</p>
                 <ul className="mt-3 space-y-2.5 text-[13px] leading-6 text-zinc-400">
                   <li>Smart-meter or device control: today you confirm when a load actually runs.</li>
-                  <li>Metered grid data: the signal is an estimate from weather, and says so.</li>
+                  <li>
+                    {signalType === "MARGINAL" || signalType === "AVERAGE"
+                      ? "Our own metering: the grid signal comes from a configured data source, not from meters we run."
+                      : signalType === "SYNTHETIC"
+                        ? "Real grid data: this deployment is on test data, so its CO₂ figures are illustrative only."
+                        : "Metered grid data: unless a metered source is configured, the signal is an estimate from weather, and says so."}
+                  </li>
                   <li>Field results: there is no pilot data yet, so no savings claim beyond the live solver above.</li>
                 </ul>
               </div>
@@ -289,7 +307,7 @@ export default function Home() {
 
           <div className="mx-auto mt-20 max-w-xl text-center">
             <h2 className="text-2xl font-semibold tracking-tight sm:text-3xl">Put your building on the clean part of the day.</h2>
-            <p className="mt-3 text-sm leading-6 text-zinc-500">Start with one hostel, one floor, or one home. Ready times guaranteed.</p>
+            <p className="mt-3 text-sm leading-6 text-zinc-500">Start with one hostel, one floor, or one home. Every needed-by time is a hard limit, and if one can&apos;t be met you are told.</p>
             <div className="mt-7 flex flex-col items-stretch justify-center gap-3 sm:flex-row sm:items-center">
               {user ? (
                 <button onClick={handleAccountClick} className="cursor-pointer rounded-full bg-lime-300 px-8 py-3 text-sm font-medium text-black transition hover:bg-lime-200 active:scale-[0.98]">
