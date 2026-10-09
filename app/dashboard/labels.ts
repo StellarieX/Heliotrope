@@ -1,6 +1,10 @@
 // Plain-language labels for backend values, so raw enum names never reach the screen.
 
+import type { ForecastMode } from "../../lib/api/client";
 import type { JobType } from "../../lib/api/types";
+
+/** The API values stay ACTUAL / EXPECTED / ROBUST; these are the words people see. */
+export const FORECAST_MODE_LABEL: Record<ForecastMode, string> = { ACTUAL: "Now", EXPECTED: "Forecast", ROBUST: "Cautious" };
 
 /** What the planner knows about the plan it produced. Never upgraded optimistically. */
 export function solverLabel(status: string | null | undefined): string {

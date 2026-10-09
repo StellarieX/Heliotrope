@@ -3,10 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 import type { CarbonSignalResponse } from "../../lib/api/types";
 import type { CarbonForecastResponse, ForecastMode } from "../../lib/api/client";
-import { signalTypeLabel } from "./labels";
+import { FORECAST_MODE_LABEL as MODE_LABEL, signalTypeLabel } from "./labels";
 
-/** The API values stay ACTUAL / EXPECTED / ROBUST; these are the words people see. */
-const MODE_LABEL: Record<ForecastMode, string> = { ACTUAL: "Now", EXPECTED: "Forecast", ROBUST: "Cautious" };
 const MODE_HELP: Record<ForecastMode, string> = {
   ACTUAL: "Now: plans with the grid signal as it is reported today.",
   EXPECTED: "Forecast: plans against the most likely forecast for the next 24 hours.",
