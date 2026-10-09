@@ -293,7 +293,9 @@ class RecedingHorizon:
             if updated is not None:
                 jobs.append(updated)
             else:
-                notes.append(f"{job.name} already complete; excluded from replanning")
+                notes.append(
+                    f"{job.name} has no work left ({status.value.lower()}); excluded from replanning"
+                )
         if not jobs:
             raise RemainingInfeasible("", "", "no remaining schedulable work")
         return scheduler_input.model_copy(update={"jobs": jobs}), notes

@@ -205,6 +205,18 @@ def test_override_cancel_completed_rejected():
     assert res.status_code == 422
 
 
+def test_replan_note_names_a_cancelled_job_as_cancelled_not_complete():
+    sid = plan([ev_job(id="ev-1", energy_required_kwh=3.6), ev_job(id="ev-2", energy_required_kwh=3.6)])
+    cancel = client.post(
+        f"/api/v1/schedules/{sid}/override", json={"job_id": "ev-1", "command": "CANCEL"})
+    assert cancel.status_code == 200, cancel.text
+    res = client.post(
+        f"/api/v1/schedules/{sid}/replan", json={"reason": "MANUAL", "capacity_kw": 15.0})
+    assert res.status_code == 200, res.text
+    notes = " ".join(cancel.json().get("notes", []) + res.json().get("notes", []))
+    assert "cancelled" in notes and "already complete" not in notes
+
+
 def test_coordinated_replan_respects_shared_capacity():
     jobs = []
     for i in range(4):
