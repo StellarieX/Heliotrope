@@ -38,8 +38,9 @@ import type {
 import BuildingChart from "./BuildingChart";
 import CarbonChart from "./CarbonChart";
 import ExecutionPanel from "./ExecutionPanel";
-import { buildSpecs, detailNeeded, kindOf, latestFinish, nextSlot, type Detail, type StoredJob } from "../../lib/loads/specs";
-import { useClassification } from "../../lib/loads/useClassification";
+import { AC_RE, buildSpecs, detailNeeded, kindOf, latestFinish, nextSlot, type Detail, type StoredJob } from "../../lib/loads/specs";
+import { useLoadClassification } from "./useLoadClassification";
+import { loadTypeLabel } from "./labels";
 import Onboarding from "./Onboarding";
 import { scrubLegacyEmail } from "../../lib/profile";
 
@@ -52,32 +53,28 @@ type DashboardJob = JobInput & {
 };
 
 /** What the progressive-disclosure form should show for a given class.
- *  Deliberately narrow: an ordinary user sees energy, duration, or comfort bands,
- *  never the raw decay coefficients or min-chunk setting. */
-function fieldsFor(jobType: JobType | undefined, name = ""): {
+ *  Deliberately narrow: an ordinary user sees energy, run length, or comfort
+ *  temperatures, never the raw decay coefficients or min-chunk setting. */
+function fieldsFor(jobType: JobType | undefined): {
   energy: boolean;
   duration: boolean;
   thermal: boolean;
   note: string;
 } {
-  const isThermal =
-    jobType === "THERMAL" ||
-    /heater|geyser|cool|ac\b|thermal|water heater|boiler/i.test(name);
-  if (isThermal) {
-    return {
-      energy: false,
-      duration: false,
-      thermal: true,
-      note: "Stores comfort as heat or cool — configured from its comfort band.",
-    };
-  }
   switch (jobType) {
+    case "THERMAL":
+      return {
+        energy: false,
+        duration: false,
+        thermal: true,
+        note: "Keeps a temperature: tell us the range that is comfortable and we heat or cool inside it.",
+      };
     case "DEFERRABLE_INTERRUPTIBLE":
-      return { energy: true, duration: false, thermal: false, note: "Pause and resume anywhere before the deadline." };
+      return { energy: true, duration: false, thermal: false, note: "Can be paused and resumed any time before it is needed." };
     case "DEFERRABLE_ATOMIC":
-      return { energy: false, duration: true, thermal: false, note: "One continuous run once it starts." };
+      return { energy: false, duration: true, thermal: false, note: "Once it starts, it runs straight through without stopping." };
     case "FIXED":
-      return { energy: false, duration: false, thermal: false, note: "Always-on: treated as background load, never shifted." };
+      return { energy: false, duration: false, thermal: false, note: "Always on: it is counted as background use and never moved." };
     default:
       return { energy: false, duration: false, thermal: false, note: "" };
   }
@@ -193,13 +190,6 @@ function addHoursToClock(hhmm: string, hours: number): string {
   return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
 }
 
-const TYPE_NOTE: Record<string, string> = {
-  DEFERRABLE_INTERRUPTIBLE: "can pause and resume",
-  DEFERRABLE_ATOMIC: "one continuous run",
-  THERMAL: "holds a comfort band",
-  FIXED: "always-on, never shifted",
-};
-
 /** Inline prompt for the one number a load still needs before it can be planned. */
 function DetailPrompt({ need, onSave }: { need: Detail; onSave: (v: number) => void }) {
   const [val, setVal] = useState("");
@@ -271,8 +261,6 @@ export default function Dashboard() {
   const [fDuration, setFDuration] = useState("");
   const [fTempMin, setFTempMin] = useState("");
   const [fTempMax, setFTempMax] = useState("");
-  // Backend classification of the name being typed (Jev when a key is set, else the built-in rules).
-  const activePreview = useClassification(fName, fReady);
   const [signal, setSignal] = useState<CarbonSignalResponse | null>(null);
   const [signalError, setSignalError] = useState<string | null>(null);
   const [forecast, setForecast] = useState<CarbonForecastResponse | null>(null);
@@ -282,6 +270,21 @@ export default function Dashboard() {
   // "waking" = the first health probe failed; free hosts need ~50s to wake up.
   const [backend, setBackend] = useState<"checking" | "waking" | "online" | "offline">("checking");
   const [backendTry, setBackendTry] = useState(0);
+  // Which kind of load the name being typed is: decided by the backend (Jev when it has a
+  // key, otherwise its built-in rules). Only when it can't be reached do we guess locally.
+  const cls = useLoadClassification(fName, backend === "online");
+  const activePreview = cls.result;
+  const localGuess = useMemo(() => classifyJob(fName), [fName]);
+  const guessedType = useMemo<JobType | undefined>(
+    () =>
+      cls.status === "unavailable"
+        ? kindOf({ id: "", name: fName, kind: localGuess.category, powerKw: 0, readyBy: "", flexHours: 0, shiftable: localGuess.shiftable })
+        : undefined,
+    [cls.status, fName, localGuess]
+  );
+  const effectiveType: JobType | undefined = activePreview?.jobType ?? guessedType;
+  const effectiveCategory = activePreview?.category ?? localGuess.category;
+  const formFields = fieldsFor(effectiveType);
   const [profileError, setProfileError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [addError, setAddError] = useState<string | null>(null);
@@ -677,10 +680,12 @@ export default function Dashboard() {
   }, [profileLoaded, backend, runCoordination]);
 
   // Validate the in-progress load against the backend before adding, so
-  // feasibility errors/warnings show inline in the form (never silent).
+  // feasibility errors/warnings show inline in the form (never silent). It waits until
+  // we know what kind of load this is, so it never judges a guess made mid-typing.
+  const classifyStatus = cls.status;
   useEffect(() => {
     const name = fName.trim();
-    if (name.length < 2 || !fReady) {
+    if (name.length < 2 || !fReady || !effectiveType) {
       // Deferred so the effect body itself stays free of synchronous state
       // updates; clearing happens in a microtask instead.
       void Promise.resolve().then(() => {
@@ -691,30 +696,25 @@ export default function Dashboard() {
     }
     let cancelled = false;
     const t = setTimeout(() => {
-      const c = classifyJob(name);
-      const thermalGuess = /heater|geyser|cool|ac\b|thermal|water heater|boiler/i.test(
-        `${name} ${activePreview?.category ?? c.category}`
-      );
-      const jobType = activePreview?.jobType
-        ?? (thermalGuess ? "THERMAL" : c.shiftable ? "DEFERRABLE_INTERRUPTIBLE" : "FIXED");
       const pKw = Number(fPower);
-      const eKwh = fEnergy ? Number(fEnergy) : null;
-      const dMin = fDuration ? Math.round(Number(fDuration)) : null;
+      const hasPower = Number.isFinite(pKw) && pKw > 0;
+      const eKwh = formFields.energy && fEnergy ? Number(fEnergy) : null;
+      const dMin = formFields.duration && fDuration ? Math.round(Number(fDuration)) : null;
       const now = nextSlot();
-      const isThermalForm = jobType === "THERMAL";
-      const isAcForm = /cool|ac\b|air/i.test(`${name} ${activePreview?.category ?? c.category}`);
+      const isThermalForm = effectiveType === "THERMAL";
+      const isAcForm = AC_RE.test(`${name} ${effectiveCategory}`);
       const tMin = fTempMin ? Number(fTempMin) : isThermalForm ? (isAcForm ? 22 : 40) : NaN;
       const tMax = fTempMax ? Number(fTempMax) : isThermalForm ? (isAcForm ? 26 : 65) : NaN;
       const spec: LoadSpec = {
         id: "form-preview",
         normalized_name: name,
-        category: activePreview?.category ?? c.category,
-        job_type: jobType,
-        power_kw: Number.isFinite(pKw) && pKw > 0 ? pKw : null,
-        max_power_kw: Number.isFinite(pKw) && pKw > 0 ? pKw : null,
+        category: effectiveCategory,
+        job_type: effectiveType,
+        power_kw: hasPower ? pKw : null,
+        max_power_kw: hasPower ? pKw : null,
         duration_minutes: dMin,
         energy_required_kwh: eKwh,
-        min_chunk_minutes: jobType === "DEFERRABLE_INTERRUPTIBLE" ? 15 : null,
+        min_chunk_minutes: effectiveType === "DEFERRABLE_INTERRUPTIBLE" ? 15 : null,
         confidence: activePreview?.confidence ?? 1.0,
         ambiguous: activePreview?.ambiguous ?? false,
         user_input: name,
@@ -725,7 +725,7 @@ export default function Dashboard() {
                 a: 0.85,
                 b: -1.40,
                 c: 5.10,
-                max_power_kw: Number.isFinite(pKw) && pKw > 0 ? pKw : 2.0,
+                max_power_kw: hasPower ? pKw : 2.0,
                 resolution_minutes: 15,
                 temperature_initial_c: null,
                 temperature_min_c: Number.isFinite(tMin) ? tMin : 22,
@@ -736,7 +736,7 @@ export default function Dashboard() {
                 a: 0.9,
                 b: 2.75,
                 c: 2.0,
-                max_power_kw: Number.isFinite(pKw) && pKw > 0 ? pKw : 2.0,
+                max_power_kw: hasPower ? pKw : 2.0,
                 resolution_minutes: 15,
                 temperature_initial_c: null,
                 temperature_min_c: Number.isFinite(tMin) ? tMin : 40,
@@ -775,16 +775,19 @@ export default function Dashboard() {
       cancelled = true;
       clearTimeout(t);
     };
-  }, [fName, fReady, fFlex, fPower, fEnergy, fDuration, fTempMin, fTempMax, activePreview]);
+    // classifyStatus is listed so a settled answer always triggers a fresh check.
+  }, [fName, fReady, fFlex, fPower, fEnergy, fDuration, fTempMin, fTempMax, activePreview, effectiveType, effectiveCategory, formFields.energy, formFields.duration, classifyStatus]);
 
   async function addJob() {
     if (!user || !fName.trim() || !fReady) return;
+    // Wait for the answer on what kind of load this is, so we save Jev's verdict and not a guess.
+    if (cls.status === "loading" || cls.status === "idle") return;
     // Backend feasibility errors block the add; warnings stay advisory.
     // (Offline the validator stays silent, so addErrors is empty and the add proceeds.)
     if (addErrors.length > 0) return;
     const powerKw = Number(fPower);
     if (!fPower.trim() || !Number.isFinite(powerKw) || powerKw <= 0) {
-      setFPowerError("Enter a power rating greater than 0 kW.");
+      setFPowerError("Enter a power greater than 0 kW.");
       return;
     }
     setFPowerError(null);
@@ -792,34 +795,30 @@ export default function Dashboard() {
     if (!db) return;
     setAddError(null);
     setAdding(true);
-    const c = classifyJob(fName);
-    // Backend classification wins when it is available; the local heuristic is
-    // the offline fallback. The stored `kind`/`shiftable` stay for every
-    // document written before Phase 3.
+    // The backend's answer is what gets saved. Only when it couldn't be reached do we fall
+    // back to the local guess for the category and the movable/always-on flag, and then no
+    // load type is stored: it is worked out from the name when planning.
     const jobType = activePreview?.jobType;
-    const shiftable = jobType ? jobType !== "FIXED" : c.shiftable;
-    const energyKwh = fEnergy ? Number(fEnergy) : undefined;
-    const durationMin = fDuration ? Math.round(Number(fDuration)) : undefined;
+    const shiftable = jobType ? jobType !== "FIXED" : localGuess.shiftable;
+    const kind = effectiveCategory;
+    // Only keep the numbers this kind of load actually asks for, never a leftover from a previous name.
+    const energyKwh = formFields.energy && fEnergy ? Number(fEnergy) : undefined;
+    const durationMin = formFields.duration && fDuration ? Math.round(Number(fDuration)) : undefined;
 
-    const isThermal =
-      jobType === "THERMAL" ||
-      /heater|geyser|cool|ac\b|thermal|water heater|boiler/i.test(
-        `${fName} ${activePreview?.category ?? c.category}`
-      );
-    const isAc = /cool|ac\b|air/i.test(`${fName} ${activePreview?.category ?? c.category}`);
-    const tempMinC = fTempMin ? Number(fTempMin) : (isThermal ? (isAc ? 22 : 40) : undefined);
-    const tempMaxC = fTempMax ? Number(fTempMax) : (isThermal ? (isAc ? 26 : 65) : undefined);
+    const isThermal = effectiveType === "THERMAL";
+    const isAc = AC_RE.test(`${fName} ${kind}`);
+    const tempMinC = isThermal ? (fTempMin ? Number(fTempMin) : isAc ? 22 : 40) : undefined;
+    const tempMaxC = isThermal ? (fTempMax ? Number(fTempMax) : isAc ? 26 : 65) : undefined;
 
     try {
       const ref = await addDoc(collection(db, "users", user.uid, "jobs"), {
         name: fName.trim(),
-        kind: activePreview?.category ?? c.category,
+        kind,
         shiftable,
         powerKw,
         readyBy: fReady,
         flexHours: fFlex,
-        // Phase 3 fields: written only when known, so a missing value stays
-        // missing instead of becoming a misleading zero.
+        // Written only when known, so a missing value stays missing instead of becoming a misleading zero.
         ...(jobType ? { jobType } : {}),
         ...(energyKwh && !Number.isNaN(energyKwh) ? { energyKwh } : {}),
         ...(durationMin && !Number.isNaN(durationMin) ? { durationMin } : {}),
@@ -833,7 +832,7 @@ export default function Dashboard() {
         {
           id: ref.id,
           name: fName.trim(),
-          kind: activePreview?.category ?? c.category,
+          kind,
           shiftable,
           powerKw,
           readyBy: fReady,
@@ -847,6 +846,7 @@ export default function Dashboard() {
       ]);
       setRanked(null);
       setFName("");
+      setFPower("");
       setFEnergy("");
       setFDuration("");
       setFTempMin("");
@@ -1193,7 +1193,7 @@ export default function Dashboard() {
                     )}
                   </div>
                   <p className="mt-1.5 text-[13px] text-zinc-500">
-                    {j.kind || "Load"} · {TYPE_NOTE[kindOf(j as StoredJob)]} · {j.powerKw} kW · ready by {j.readyBy}
+                    {j.kind || "Load"} · {loadTypeLabel(kindOf(j as StoredJob))} · {j.powerKw} kW · ready by {j.readyBy}
                     {j.flexHours > 0 ? ` (up to ${addHoursToClock(j.readyBy, j.flexHours)})` : ""}
                     {j.energyKwh ? ` · ${j.energyKwh} kWh` : ""}
                     {j.durationMin ? ` · ${j.durationMin} min` : ""}
@@ -1229,7 +1229,7 @@ export default function Dashboard() {
           <div className="border-t border-white/10 bg-white/[0.015] px-4 py-6 sm:px-8">
             <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-600">Add a load — name anything</p>
             <div className="mt-3 flex flex-wrap items-center gap-2">
-              <span className="font-mono text-[11px] text-zinc-600">quick fill</span>
+              <span className="font-mono text-[11px] text-zinc-600">quick examples</span>
               {PRESETS.map((p) => (
                 <button
                   key={p.label}
@@ -1243,137 +1243,163 @@ export default function Dashboard() {
             </div>
             <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
               <input aria-label="Load name" value={fName} onChange={(e) => setFName(e.target.value)} maxLength={40} placeholder="Name — e.g. hostel borewell pump" className={`w-full ${inputCls}`} />
-              <div className={`flex w-full items-center overflow-hidden px-4 ${inputCls} ${fName.trim() ? "" : "opacity-40"}`}>
-                {(() => {
-                  const c = classifyJob(fName.trim() || "…");
-                  const shiftable = activePreview ? activePreview.jobType !== "FIXED" : c.shiftable;
-                  return (
-                    <>
-                      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${shiftable ? "bg-lime-300" : "bg-zinc-600"}`} />
-                      <span className="ml-2 min-w-0 flex-1 truncate text-sm text-zinc-200">
-                        {!fName.trim()
-                          ? "type a name and we'll work out what kind of load it is"
-                          : activePreview
-                            ? `${activePreview.category} · ${TYPE_NOTE[activePreview.jobType] ?? ""}`
-                            : `${c.category} · ${c.why}`}
-                      </span>
-                      {activePreview && (
-                        <span
-                          title={
+              <div
+                aria-live="polite"
+                className={`flex min-h-[2.75rem] w-full items-center gap-2 overflow-hidden px-4 py-2 ${inputCls} ${cls.status === "idle" ? "opacity-50" : ""}`}
+              >
+                {cls.status === "loading" ? (
+                  <span className="spinner shrink-0" aria-hidden="true" />
+                ) : (
+                  <span
+                    aria-hidden="true"
+                    className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                      cls.status === "idle" ? "bg-zinc-700" : effectiveType && effectiveType !== "FIXED" ? "bg-lime-300" : "bg-zinc-600"
+                    }`}
+                  />
+                )}
+                <span
+                  className="min-w-0 flex-1 text-sm leading-5 text-zinc-200"
+                  title={
+                    activePreview
+                      ? activePreview.provider === "jev"
+                        ? `Category: ${activePreview.category}. Decided by Jev.`
+                        : activePreview.fallbackReason
+                          ? `Category: ${activePreview.category}. Jev couldn't answer (${activePreview.fallbackReason}), so the built-in rules did.`
+                          : `Category: ${activePreview.category}. Decided by the built-in rules.`
+                      : undefined
+                  }
+                >
+                  {cls.status === "idle"
+                    ? "Type a name and we'll work out what kind of load it is."
+                    : cls.status === "loading"
+                      ? "Working out what kind of load this is…"
+                      : activePreview
+                        ? `${
                             activePreview.provider === "jev"
-                              ? `Decided by Jev with ${Math.round(activePreview.confidence * 100)}% confidence.`
+                              ? "Jev"
                               : activePreview.fallbackReason
-                                ? `Jev unavailable (${activePreview.fallbackReason}); the built-in rules answered.`
-                                : "Classified by the built-in rules."
-                          }
-                          className={`ml-2 shrink-0 rounded-full px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${
-                            activePreview.provider === "jev" ? "bg-violet-400/15 text-violet-300" : "bg-white/5 text-zinc-500"
-                          }`}
-                        >
-                          {activePreview.provider === "jev" ? "jev" : "rules"}
-                        </span>
-                      )}
-                    </>
-                  );
-                })()}
+                                ? "Built-in rules (Jev unavailable)"
+                                : "Built-in rules"
+                          }: ${loadTypeLabel(activePreview.jobType)} · ${Math.round(activePreview.confidence * 100)}% sure`
+                        : `${backend === "online" ? "Couldn't reach the classifier" : "The planner isn't reachable yet"}, so this is only a rough guess from the name: ${loadTypeLabel(guessedType)}.${backend === "online" ? " Edit the name to try again." : ""}`}
+                </span>
+                {activePreview && (
+                  <span
+                    className={`shrink-0 rounded-full px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${
+                      activePreview.provider === "jev" ? "bg-violet-400/15 text-violet-300" : "bg-white/5 text-zinc-500"
+                    }`}
+                  >
+                    {activePreview.provider === "jev" ? "Jev" : "rules"}
+                  </span>
+                )}
+                {cls.status === "unavailable" && (
+                  <span className="shrink-0 rounded-full bg-amber-400/10 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-amber-300/90">guess</span>
+                )}
               </div>
             </div>
-            <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-3">
+            <div className="mt-3 flex flex-wrap items-start gap-x-5 gap-y-3">
               <label className="flex flex-col gap-1 text-[13px] text-zinc-400">
                 <span className="flex items-center gap-2">
                   <input value={fPower} onChange={(e) => { setFPower(e.target.value.replace(/[^0-9.]/g, "")); if (fPowerError) setFPowerError(null); }} inputMode="decimal" placeholder="kW" className={`w-20 ${inputCls}`} />
-                  <span className="font-mono text-[11px] text-zinc-600">kW rating</span>
+                  <span className="font-mono text-[11px] text-zinc-600">power it draws (kW)</span>
                 </span>
                 {fPowerError && (
                   <span className="font-mono text-[11px] text-orange-300">{fPowerError}</span>
                 )}
               </label>
               <label className="flex items-center gap-2 text-[13px] text-zinc-400">
-                <span className="font-mono text-[11px] text-zinc-600">ready by</span>
+                <span className="font-mono text-[11px] text-zinc-600">needed by</span>
                 <input type="time" value={fReady} onChange={(e) => setFReady(e.target.value)} className={`cursor-pointer [color-scheme:dark] ${inputCls}`} />
               </label>
-              <label className="flex items-center gap-2 text-[13px] text-zinc-400">
-                <span className="font-mono text-[11px] text-zinc-600">may finish up to +{fFlex}h later</span>
-                <input type="range" min={0} max={6} value={fFlex} aria-label="Flexibility in hours" onChange={(e) => setFFlex(Number(e.target.value))} className="w-28 cursor-pointer accent-lime-300" />
+              <label className="flex flex-wrap items-center gap-2 text-[13px] text-zinc-400">
+                <span className="font-mono text-[11px] text-zinc-600">
+                  {fFlex === 0 ? "must finish on time" : `can finish up to ${fFlex} h late`}
+                </span>
+                <input type="range" min={0} max={6} value={fFlex} aria-label="Hours it can finish late" onChange={(e) => setFFlex(Number(e.target.value))} className="w-28 cursor-pointer accent-lime-300" />
               </label>
               <button
                 onClick={() => void addJob()}
-                disabled={adding || !fName.trim() || !fReady || addErrors.length > 0}
-                title={addErrors.length > 0 ? "Fix the errors above before adding." : undefined}
+                disabled={adding || !fName.trim() || !fReady || addErrors.length > 0 || cls.status === "loading" || cls.status === "idle"}
+                title={
+                  addErrors.length > 0
+                    ? "Fix the problem below before adding."
+                    : cls.status === "loading"
+                      ? "Waiting to hear what kind of load this is."
+                      : undefined
+                }
                 className="flex min-h-11 cursor-pointer items-center gap-2 rounded-full bg-white px-6 py-2 text-[13px] font-medium text-black transition hover:bg-zinc-200 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-30"
               >
                 {adding && <span className="spinner" />}
                 {adding ? "Adding…" : "Add load"}
               </button>
             </div>
+            <p className="mt-2 font-mono text-[11px] leading-5 text-zinc-700">
+              kW is how much power it uses while running; it is usually printed on the appliance label.
+            </p>
 
-            {/* Progressive disclosure: only the fields this class actually needs. */}
-            {(() => {
-              const f = fieldsFor(activePreview?.jobType, fName);
-              if (!f.energy && !f.duration && !f.thermal && !f.note) return null;
-              return (
-                <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-3 border-t border-white/5 pt-4">
-                  {f.energy && (
+            {/* Progressive disclosure: only the fields this kind of load actually needs. */}
+            {(formFields.energy || formFields.duration || formFields.thermal || formFields.note) && (
+              <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-3 border-t border-white/5 pt-4">
+                {formFields.energy && (
+                  <label className="flex items-center gap-2 text-[13px] text-zinc-400">
+                    <input
+                      value={fEnergy}
+                      onChange={(e) => setFEnergy(e.target.value.replace(/[^0-9.]/g, ""))}
+                      inputMode="decimal"
+                      placeholder="kWh"
+                      className={`w-20 ${inputCls}`}
+                    />
+                    <span className="font-mono text-[11px] text-zinc-600">electricity it needs in total (kWh)</span>
+                  </label>
+                )}
+                {formFields.duration && (
+                  <label className="flex items-center gap-2 text-[13px] text-zinc-400">
+                    <input
+                      value={fDuration}
+                      onChange={(e) => setFDuration(e.target.value.replace(/[^0-9]/g, ""))}
+                      inputMode="numeric"
+                      placeholder="min"
+                      className={`w-20 ${inputCls}`}
+                    />
+                    <span className="font-mono text-[11px] text-zinc-600">how long one run takes (minutes)</span>
+                  </label>
+                )}
+                {formFields.thermal && (
+                  <>
                     <label className="flex items-center gap-2 text-[13px] text-zinc-400">
                       <input
-                        value={fEnergy}
-                        onChange={(e) => setFEnergy(e.target.value.replace(/[^0-9.]/g, ""))}
+                        value={fTempMin}
+                        onChange={(e) => setFTempMin(e.target.value.replace(/[^0-9.]/g, ""))}
                         inputMode="decimal"
-                        placeholder="kWh"
+                        placeholder={AC_RE.test(`${fName} ${effectiveCategory}`) ? "22" : "40"}
                         className={`w-20 ${inputCls}`}
                       />
-                      <span className="font-mono text-[11px] text-zinc-600">energy needed</span>
+                      <span className="font-mono text-[11px] text-zinc-600">lowest comfortable temp (°C)</span>
                     </label>
-                  )}
-                  {f.duration && (
                     <label className="flex items-center gap-2 text-[13px] text-zinc-400">
                       <input
-                        value={fDuration}
-                        onChange={(e) => setFDuration(e.target.value.replace(/[^0-9]/g, ""))}
-                        inputMode="numeric"
-                        placeholder="min"
+                        value={fTempMax}
+                        onChange={(e) => setFTempMax(e.target.value.replace(/[^0-9.]/g, ""))}
+                        inputMode="decimal"
+                        placeholder={AC_RE.test(`${fName} ${effectiveCategory}`) ? "26" : "65"}
                         className={`w-20 ${inputCls}`}
                       />
-                      <span className="font-mono text-[11px] text-zinc-600">run length</span>
+                      <span className="font-mono text-[11px] text-zinc-600">highest comfortable temp (°C)</span>
                     </label>
-                  )}
-                  {f.thermal && (
-                    <>
-                      <label className="flex items-center gap-2 text-[13px] text-zinc-400">
-                        <input
-                          value={fTempMin}
-                          onChange={(e) => setFTempMin(e.target.value.replace(/[^0-9.]/g, ""))}
-                          inputMode="decimal"
-                          placeholder={/cool|ac\b|air/i.test(fName) ? "22" : "40"}
-                          className={`w-20 ${inputCls}`}
-                        />
-                        <span className="font-mono text-[11px] text-zinc-600">min temp °C</span>
-                      </label>
-                      <label className="flex items-center gap-2 text-[13px] text-zinc-400">
-                        <input
-                          value={fTempMax}
-                          onChange={(e) => setFTempMax(e.target.value.replace(/[^0-9.]/g, ""))}
-                          inputMode="decimal"
-                          placeholder={/cool|ac\b|air/i.test(fName) ? "26" : "65"}
-                          className={`w-20 ${inputCls}`}
-                        />
-                        <span className="font-mono text-[11px] text-zinc-600">max temp °C</span>
-                      </label>
-                    </>
-                  )}
-                  {f.note && <span className="font-mono text-[11px] text-zinc-600">{f.note}</span>}
-                  {activePreview?.ambiguous && (
-                    <span className="font-mono text-[11px] text-amber-400/80">
-                      could mean something else — {Math.round(activePreview.confidence * 100)}% sure
-                    </span>
-                  )}
-                </div>
-              );
-            })()}
+                  </>
+                )}
+                {formFields.note && <span className="font-mono text-[11px] text-zinc-600">{formFields.note}</span>}
+                {activePreview?.ambiguous && (
+                  <span className="font-mono text-[11px] text-amber-400/80">
+                    Might be something else ({Math.round(activePreview.confidence * 100)}% sure). Check the details.
+                  </span>
+                )}
+              </div>
+            )}
             {addError && <p role="alert" className="mt-3 font-mono text-[12px] text-orange-300">{addError}</p>}
             {addErrors.length > 0 && (
               <p className="mt-3 font-mono text-[11px] text-zinc-500">
-                Complete the missing detail (run length or energy) above to enable “Add load”.
+                Fix the problem below to enable “Add load”.
               </p>
             )}
             {(addErrors.length > 0 || addWarnings.length > 0) && (
