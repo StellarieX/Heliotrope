@@ -55,10 +55,13 @@ routes/ -> services/ -> domain/
                    forecast_service, schedule_realization
   carbon.py        carbon_service -> providers (weather proxy [live, keyless], csv, external [Electricity Maps history], synthetic [test curve])
   forecast.py      forecast_service, forecast_backtest
-  loads.py         load_intelligence (rule-based, live/offline) + classification,
+  loads.py         load_intelligence (Jev when keyed, one call per request, 30 s outage skip in jev_client;
+                   rule-based otherwise) + classification, prioritization (one batched Jev request),
                    load_normalizer, core/feasibility (validator)
   coordination.py  coordinator (+ coordinated_cpsat) over real optimizer output
   execution.py     execution_store + execution_events + receding + simulator
+  pool.py          load_pool.compute_pool_stats over the execution store (GET /pool/stats,
+                   aggregate kW per slot of all live plans; no ids leave the service)
 ```
 
 Domain (`backend/app/domain/`): `jobs`, `loads` (`LoadSpec`, `None` = unknown), `horizon`, `carbon`, `forecasting` (`ForecastMode` ACTUAL/EXPECTED/ROBUST), `scheduling`, `coordination`, `execution` (lifecycle), `thermal`, `scaling`.
