@@ -412,6 +412,12 @@ class CPSATScheduler(BaseScheduler):
         )
         pw_interruptible[job.id] = pw
         on_interruptible[job.id] = on
+        # Redundant cut: reaching the energy target at max power needs at least this
+        # many active slots. It excludes no feasible schedule and tightens the bound.
+        if job.energy_required_wmin and job.max_power_w > 0:
+            needed_slots = -(-job.energy_required_wmin // (job.max_power_w * job.slot_minutes))
+            if needed_slots > 0:
+                model.Add(sum(on.values()) >= needed_slots)
 
         n = job.min_chunk_slots
         if n > 1 and window:
@@ -582,11 +588,15 @@ class CPSATScheduler(BaseScheduler):
     ):
         """§17: P_peak >= total load in every slot, minimized when weighted.
 
-        The coefficient is scaled by the horizon's MEAN carbon intensity so a
-        peak weight of 1.0 means "one average-carbon hour of peak", keeping it
-        comparable with the carbon term instead of dwarfing it.
+        The coefficient is scaled by the horizon's MEAN objective carbon intensity
+        and charged as if the peak load ran for the whole horizon (`n` slots), so a
+        peak weight of 1.0 puts one watt of peak on the same footing as one watt
+        drawn in every slot. That keeps the term comparable with the carbon term.
+        Worst case it is bounded by jobs x slots x power x carbon x slot_minutes
+        (the peak never exceeds the summed job powers), which is exactly the
+        bound `assert_objective_headroom` already checks.
         """
-        mean_carbon = int(round(scheduler_input.carbon.mean()))
+        mean_carbon = int(round(scheduler_input.objective_carbon().mean()))
         peak_cap = scheduler_input.capacity_w
         if scheduler_input.capacity_profile_w:
             peak_cap = max(peak_cap, max(scheduler_input.capacity_profile_w))
@@ -610,7 +620,7 @@ class CPSATScheduler(BaseScheduler):
             if not terms and total == 0:
                 continue
             model.Add(peak >= total + (sum(terms) if terms else 0))
-        return peak * mean_carbon * slot_minutes
+        return peak * mean_carbon * slot_minutes * n
 
     def _delay_term(
         self, scheduler_input, run_atomic, start_atomic, pw_interruptible, on_interruptible, pw_thermal, slot_minutes
@@ -625,7 +635,7 @@ class CPSATScheduler(BaseScheduler):
         formulation telescopes and can go negative, rewarding longer runs —
         exactly backwards.)
         """
-        reference = int(round(scheduler_input.carbon.mean()))
+        reference = int(round(scheduler_input.objective_carbon().mean()))
         total = []
         for job in scheduler_input.jobs:
             if job.job_type is LoadType.DEFERRABLE_ATOMIC:
