@@ -11,7 +11,7 @@ export type RankingState =
       ranked: RankedJob[];
       /** Who produced the order, in words the user can read. */
       label: string;
-      provider: "jev" | "heuristic";
+      provider: "jev" | "mixed" | "heuristic";
     }
   | { status: "fallback"; ranked: RankedJob[]; label: string };
 
@@ -52,7 +52,9 @@ export function useBackendRanking(jobs: JobInput[], enabled: boolean): RankingSt
         const label =
           res.provider === "jev"
             ? "Ordered by Jev (how essential each appliance is) plus time pressure, size and flexibility."
-            : (res.notes[0] ?? "Ordered by the built-in rules: time pressure, size and flexibility. Jev was not used.");
+            : res.provider === "mixed"
+              ? `Partly ordered by Jev; the rest by built-in rules. ${res.notes[0] ?? ""}`.trim()
+              : (res.notes[0] ?? "Ordered by the built-in rules: time pressure, size and flexibility. Jev was not used.");
         setDone({ sig: signature, state: { status: "ok", ranked, label, provider: res.provider } });
       })
       .catch(() => {

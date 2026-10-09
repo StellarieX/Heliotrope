@@ -326,7 +326,8 @@ export interface PriorityItem {
 }
 
 export interface PriorityResponse {
-  provider: "jev" | "heuristic";
+  /** "mixed": Jev scored some loads, the rules scored the rest (see notes). */
+  provider: "jev" | "mixed" | "heuristic";
   items: PriorityItem[];
   notes: string[];
 }

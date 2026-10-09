@@ -288,7 +288,7 @@ export default function Dashboard() {
   const [rank, setRank] = useState<{
     order: string[];
     info: Record<string, RankInfo>;
-    provider: "jev" | "heuristic" | "local";
+    provider: "jev" | "mixed" | "heuristic" | "local";
     note: string;
   } | null>(null);
   const [ranking, setRanking] = useState(false);
@@ -991,7 +991,9 @@ export default function Dashboard() {
         note:
           res.provider === "jev"
             ? `Order set by Jev (how essential each appliance is), plus time pressure, size and flexibility.${res.notes[0] ? ` ${res.notes[0]}` : ""}`
-            : res.notes[0] ?? "Order set by built-in rules (time pressure, size and flexibility). Jev isn't switched on for this server.",
+            : res.provider === "mixed"
+              ? `Partly ordered by Jev; the rest by built-in rules. ${res.notes[0] ?? ""}`.trim()
+              : res.notes[0] ?? "Order set by built-in rules (time pressure, size and flexibility). Jev isn't switched on for this server.",
       });
     } catch {
       if (seq !== rankSeq.current) return;
