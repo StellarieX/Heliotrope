@@ -566,6 +566,14 @@ class ForecastService:
         """Explicit `CarbonSignal` construction from one value per timestamp."""
         from ..domain.carbon import CarbonPoint, Quality, SignalType
 
+        # A forecast is a prediction, not a grid reading, so it is FORECAST --
+        # unless the history it learned from was itself SYNTHETIC, which must
+        # stay visible on everything downstream of it.
+        if forecast.provenance.source_signal_type == SignalType.SYNTHETIC.value:
+            point_signal_type = SignalType.SYNTHETIC
+        else:
+            point_signal_type = SignalType.FORECAST
+
         if len(stamps) != len(series):
             raise ForecastServiceError(
                 f"cannot build a carbon signal from {len(series)} values for "
@@ -580,7 +588,7 @@ class ForecastService:
                 CarbonPoint(
                     time=stamp,
                     gco2_per_kwh=value,
-                    signal_type=SignalType.SYNTHETIC,
+                    signal_type=point_signal_type,
                     is_forecast=True,
                     quality=Quality.ESTIMATED,
                     source=f"forecast:{forecast.provenance.model}",

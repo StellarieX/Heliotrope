@@ -1,7 +1,7 @@
 """Canonical carbon signal contracts.
 
 Signal kinds are NEVER silently equivalent: every point and every response
-carries its SignalType (MARGINAL / AVERAGE / PROXY / SYNTHETIC) so the future
+carries its SignalType (MARGINAL / AVERAGE / PROXY / SYNTHETIC / FORECAST) so the future
 scheduler — and the UI — always know what they are consuming.
 """
 
@@ -19,6 +19,9 @@ class SignalType(str, Enum):
     AVERAGE = "AVERAGE"
     PROXY = "PROXY"
     SYNTHETIC = "SYNTHETIC"
+    #: a model prediction built from measured history. A forecast built from
+    #: SYNTHETIC history stays SYNTHETIC: the synthetic label is never washed out.
+    FORECAST = "FORECAST"
 
 
 class Quality(str, Enum):

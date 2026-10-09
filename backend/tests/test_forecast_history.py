@@ -165,3 +165,31 @@ def test_truly_out_of_range_stays_strict():
         service.uncertainty_over_horizon(forecast, ORIGIN + timedelta(hours=7))
     with pytest.raises(ForecastServiceError):
         service.predicted_over_horizon(forecast, ORIGIN + timedelta(hours=7))
+
+
+# --- forecast signals are labelled FORECAST, not SYNTHETIC ------------------
+
+
+def test_forecast_signal_built_from_measured_history_is_labelled_forecast():
+    service = ForecastService()
+    pairs = [
+        ((ORIGIN - timedelta(days=14) + timedelta(minutes=60 * i)).isoformat(), 300.0 + (i % 24))
+        for i in range(14 * 24)
+    ]
+    history = service.history_from_points(
+        pairs, signal_type="AVERAGE", quality="MEASURED", source="grid"
+    )
+    forecast = SeasonalForecaster().forecast(
+        history, ORIGIN, ORIGIN + timedelta(hours=6), resolution_minutes=60
+    )
+    signal = service.as_carbon_signal(forecast)
+    assert signal.points
+    assert all(p.signal_type is SignalType.FORECAST for p in signal.points)
+    assert all(p.is_forecast for p in signal.points)
+
+
+def test_forecast_signal_built_from_synthetic_history_stays_synthetic():
+    signal = ForecastService().as_carbon_signal(_forecast())
+    assert signal.points
+    assert all(p.signal_type is SignalType.SYNTHETIC for p in signal.points)
+    assert all(p.is_forecast for p in signal.points)
