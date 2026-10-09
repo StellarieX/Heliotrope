@@ -45,23 +45,30 @@ class GreedyScheduler(BaseScheduler):
     def build_placement(self, scheduler_input: SchedulerInput) -> Placement:
         placement = Placement(slot_count=scheduler_input.horizon.slot_count)
         for job in self.job_order(scheduler_input):
-            if job.job_type is LoadType.DEFERRABLE_ATOMIC:
-                self.place_atomic_lowest_carbon(scheduler_input, job, placement)
-            elif job.job_type is LoadType.DEFERRABLE_INTERRUPTIBLE:
-                if not self.allocate_interruptible(scheduler_input, job, placement):
-                    # The low-carbon runs may be capacity-bound once earlier jobs
-                    # are committed. Retry chronologically rather than failing a
-                    # job that is in fact schedulable.
-                    if not self.allocate_interruptible(scheduler_input, job, placement, order="time"):
-                        raise PlacementFailure(
-                            job.id,
-                            f"{job.name} could not be charged in full: the cleanest "
-                            "opportunities were taken and the remaining window cannot "
-                            "deliver its energy target",
-                        )
-            elif job.job_type is LoadType.THERMAL:
+            if job.job_type is LoadType.THERMAL:
                 self.place_thermal_control(scheduler_input, job, placement, prefer_low_carbon=True)
+            else:
+                self._place_flexible(scheduler_input, job, placement)
         return placement
+
+    def _place_flexible(self, scheduler_input: SchedulerInput, job, placement: Placement) -> None:
+        """Place one atomic or interruptible job (raises PlacementFailure)."""
+        if job.job_type is LoadType.DEFERRABLE_ATOMIC:
+            self.place_atomic_lowest_carbon(scheduler_input, job, placement)
+        elif job.job_type is LoadType.DEFERRABLE_INTERRUPTIBLE:
+            if self.place_interruptible_cleanest(scheduler_input, job, placement):
+                return
+            if not self.allocate_interruptible(scheduler_input, job, placement):
+                # The low-carbon runs may be capacity-bound once earlier jobs
+                # are committed. Retry chronologically rather than failing a
+                # job that is in fact schedulable.
+                if not self.allocate_interruptible(scheduler_input, job, placement, order="time"):
+                    raise PlacementFailure(
+                        job.id,
+                        f"{job.name} could not be charged in full: the cleanest "
+                        "opportunities were taken and the remaining window cannot "
+                        "deliver its energy target",
+                    )
 
     def run_order(
         self, scheduler_input: SchedulerInput, runs: list[tuple[int, int]]

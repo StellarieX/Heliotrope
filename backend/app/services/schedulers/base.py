@@ -298,8 +298,11 @@ class BaseScheduler(ABC):
         duration = job.duration_slots or 0
         best_start: Optional[int] = None
         best_cost = float("inf")
+        # objective_carbon() rebuilds the adjusted profile on every call in
+        # forecast modes, so it is fetched once per job, not once per window.
+        objective = scheduler_input.objective_carbon()
         for start in self.iter_atomic_windows(scheduler_input, job, placement):
-            cost = self.window_carbon_cost(scheduler_input, job, start, duration)
+            cost = self.window_carbon_cost(scheduler_input, job, start, duration, objective)
             if cost < best_cost - 1e-9:
                 best_cost = cost
                 best_start = start
@@ -349,7 +352,12 @@ class BaseScheduler(ABC):
         return None
 
     def window_carbon_cost(
-        self, scheduler_input: SchedulerInput, job: NormalizedJob, start: int, duration: int
+        self,
+        scheduler_input: SchedulerInput,
+        job: NormalizedJob,
+        start: int,
+        duration: int,
+        objective=None,
     ) -> float:
         """Carbon of running this job across a window, in kg.
 
@@ -368,7 +376,8 @@ class BaseScheduler(ABC):
         actually emitted, against the observed signal (§35).
         """
         slot_minutes = scheduler_input.horizon.slot_minutes
-        objective = scheduler_input.objective_carbon()
+        if objective is None:
+            objective = scheduler_input.objective_carbon()
         return sum(
             job.power_w * slot_minutes * objective.at(start + i) / CO2_KG_DIVISOR
             for i in range(duration)
@@ -514,6 +523,137 @@ class BaseScheduler(ABC):
                     placement.clear_slot(job.id, slot)
                     placement.power_by_job.get(job.id, {}).pop(slot, None)
                 return False
+        return True
+
+    def plan_cleanest_blocks(
+        self,
+        scheduler_input: SchedulerInput,
+        job: NormalizedJob,
+        placement: Placement,
+        reserve: Optional[dict[int, int]] = None,
+    ) -> Optional[dict[int, int]]:
+        """Plan an interruptible job as the cheapest contiguous blocks.
+
+        Prefix-charging a run pays for its first slots whether or not they are
+        clean. Here a window is slid over each stretch of slots that still has
+        room, and the block of at least `min_chunk_slots` that delivers the
+        remaining energy at the lowest objective carbon wins (ties: earliest
+        start). When no single block can deliver everything, the cleanest whole
+        stretch is taken and the search repeats on what is left.
+
+        Returns {slot: watts}, or None when the energy cannot be delivered in
+        blocks of the minimum chunk. Nothing is written to `placement`.
+        """
+        reserve = reserve or {}
+        slot_minutes = scheduler_input.horizon.slot_minutes
+        remaining = job.energy_required_wmin or 0
+        if remaining <= 0:
+            return {}
+        chunk = max(1, job.min_chunk_slots)
+        objective = scheduler_input.objective_carbon()
+
+        budget: dict[int, int] = {}
+        for slot in job.slots():
+            free = self._available_w(scheduler_input, job, placement, slot)
+            budget[slot] = max(0, free - reserve.get(slot, 0))
+
+        segments: list[list[int]] = []
+        current: list[int] = []
+        for slot in job.slots():
+            if budget[slot] > 0 and (not current or slot == current[-1] + 1):
+                current.append(slot)
+                continue
+            if len(current) >= chunk:
+                segments.append(current)
+            current = [slot] if budget[slot] > 0 else []
+        if len(current) >= chunk:
+            segments.append(current)
+
+        plan: dict[int, int] = {}
+        while remaining > 0 and segments:
+            best: Optional[tuple[float, int, list[int]]] = None
+            for seg in segments:
+                found = self._best_block(seg, budget, objective, remaining, slot_minutes, chunk)
+                if found is not None and (best is None or found[:2] < best[:2]):
+                    best = found
+            if best is not None:
+                for slot, power in zip(best[2], self._block_powers(best[2], budget, remaining, slot_minutes)):
+                    plan[slot] = power
+                return plan
+            # No single block is big enough: take the cleanest whole stretch.
+            def mean_carbon(seg: list[int]) -> tuple[float, int]:
+                weight = sum(budget[s] for s in seg)
+                return (sum(budget[s] * objective.at(s) for s in seg) / weight, seg[0])
+
+            seg = min(segments, key=mean_carbon)
+            segments.remove(seg)
+            for slot in seg:
+                plan[slot] = budget[slot]
+                remaining -= budget[slot] * slot_minutes
+        return plan if remaining <= 0 else None
+
+    @staticmethod
+    def _block_powers(
+        slots: list[int], budget: dict[int, int], remaining: int, slot_minutes: int
+    ) -> list[int]:
+        """Watts per slot of a block: full budget, clipping the slot where the
+        target is reached, then padding slots (minimum chunk) at full budget."""
+        powers: list[int] = []
+        for slot in slots:
+            if remaining <= 0:
+                powers.append(budget[slot])
+                continue
+            power = budget[slot]
+            if remaining < power * slot_minutes:
+                power = max(1, -(-remaining // slot_minutes))
+            powers.append(power)
+            remaining -= power * slot_minutes
+        return powers
+
+    def _best_block(
+        self,
+        seg: list[int],
+        budget: dict[int, int],
+        objective,
+        remaining: int,
+        slot_minutes: int,
+        chunk: int,
+    ) -> Optional[tuple[float, int, list[int]]]:
+        """Cheapest block inside one stretch that delivers `remaining`."""
+        n = len(seg)
+        energy = [0]
+        for s in seg:
+            energy.append(energy[-1] + budget[s] * slot_minutes)
+        if energy[-1] < remaining:
+            return None
+        best: Optional[tuple[float, int, list[int]]] = None
+        end = 0
+        for i in range(n):
+            end = max(end, i + 1)
+            while end <= n and energy[end] - energy[i] < remaining:
+                end += 1
+            if end > n:
+                break
+            length = max(end - i, chunk)
+            if i + length > n:
+                continue
+            block = seg[i : i + length]
+            powers = self._block_powers(block, budget, remaining, slot_minutes)
+            cost = float(sum(p * objective.at(s) for s, p in zip(block, powers)))
+            if best is None or cost < best[0] - 1e-9:
+                best = (cost, block[0], block)
+        return best
+
+    def place_interruptible_cleanest(
+        self, scheduler_input: SchedulerInput, job: NormalizedJob, placement: Placement
+    ) -> bool:
+        """Commit `plan_cleanest_blocks`; False (and nothing written) if none."""
+        plan = self.plan_cleanest_blocks(scheduler_input, job, placement)
+        if plan is None:
+            return False
+        placement.power_by_job.setdefault(job.id, {})
+        for slot, power in plan.items():
+            placement.set(job.id, slot, power)
         return True
 
     def place_thermal_control(
