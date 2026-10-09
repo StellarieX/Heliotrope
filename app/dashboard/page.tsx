@@ -1471,7 +1471,7 @@ export default function Dashboard() {
                 </div>
                 <p className="font-mono text-[11px] text-zinc-600">
                   {impact.signal?.signal_type
-                    ? `${impact.signal.signal_type === "PROXY" ? "weather-estimated" : impact.signal.signal_type === "SYNTHETIC" ? "test" : impact.signal.signal_type.toLowerCase()} grid signal · `
+                    ? `${impact.signal.signal_type === "PROXY" ? "weather-estimated" : impact.signal.signal_type === "SYNTHETIC" ? "test" : impact.signal.signal_type === "FORECAST" ? "forecast" : impact.signal.signal_type.toLowerCase()} grid signal · ${impact.metrics.co2_basis === "FORECAST" ? "forecast-based estimate · " : ""}`
                     : ""}
                   {impact.metrics.deadline_misses === 0 ? "every deadline met" : `${impact.metrics.deadline_misses} deadline(s) missed`}
                 </p>

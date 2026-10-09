@@ -253,6 +253,8 @@ export interface CompareSchedulerResult {
     co2_saved_percent: number | null;
     peak_kw: number | null;
     deadline_misses: number;
+    /** "FORECAST" when the CO₂ figures come from a predicted signal, "OBSERVED" otherwise. */
+    co2_basis?: string;
   };
   schedule: Array<{ job_id: string; name: string; allocations: ScheduleAllocation[] }>;
   explanations: Array<{
