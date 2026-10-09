@@ -46,6 +46,8 @@ import { scrubLegacyEmail } from "../../lib/profile";
 
 type Profile = { username?: string; occupation?: string; place?: string; rooms?: number | null; onboarded?: boolean };
 
+type RankInfo = { score: number; band: RankedJob["band"]; reason: string; source: NonNullable<RankedJob["source"]> };
+
 type DashboardJob = JobInput & {
   tempMinC?: number;
   tempMaxC?: number;
@@ -249,9 +251,17 @@ export default function Dashboard() {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [profileLoaded, setProfileLoaded] = useState(false);
   const [jobs, setJobs] = useState<DashboardJob[]>([]);
-  const [ranked, setRanked] = useState<RankedJob[] | null>(null);
+  // Priority order for the flexible loads: Jev (via the backend) judges how essential each one
+  // is. Kept by load id so a load added or edited later never shows someone else's score.
+  const [rank, setRank] = useState<{
+    order: string[];
+    info: Record<string, RankInfo>;
+    provider: "jev" | "heuristic" | "local";
+    note: string;
+  } | null>(null);
   const [ranking, setRanking] = useState(false);
-  const [rankNote, setRankNote] = useState<string | null>(null);
+  const rankSeq = useRef(0);
+  const lastRankKey = useRef<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [fName, setFName] = useState("");
   const [fPower, setFPower] = useState("");
@@ -373,7 +383,10 @@ export default function Dashboard() {
         // Signed out: nothing of the previous account may linger in memory or storage.
         clearLiveSession();
         setJobs([]);
-        setRanked(null);
+        rankSeq.current++;
+        lastRankKey.current = null;
+        setRank(null);
+        setRanking(false);
         setCoordResult(null);
       }
     });
@@ -844,7 +857,6 @@ export default function Dashboard() {
           tempMaxC,
         },
       ]);
-      setRanked(null);
       setFName("");
       setFPower("");
       setFEnergy("");
@@ -877,16 +889,14 @@ export default function Dashboard() {
     setAddError(null);
   }
 
-  /** Rank by priority: Jev judges how essential each appliance is, the backend combines
-   *  that with time pressure, size and rigidity. Falls back to the local heuristic, and
-   *  says so, if the backend is unreachable. */
-  async function toggleRanking() {
-    if (ranked) {
-      setRanked(null);
-      setRankNote(null);
-      return;
-    }
-    const shiftable = jobs.filter((j) => j.shiftable !== false);
+  /** Ask the backend which flexible load matters first: Jev judges how essential each appliance
+   *  is, and the backend combines that with time pressure, size and flexibility. If the backend
+   *  can't be reached, a rough local estimate is used, and the note says so. */
+  const runRanking = useCallback(async (list: DashboardJob[], key: string) => {
+    const shiftable = list.filter((j) => j.shiftable !== false);
+    if (shiftable.length === 0) return;
+    const seq = ++rankSeq.current;
+    lastRankKey.current = key;
     setRanking(true);
     try {
       const res = await prioritizeLoads(
@@ -899,25 +909,48 @@ export default function Dashboard() {
           flex_hours: j.flexHours,
         }))
       );
-      const byId = new Map(shiftable.map((j) => [j.id, j]));
-      setRanked(
-        res.items.flatMap((it) => {
-          const j = byId.get(it.id);
-          return j ? [{ ...j, score: it.score, band: it.band, reason: it.reason, source: it.source }] : [];
-        })
-      );
-      setRankNote(
-        res.provider === "jev"
-          ? `Ranked with Jev (importance) plus time pressure, size and flexibility.${res.notes[0] ? ` ${res.notes[0]}` : ""}`
-          : res.notes[0] ?? "Ranked with the built-in heuristic."
-      );
+      if (seq !== rankSeq.current) return; // a newer request superseded this one
+      const ids = new Set(shiftable.map((j) => j.id));
+      const items = res.items.filter((it) => ids.has(it.id));
+      setRank({
+        order: items.map((it) => it.id),
+        info: Object.fromEntries(
+          items.map((it) => [it.id, { score: it.score, band: it.band, reason: it.reason, source: it.source }])
+        ),
+        provider: res.provider,
+        note:
+          res.provider === "jev"
+            ? `Order set by Jev (how essential each appliance is), plus time pressure, size and flexibility.${res.notes[0] ? ` ${res.notes[0]}` : ""}`
+            : res.notes[0] ?? "Order set by built-in rules (time pressure, size and flexibility). Jev isn't switched on for this server.",
+      });
     } catch {
-      setRanked(jevRank(jobs));
-      setRankNote("Backend unreachable: ranked with the local heuristic.");
+      if (seq !== rankSeq.current) return;
+      const local = jevRank(list);
+      setRank({
+        order: local.map((j) => j.id),
+        info: Object.fromEntries(
+          local.map((j) => [j.id, { score: j.score, band: j.band, reason: j.reason, source: "local" as const }])
+        ),
+        provider: "local",
+        note: "The planner isn't reachable, so this order is a rough local estimate. Press “Refresh ranking” to try again.",
+      });
     } finally {
-      setRanking(false);
+      if (seq === rankSeq.current) setRanking(false);
     }
-  }
+  }, []);
+
+  // Rank automatically whenever the flexible loads change (debounced, and never twice for the
+  // same set of loads), so the order is there up front instead of behind a button.
+  const rankKey = jobs
+    .filter((j) => j.shiftable !== false)
+    .map((j) => `${j.id}:${j.name}:${j.kind}:${j.powerKw}:${j.readyBy}:${j.flexHours}`)
+    .join("|");
+  useEffect(() => {
+    if (!profileLoaded || backend !== "online" || rankKey === "") return;
+    if (lastRankKey.current === rankKey) return;
+    const t = setTimeout(() => void runRanking(jobs, rankKey), 700);
+    return () => clearTimeout(t);
+  }, [profileLoaded, backend, rankKey, jobs, runRanking]);
 
   async function saveDetail(id: string, need: Detail, value: number) {
     if (!user) return;
@@ -927,7 +960,6 @@ export default function Dashboard() {
     try {
       await updateDoc(doc(db, "users", user.uid, "jobs", id), { [field]: value });
       setJobs((js) => js.map((j) => (j.id === id ? { ...j, [field]: value } : j)));
-      setRanked((r) => (r ? r.map((j) => (j.id === id ? { ...j, [field]: value } : j)) : r));
       setLoadError(null);
     } catch {
       setLoadError("Couldn't save that detail. Check your connection and try again.");
@@ -940,7 +972,6 @@ export default function Dashboard() {
     if (!db) return;
     const prev = jobs;
     setJobs((js) => js.filter((j) => j.id !== id));
-    setRanked(null);
     try {
       await deleteDoc(doc(db, "users", user.uid, "jobs", id));
     } catch {
@@ -949,6 +980,27 @@ export default function Dashboard() {
       setJobs(prev);
     }
   }
+
+  // The loads in display order: ranked flexible loads first (by id, so edits show immediately),
+  // then flexible loads not ranked yet, then the always-on ones.
+  const displayJobs = useMemo(() => {
+    const byId = new Map(jobs.map((j) => [j.id, j]));
+    const out: Array<DashboardJob & Partial<RankedJob>> = [];
+    const seen = new Set<string>();
+    if (rank) {
+      for (const id of rank.order) {
+        const j = byId.get(id);
+        const info = rank.info[id];
+        if (j && j.shiftable !== false && info) {
+          out.push({ ...j, ...info });
+          seen.add(id);
+        }
+      }
+    }
+    for (const j of jobs) if (j.shiftable !== false && !seen.has(j.id)) out.push(j);
+    for (const j of jobs) if (j.shiftable === false) out.push(j);
+    return out;
+  }, [jobs, rank]);
 
   if (!ready) {
     return (
@@ -1143,21 +1195,26 @@ export default function Dashboard() {
             <div>
               <h2 className="text-[15px] font-medium">Your loads</h2>
               <p className="mt-0.5 font-mono text-[11px] text-zinc-600">
-                {jobs.length === 0 ? "nothing added yet" : `${jobs.length} load${jobs.length > 1 ? "s" : ""}${ranked ? " · ranked" : ""}`}
+                {jobs.length === 0
+                  ? "nothing added yet"
+                  : `${jobs.length} load${jobs.length > 1 ? "s" : ""}${rank ? " · most important first" : ""}`}
               </p>
             </div>
             <button
-              onClick={() => void toggleRanking()}
-              disabled={jobs.length === 0 || ranking}
-              title="Which load matters first: Jev judges how essential each appliance is; time pressure, size and flexibility are added. The real timing comes from Plan live below."
+              onClick={() => void runRanking(jobs, rankKey)}
+              disabled={ranking || rankKey === ""}
+              title="Ask again which load matters first. Jev judges how essential each appliance is; time pressure, size and flexibility are added. The actual start times come from “Schedule my loads” below."
               className="min-h-11 cursor-pointer rounded-full border border-white/15 px-5 py-2 text-[13px] text-zinc-300 transition hover:border-white/40 hover:text-white active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-30"
             >
-              {ranking ? "Ranking…" : ranked ? "Hide ranking" : "Rank by priority"}
+              {ranking ? "Ranking…" : "Refresh ranking"}
             </button>
           </div>
 
-          {ranked && rankNote && (
-            <p className="border-t border-white/5 px-4 py-3 font-mono text-[11px] text-zinc-500 sm:px-8">{rankNote}</p>
+          {rankKey !== "" && (ranking || rank) && (
+            <p aria-live="polite" className="border-t border-white/5 px-4 py-3 font-mono text-[11px] text-zinc-500 sm:px-8">
+              {ranking && !rank ? "Working out which of your loads matters most…" : rank?.note}
+              {ranking && rank ? " Updating…" : ""}
+            </p>
           )}
           {loadError && (
             <div role="alert" className="flex flex-wrap items-center justify-between gap-3 border-t border-white/5 px-6 py-4 sm:px-8">
@@ -1168,11 +1225,11 @@ export default function Dashboard() {
             </div>
           )}
 
-          {(ranked ? [...ranked, ...jobs.filter((j) => j.shiftable === false)] : jobs).map((item, i) => {
-            const j = item as DashboardJob & Partial<RankedJob>;
+          {displayJobs.map((j, i) => {
+            const isRanked = j.shiftable !== false && j.band !== undefined;
             return (
               <div key={j.id} className="group flex items-start gap-3 border-t border-white/5 px-4 py-4 transition hover:bg-white/[0.02] sm:items-center sm:gap-5 sm:px-8 sm:py-5">
-                {ranked && j.shiftable !== false && <span className="w-6 shrink-0 font-mono text-[13px] text-zinc-600">{String(i + 1).padStart(2, "0")}</span>}
+                {isRanked && <span className="w-6 shrink-0 font-mono text-[13px] text-zinc-600">{String(i + 1).padStart(2, "0")}</span>}
                 <KindIcon kind={j.kind} />
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -1180,12 +1237,19 @@ export default function Dashboard() {
                     {j.shiftable === false ? (
                       <span className="shrink-0 rounded-full bg-white/5 px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider text-zinc-500">always-on · filtered</span>
                     ) : (
-                      ranked && j.band && (
+                      isRanked && j.band && (
                         <>
                           <BandChip band={j.band} />
-                          {j.source === "jev" && (
+                          {j.source === "jev" ? (
                             <span title="Jev judged how essential this appliance is" className="shrink-0 rounded-full bg-violet-400/15 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-violet-300">
-                              jev
+                              Jev
+                            </span>
+                          ) : (
+                            <span
+                              title={j.source === "local" ? "Rough estimate made in your browser" : "Built-in rules, not Jev"}
+                              className="shrink-0 rounded-full bg-white/5 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-zinc-500"
+                            >
+                              {j.source === "local" ? "estimate" : "rules"}
                             </span>
                           )}
                         </>
@@ -1203,10 +1267,10 @@ export default function Dashboard() {
                     const need = detailNeeded(j as StoredJob);
                     return need ? <DetailPrompt need={need} onSave={(v) => void saveDetail(j.id, need, v)} /> : null;
                   })()}
-                  {ranked && j.shiftable !== false && (
+                  {isRanked && (
                     <>
                       <div className="mt-2.5 h-1 max-w-md overflow-hidden rounded-full bg-white/10">
-                        <div className="h-full rounded-full bg-lime-300 transition-[width] duration-700" style={{ width: `${j.score}%` }} />
+                        <div className="h-full rounded-full bg-lime-300 transition-[width] duration-700" style={{ width: `${j.score ?? 0}%` }} />
                       </div>
                       <p className="mt-1.5 text-[13px] text-zinc-500">{j.reason}</p>
                     </>
