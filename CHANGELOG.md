@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.4.0 — Demo-ready: live overrides, honest impact, hardened scheduler
+
+- **Live execution controls.** Each planned load can be run now, paused, resumed, cancelled, or moved to a later deadline from the dashboard. "Run now" starts the load immediately instead of only opening its window. Moves that change nothing are rejected with a clear message.
+- **Honest impact.** Infeasible or unproven solver results never show savings. CO₂ computed from a forecast is labelled forecast-based, and a forecast built from measured history is no longer labelled as test data.
+- **Scheduler quality.** CP-SAT starts from the greedy plan and falls back to a validated greedy schedule when CP-SAT is unproven, errors, or is worse. Greedy charges each job in its cleanest contiguous block and runs a pairwise improvement pass. The peak objective is charged across the horizon as documented.
+- **Fairness.** Coordinated average fairness weighs each participant once, not once per job; fairness and congestion are normalized by objective carbon.
+- **Safety and correctness.** Replans keep the original job specs and frozen commitments, and always replace a version that no longer fits a lowered capacity. Failed events and overrides leave no partial writes. Thermal loads honour their max power and a single shared comfort tolerance. Overflow-prone objective weights return a 422 instead of a solver error.
+- **Jev.** Stricter validation of confidences and probabilities; a classify response reports `rule_based` when Jev did not answer.
+- **Fixes.** Dashboard: no sign-out data leak between accounts, no savings for infeasible plans, ranked list stays in sync with edits, Run-now and Move behave as labelled. Account deletion removes the profile and username before the login. Onboarding no longer claims a username is free when the check failed. CORS works for localhost and explicit origins together; the carbon cache is shared across requests.
+- **Repo.** Removed unreferenced scratch scripts; `.gitignore` covers editor, assistant and framework-generated files.
+
 ## v0.3.0 — Scheduler: honest optimality, fast solves, warm-started replans
 
 - **Review and fix of the warm-start proposal** (CP-SAT hints). As submitted it was inert (nothing passed hints), claimed to hint "all" variables but skipped the minimum-chunk starts, could emit a self-contradictory hint, and would have persisted a copy of the previous schedule inside every stored problem. Measured on a household with a water heater, warm-starting did not change solve time or the schedule, because the bottleneck is proving optimality, not finding a schedule.

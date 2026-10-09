@@ -14,7 +14,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from .api.routes import carbon, coordination, execution, forecast, health, loads, schedule
 from .core import config
 
-app = FastAPI(title="Heliotrope Backend", version="0.3.0")
+app = FastAPI(title="Heliotrope Backend", version="0.4.0")
 
 # The frontend runs on a different origin (Next.js on :3000, this API on :8000).
 # Without CORS every browser fetch() fails while curl keeps working, which makes
