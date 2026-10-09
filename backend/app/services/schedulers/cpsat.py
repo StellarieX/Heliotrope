@@ -736,6 +736,47 @@ class CPSATScheduler(BaseScheduler):
         return result
 
 
+def placement_objective(scheduler_input: SchedulerInput, powers: dict[str, dict[int, int]]) -> int:
+    """The CP-SAT objective value of a concrete schedule, in the model's own integer units.
+
+    `powers` maps job id -> {slot: watts}. This mirrors the terms `build_placement`
+    adds (carbon, peak, delay, cost) so a schedule from another engine can be ranked
+    against a CP-SAT incumbent on exactly the quantity CP-SAT minimizes. Extra terms
+    added by coordination subclasses are not included.
+    """
+    weights = scheduler_input.objective
+    slot_minutes = scheduler_input.horizon.slot_minutes
+    n = scheduler_input.horizon.slot_count
+    carbon = scheduler_input.objective_carbon()
+    mean_carbon = int(round(carbon.mean()))
+    tariff = scheduler_input.tariff
+    prices = tariff.price_micro_per_kwh if tariff else []
+
+    carbon_sum = delay_sum = cost_sum = 0
+    load = [scheduler_input.baseline.at(t) for t in range(n)]
+    for job in scheduler_input.jobs:
+        placed = {t: w for t, w in powers.get(job.id, {}).items() if w > 0 and 0 <= t < n}
+        for t, w in placed.items():
+            load[t] += w
+            carbon_sum += carbon.at(t) * slot_minutes * w
+            price = prices[t] if t < len(prices) else 0
+            cost_sum += price * slot_minutes * w
+            if job.job_type is not LoadType.DEFERRABLE_ATOMIC:
+                delay_sum += (t - job.release_slot) * mean_carbon * slot_minutes * w
+        if job.job_type is LoadType.DEFERRABLE_ATOMIC and placed:
+            first = min(placed)
+            delay_sum += (first - job.release_slot) * mean_carbon * slot_minutes * job.power_w
+
+    total = to_objective_weight(weights.carbon) * carbon_sum
+    if weights.peak:
+        total += to_objective_weight(weights.peak) * (max(load) if load else 0) * mean_carbon * slot_minutes * n
+    if weights.delay:
+        total += to_objective_weight(weights.delay) * delay_sum
+    if weights.cost and tariff is not None:
+        total += to_objective_weight(weights.cost) * cost_sum
+    return total
+
+
 def scale_max(job: NormalizedJob) -> int:
     """Maximum watts a thermal job can draw, for the delay coefficient."""
     if job.thermal is None:

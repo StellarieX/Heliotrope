@@ -35,10 +35,13 @@ from ..domain.scheduling import (
     SchedulerConfig,
     SchedulerInput,
     SchedulerResult,
+    SolverInfo,
+    SolverStatus,
     TimeOfUseTariff,
 )
 from .carbon_accounting import CarbonAccountingService, Placement
 from .schedulers import SCHEDULERS, BaseScheduler, SchedulerName
+from .schedulers.cpsat import placement_objective
 from .scheduler_normalizer import SchedulerNormalizer, fingerprint_input
 
 
@@ -142,14 +145,106 @@ class SchedulerService:
         explain: bool = True,
     ) -> SchedulerResult:
         """Run one scheduler and, optionally, attach counterfactual explanations."""
-        engine = SCHEDULERS[scheduler]
         config = with_default_gap(config)
-        # `SCHEDULERS` holds process-wide singletons, so config must never be
-        # written onto them: see `_scoped_engine` for what that cost us.
-        with _scoped_engine(engine, config) as scoped:
-            result = scoped.schedule(scheduler_input)
+        if scheduler is SchedulerName.CPSAT:
+            result = self._run_cpsat(scheduler_input, config)
+        else:
+            result = self._run_engine(scheduler_input, scheduler, config)
         if explain:
             self.attach_explanations(scheduler_input, result)
+        return result
+
+    @staticmethod
+    def _run_engine(
+        scheduler_input: SchedulerInput, scheduler: SchedulerName, config: Optional[SchedulerConfig]
+    ) -> SchedulerResult:
+        # `SCHEDULERS` holds process-wide singletons, so config must never be
+        # written onto them: see `_scoped_engine` for what that cost us.
+        with _scoped_engine(SCHEDULERS[scheduler], config) as scoped:
+            return scoped.schedule(scheduler_input)
+
+    def _run_cpsat(
+        self, scheduler_input: SchedulerInput, config: Optional[SchedulerConfig]
+    ) -> SchedulerResult:
+        """CP-SAT, warm-started from Greedy and guarded by it.
+
+        Greedy is cheap and yields a validated schedule whenever one is easy to
+        find. It does two jobs here:
+
+          * WARM START. When the caller supplied no hints, Greedy's schedule becomes
+            the hint, so the solver starts from a real incumbent. Hints are advisory
+            (no constraint, not fingerprinted, not serialized), so they cannot change
+            the optimum, only how fast the search gets there.
+          * ANYTIME GUARD. A CP-SAT result that was not PROVED optimal is compared
+            with Greedy on the CP-SAT objective. If Greedy is better, or CP-SAT found
+            nothing in time, Greedy's schedule is returned, labelled FEASIBLE (never
+            OPTIMAL) with the substitution recorded. A proved OPTIMAL result is
+            always kept.
+        """
+        greedy = self._run_engine(scheduler_input, SchedulerName.GREEDY, config)
+        greedy_ok = greedy.status in (ScheduleStatus.FEASIBLE, ScheduleStatus.OPTIMAL)
+
+        solve_input = scheduler_input
+        if greedy_ok and not scheduler_input.hints:
+            solve_input = scheduler_input.model_copy(
+                update={"hints": self.extract_hints_from_result(greedy)}
+            )
+        result = self._run_engine(solve_input, SchedulerName.CPSAT, config)
+
+        if not greedy_ok or result.status is ScheduleStatus.OPTIMAL:
+            return result
+        if result.status is ScheduleStatus.UNKNOWN:
+            return self._heuristic_incumbent(
+                greedy,
+                result,
+                "CP-SAT found no schedule within its time limit; returning the Greedy "
+                "schedule, which satisfies every hard constraint but is not proven optimal.",
+            )
+        if result.status is ScheduleStatus.FEASIBLE:
+            greedy_objective = placement_objective(scheduler_input, _powers_of(greedy))
+            cpsat_objective = placement_objective(scheduler_input, _powers_of(result))
+            if greedy_objective < cpsat_objective:
+                return self._heuristic_incumbent(
+                    greedy,
+                    result,
+                    "CP-SAT stopped before proving optimality and its schedule was worse "
+                    "than the Greedy heuristic incumbent on the same objective "
+                    f"({cpsat_objective} vs {greedy_objective}); returning the Greedy "
+                    "schedule, which is not proven optimal.",
+                    objective=greedy_objective,
+                )
+        return result
+
+    @staticmethod
+    def _heuristic_incumbent(
+        greedy: SchedulerResult,
+        cpsat: SchedulerResult,
+        note: str,
+        objective: Optional[int] = None,
+    ) -> SchedulerResult:
+        """Greedy's schedule presented as the CPSAT entry, honestly labelled.
+
+        The status is FEASIBLE and `solver.name` stays GREEDY, so nothing reads as a
+        CP-SAT optimum. The CP-SAT bound is kept when the solver produced one.
+        """
+        result = greedy.model_copy(deep=True)
+        result.scheduler = SchedulerName.CPSAT.value
+        result.status = ScheduleStatus.FEASIBLE
+        result.reason = note
+        result.solver = SolverInfo(
+            name=SchedulerName.GREEDY.value,
+            status=SolverStatus.FEASIBLE,
+            solve_time_ms=(greedy.solver.solve_time_ms or 0) + (cpsat.solver.solve_time_ms or 0),
+            objective_value=float(objective) if objective is not None else None,
+            best_bound=cpsat.solver.best_bound,
+            time_limit_seconds=cpsat.solver.time_limit_seconds,
+            is_optimal=False,
+        )
+        if objective is not None and cpsat.solver.best_bound is not None:
+            result.solver.optimality_gap = max(0.0, objective - cpsat.solver.best_bound)
+            if objective:
+                result.solver.relative_gap = result.solver.optimality_gap / abs(objective)
+        result.metrics.solve_time_ms = result.solver.solve_time_ms
         return result
 
     def extract_hints_from_result(self, result: SchedulerResult) -> dict[str, list[tuple[datetime, int]]]:
@@ -358,6 +453,13 @@ class SchedulerService:
             f"window while preserving the {deadline.isoformat()} deadline. "
             f"Estimated CO2 avoided: {saved:.4g} kg.",
         )
+
+
+def _powers_of(result: SchedulerResult) -> dict[str, dict[int, int]]:
+    return {
+        scheduled.job_id: {a.slot: a.power_w for a in scheduled.allocations}
+        for scheduled in result.schedule
+    }
 
 
 def resolve_scheduler(name: str) -> SchedulerName:
