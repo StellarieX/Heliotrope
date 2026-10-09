@@ -9,11 +9,14 @@ per-user data.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Iterable, Optional
 
 from ..core import config
+from ..domain.horizon import SLOT_MINUTES
 from ..domain.execution import JobStatus, ScheduleLifecycle
 from ..domain.scheduling import SchedulerInput
+from ..utils.time import generate_slots
 from .execution_store import ExecutionStore
 
 _DEAD_LIFECYCLES = frozenset(
@@ -37,34 +40,122 @@ class PoolSnapshot:
         return round(max(self.pooled_w, default=0) / 1000.0, 3)
 
 
+def _live_allocations(store: ExecutionStore, exclude_schedule_ids: Iterable[str] = ()):
+    """Yield (schedule_id, job_id, allocation, slot_minutes) for every planned
+    allocation of every live, unfinished job. Internal: callers aggregate and never
+    let the ids leave the process."""
+    excluded = set(exclude_schedule_ids)
+    for record in store.list_records():
+        if record.schedule_id in excluded or record.lifecycle in _DEAD_LIFECYCLES:
+            continue
+        if not record.versions:
+            continue
+        slot_minutes = (
+            record.scheduler_input.horizon.slot_minutes if record.scheduler_input else SLOT_MINUTES
+        )
+        for scheduled in record.current_version().result.schedule:
+            state = record.execution.get(scheduled.job_id)
+            if state is not None and state.status in _DEAD_JOB_STATUSES:
+                continue
+            for alloc in scheduled.allocations:
+                if alloc.power_w > 0:
+                    yield record.schedule_id, scheduled.job_id, alloc, slot_minutes
+
+
 def compute_pool(
     store: ExecutionStore,
     horizon,
     exclude_schedule_ids: Iterable[str] = (),
 ) -> PoolSnapshot:
     """Pooled planned watts per slot of `horizon`, matched by slot timestamp."""
-    excluded = set(exclude_schedule_ids)
     index = {horizon.slot_start(i): i for i in range(horizon.slot_count)}
     pooled = [0] * horizon.slot_count
-    active = 0
-    for record in store.list_records():
-        if record.schedule_id in excluded or record.lifecycle in _DEAD_LIFECYCLES:
-            continue
-        if not record.versions:
-            continue
-        touched = False
-        for scheduled in record.current_version().result.schedule:
-            state = record.execution.get(scheduled.job_id)
-            if state is not None and state.status in _DEAD_JOB_STATUSES:
-                continue
-            for alloc in scheduled.allocations:
-                i = index.get(alloc.timestamp)
-                if i is not None and alloc.power_w > 0:
-                    pooled[i] += alloc.power_w
-                    touched = True
-        if touched:
-            active += 1
-    return PoolSnapshot(pooled_w=pooled, active_schedules=active)
+    touched: set[str] = set()
+    for schedule_id, _job_id, alloc, _m in _live_allocations(store, exclude_schedule_ids):
+        i = index.get(alloc.timestamp)
+        if i is not None:
+            pooled[i] += alloc.power_w
+            touched.add(schedule_id)
+    return PoolSnapshot(pooled_w=pooled, active_schedules=len(touched))
+
+
+@dataclass(frozen=True)
+class PoolStats:
+    """Aggregate planned load of all live schedules over a window. No ids."""
+
+    slot_starts: list[datetime]
+    kw: list[float]
+    energy_kwh: list[float]
+    active_schedules: int
+    active_loads: int
+
+    @property
+    def total_planned_kwh(self) -> float:
+        return round(sum(self.energy_kwh), 3)
+
+    @property
+    def peak_kw(self) -> float:
+        return round(max(self.kw, default=0.0), 3)
+
+    @property
+    def peak_at(self) -> Optional[datetime]:
+        if not self.kw or max(self.kw) <= 0:
+            return None
+        return self.slot_starts[self.kw.index(max(self.kw))]
+
+    def _mean_loaded(self) -> float:
+        loaded = [k for k in self.kw if k > 0]
+        return sum(loaded) / len(loaded) if loaded else 0.0
+
+    @property
+    def average_kw(self) -> float:
+        """Mean over the slots that carry any load (0 when none do)."""
+        return round(self._mean_loaded(), 3)
+
+    @property
+    def peak_to_average(self) -> Optional[float]:
+        """Herding indicator: 1.0 is perfectly flat, larger is more crowded."""
+        avg = self._mean_loaded()
+        return round(max(self.kw) / avg, 3) if avg > 0 else None
+
+
+def compute_pool_stats(
+    store: ExecutionStore, start: datetime, end: datetime, resolution_minutes: int
+) -> PoolStats:
+    """Planned kW of all live schedules per `resolution_minutes` bucket of [start, end).
+
+    An allocation holds its power for the slot length of the plan it came from; it is
+    spread over every bucket it overlaps by time, so any resolution gives the same
+    energy. Bucket kW is that energy divided by the bucket length (mean power).
+    """
+    starts = generate_slots(start, end, resolution_minutes)
+    origin = starts[0]
+    res = timedelta(minutes=resolution_minutes)
+    energy_wh = [0.0] * len(starts)
+    schedules: set[str] = set()
+    loads: set[tuple[str, str]] = set()
+    for schedule_id, job_id, alloc, slot_minutes in _live_allocations(store):
+        a0 = alloc.timestamp
+        a1 = a0 + timedelta(minutes=slot_minutes)
+        first = max(0, int((a0 - origin) // res))
+        for i in range(first, len(starts)):
+            b0 = starts[i]
+            if b0 >= a1:
+                break
+            overlap = (min(a1, b0 + res) - max(a0, b0)).total_seconds() / 3600.0
+            if overlap > 0:
+                energy_wh[i] += alloc.power_w * overlap
+                schedules.add(schedule_id)
+                loads.add((schedule_id, job_id))
+    hours = resolution_minutes / 60.0
+    kwh = [round(w / 1000.0, 6) for w in energy_wh]
+    return PoolStats(
+        slot_starts=starts,
+        kw=[round(e / hours, 3) for e in kwh],
+        energy_kwh=kwh,
+        active_schedules=len(schedules),
+        active_loads=len(loads),
+    )
 
 
 def attach_pool(

@@ -11,7 +11,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from .api.routes import carbon, coordination, execution, forecast, health, loads, schedule
+from .api.routes import carbon, coordination, execution, forecast, health, loads, pool, schedule
 from .core import config
 
 app = FastAPI(title="Heliotrope Backend", version="0.4.0")
@@ -115,6 +115,7 @@ app.include_router(forecast.router, prefix="/api/v1", tags=["forecast"])
 app.include_router(loads.router, prefix="/api/v1", tags=["loads"])
 app.include_router(coordination.router, prefix="/api/v1", tags=["coordination"])
 app.include_router(execution.router, prefix="/api/v1", tags=["execution"])
+app.include_router(pool.router, prefix="/api/v1", tags=["pool"])
 
 
 @app.get("/")

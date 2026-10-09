@@ -121,3 +121,103 @@ def test_replanning_cancels_the_users_previous_plan(store):
     assert res.status_code == 200, res.text
     assert res.json()["pool"]["active_schedules"] == 0  # the old plan is not someone else's load
     assert store.get(first).lifecycle is ScheduleLifecycle.CANCELLED
+
+
+# --- GET /pool/stats ---------------------------------------------------------------
+
+
+def stats(**params):
+    q = {"start": DAY_START.isoformat(), "end": (DAY_START + timedelta(hours=2)).isoformat(), **params}
+    return client.get("/api/v1/pool/stats", params=q)
+
+
+def plan_oven(store, job_id):
+    service = SchedulerService()
+    inp, result, _ = solve(service, store, job_id, pooled=False)
+    return store.create(inp, result), result
+
+
+def test_pool_stats_are_zeros_with_no_plans(store):
+    res = stats()
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["active_schedules"] == 0 and body["active_loads"] == 0
+    assert body["total_planned_kwh"] == 0 and body["peak_kw"] == 0
+    assert body["peak_at"] is None and body["peak_to_average"] is None
+    assert body["average_kw"] == 0
+    assert body["resolution_minutes"] == 15
+    assert len(body["slots"]) == 8 and all(s["kw"] == 0 for s in body["slots"])
+    assert set(body["pool"]) == {"enabled", "beta", "ref_kw", "scale_kw"}
+
+
+def test_pool_stats_aggregate_two_plans_per_slot(store):
+    rec_a, first = plan_oven(store, "a")
+    # Second plan on the same constant-signal slots (both ovens run in slot 1-2).
+    rec_b, second = plan_oven(store, "b")
+    body = stats().json()
+    by_ts = {s["timestamp"]: s["kw"] for s in body["slots"]}
+    expected: dict = {}
+    for res in (first, second):
+        for sched in res.schedule:
+            for a in sched.allocations:
+                key = a.timestamp.isoformat().replace("+00:00", "Z")
+                expected[key] = expected.get(key, 0.0) + a.power_w / 1000.0
+    for ts, kw in expected.items():
+        assert by_ts[ts] == pytest.approx(kw)
+    assert body["active_schedules"] == 2 and body["active_loads"] == 2
+    assert body["total_planned_kwh"] == pytest.approx(sum(expected.values()) * 0.25)
+    assert body["peak_kw"] == pytest.approx(max(expected.values()))
+    assert body["peak_at"] in expected
+    loaded = [k for k in expected.values() if k > 0]
+    assert body["average_kw"] == pytest.approx(sum(loaded) / len(loaded))
+    assert body["peak_to_average"] == pytest.approx(max(loaded) / (sum(loaded) / len(loaded)), rel=1e-3)
+
+
+def test_pool_stats_exclude_cancelled_plans(store):
+    rec_a, _ = plan_oven(store, "a")
+    plan_oven(store, "b")
+    assert stats().json()["active_schedules"] == 2
+    rec_a.lifecycle = ScheduleLifecycle.CANCELLED
+    store._persist(rec_a)
+    assert stats().json()["active_schedules"] == 1
+
+
+def test_pool_stats_resolution_preserves_energy(store):
+    plan_oven(store, "a")
+    fine = stats().json()
+    hourly = stats(resolution_minutes=60).json()
+    assert len(hourly["slots"]) == 2 and hourly["resolution_minutes"] == 60
+    assert hourly["total_planned_kwh"] == pytest.approx(fine["total_planned_kwh"])
+    assert sum(s["kw"] for s in hourly["slots"]) * 1.0 == pytest.approx(hourly["total_planned_kwh"])
+
+
+def test_pool_stats_payload_carries_no_identifiers(store):
+    rec, result = plan_oven(store, "secret-job-id")
+    text = stats().text
+    assert rec.schedule_id not in text
+    assert "secret-job-id" not in text and "Oven" not in text
+    assert set(stats().json()) == {
+        "generated_at", "start", "end", "resolution_minutes", "active_schedules",
+        "active_loads", "total_planned_kwh", "peak_kw", "peak_at", "average_kw",
+        "peak_to_average", "slots", "pool",
+    }
+    assert all(set(s) == {"timestamp", "kw"} for s in stats().json()["slots"])
+
+
+def test_pool_stats_default_window_is_the_next_24_hours(store):
+    body = client.get("/api/v1/pool/stats").json()
+    assert len(body["slots"]) == 96 and body["resolution_minutes"] == 15
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"resolution_minutes": 7},
+        {"start": "2024-01-01T00:00:00"},
+        {"end": "2020-01-01T00:00:00Z"},
+        {"end": "2025-12-31T00:00:00Z"},
+    ],
+)
+def test_pool_stats_rejects_bad_windows(store, params):
+    res = client.get("/api/v1/pool/stats", params={"start": "2024-01-01T00:00:00Z", **params})
+    assert res.status_code == 422 and res.json()["code"] == "invalid_request"
