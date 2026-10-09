@@ -1,8 +1,24 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { CarbonSignalResponse } from "../../lib/api/types";
 import type { CarbonForecastResponse, ForecastMode } from "../../lib/api/client";
+import { signalTypeLabel } from "./labels";
+
+/** The API values stay ACTUAL / EXPECTED / ROBUST; these are the words people see. */
+const MODE_LABEL: Record<ForecastMode, string> = { ACTUAL: "Now", EXPECTED: "Forecast", ROBUST: "Cautious" };
+const MODE_HELP: Record<ForecastMode, string> = {
+  ACTUAL: "Now: plans with the grid signal as it is reported today.",
+  EXPECTED: "Forecast: plans against the most likely forecast for the next 24 hours.",
+  ROBUST: "Cautious: plans against the high end of the forecast, so a dirtier-than-expected grid hurts less.",
+};
+const CAUTION_LABEL: Record<number, string> = { 0.5: "Medium", 1: "High" };
+
+function clock(iso: string) {
+  const d = new Date(iso);
+  const t = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return d.toDateString() === new Date().toDateString() ? t : `${d.toLocaleDateString([], { weekday: "short" })} ${t}`;
+}
 
 export interface CarbonChartProps {
   signal: CarbonSignalResponse;
@@ -108,7 +124,7 @@ export default function CarbonChart({
         max: rawMax,
         startTime: fPoints[0]?.timestamp ?? signal.start,
         endTime: fPoints[fPoints.length - 1]?.timestamp ?? signal.end,
-        label: `Carbon forecast (${activeMode}), ${fPoints.length} points, peak ${Math.round(maxVal)} grams CO2 per kilowatt-hour`,
+        label: `Carbon forecast (${MODE_LABEL[activeMode]}), ${fPoints.length} points, highest ${Math.round(rawMax)} grams of CO2 per kilowatt-hour`,
       };
     }
 
@@ -149,14 +165,18 @@ export default function CarbonChart({
       max: rawMax,
       startTime: signal.start,
       endTime: signal.end,
-      label: `Carbon intensity, ${signal.points.length} points, peak ${Math.round(maxVal)} grams CO2 per kilowatt-hour`,
+      label: `Grid carbon, ${signal.points.length} points, highest ${Math.round(rawMax)} grams of CO2 per kilowatt-hour`,
     };
   }, [isForecastActive, forecast, signal, activeRiskWeight, activeMode]);
 
   const synthetic = signal.signal_type === "SYNTHETIC";
   const estimated = signal.signal_type === "PROXY";
-  // A fixed "now" for this render pass; the chart does not tick, the page refetches.
-  const [nowMs] = useState(() => Date.now());
+  // "Now" moves once a minute so the marker stays honest on a tab left open.
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNowMs(Date.now()), 60_000);
+    return () => clearInterval(t);
+  }, []);
   const spanMs = new Date(endTime).getTime() - new Date(startTime).getTime();
   const nowFrac = spanMs > 0 ? (nowMs - new Date(startTime).getTime()) / spanMs : -1;
   const showNow = !isForecastActive && nowFrac > 0.02 && nowFrac < 0.98;
@@ -166,9 +186,9 @@ export default function CarbonChart({
     return (
       <div>
         <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-500">
-          Grid signal · gCO₂/kWh
+          Grid carbon · grams of CO₂ per kWh
         </p>
-        <p className="mt-4 font-mono text-[12px] text-zinc-600">No data in range.</p>
+        <p className="mt-4 font-mono text-[12px] text-zinc-600">No grid data for this time range.</p>
       </div>
     );
   }
@@ -178,38 +198,44 @@ export default function CarbonChart({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-500">
-            Grid signal · gCO₂/kWh
+            Grid carbon · grams of CO₂ per kWh
           </p>
-          <div className="mt-2 flex items-center gap-1.5 font-mono text-[11px]">
+          <p className="mt-1 max-w-md text-[12px] leading-5 text-zinc-600">
+            How much CO₂ is released to make each unit of electricity (kWh). Lower is cleaner, so the planner runs your loads in the dips.
+          </p>
+          <div role="group" aria-label="Which signal to plan with" className="mt-2 flex flex-wrap items-center gap-1.5 font-mono text-[11px]">
             {(["ACTUAL", "EXPECTED", "ROBUST"] as const).map((m) => (
               <button
                 key={m}
                 onClick={() => setMode(m)}
                 type="button"
+                aria-pressed={activeMode === m}
+                title={MODE_HELP[m]}
                 className={`min-h-10 cursor-pointer rounded-lg px-3.5 py-2 transition ${
                   activeMode === m
                     ? "bg-lime-300 font-semibold text-black"
                     : "bg-white/5 text-zinc-400 hover:bg-white/10 hover:text-white"
                 }`}
               >
-                {m}
+                {MODE_LABEL[m]}
               </button>
             ))}
             {activeMode === "ROBUST" && (
-              <div className="ml-2 flex items-center gap-1.5 text-zinc-400">
-                <span className="text-[10px]">λ:</span>
+              <div className="ml-2 flex items-center gap-1.5 text-zinc-400" title="How far toward the top of the forecast range to plan.">
+                <span className="text-[10px]">Caution:</span>
                 {[0.5, 1.0].map((w) => (
                   <button
                     key={w}
                     type="button"
                     onClick={() => setRiskWeight(w)}
-                    className={`min-h-10 min-w-10 cursor-pointer rounded px-2.5 py-2 text-[11px] ${
+                    aria-pressed={activeRiskWeight === w}
+                    className={`min-h-10 min-w-10 cursor-pointer rounded px-3 py-2 text-[11px] ${
                       activeRiskWeight === w
                         ? "bg-amber-400 font-bold text-black"
                         : "bg-white/5 hover:bg-white/10"
                     }`}
                   >
-                    {w}
+                    {CAUTION_LABEL[w] ?? w}
                   </button>
                 ))}
               </div>
@@ -233,24 +259,26 @@ export default function CarbonChart({
             }
           >
             {isForecastActive
-              ? `Forecast · ${activeMode}${activeMode === "ROBUST" ? ` (λ=${activeRiskWeight})` : ""}`
+              ? activeMode === "ROBUST"
+                ? `Cautious forecast · ${(CAUTION_LABEL[activeRiskWeight] ?? String(activeRiskWeight)).toLowerCase()} caution`
+                : "Forecast"
               : synthetic
-                ? "Synthetic test data"
+                ? "Test data"
                 : estimated
                   ? "Live weather estimate"
-                  : signal.signal_type}
+                  : signalTypeLabel(signal.signal_type)}
           </span>
           {isForecastActive && (
             <div className="flex items-center gap-3 font-mono text-[10px] text-zinc-500">
               <span className="flex items-center gap-1">
-                <i className="block h-[3px] w-3 rounded bg-sky-400 not-italic" /> predicted
+                <i className="block h-[3px] w-3 rounded bg-sky-400 not-italic" /> forecast
               </span>
               <span className="flex items-center gap-1">
-                <i className="block h-[5px] w-3 rounded border border-dashed border-sky-400/70 bg-sky-400/20 not-italic" /> prediction interval
+                <i className="block h-[5px] w-3 rounded border border-dashed border-sky-400/70 bg-sky-400/20 not-italic" /> likely range
               </span>
               {activeMode === "ROBUST" && (
                 <span className="flex items-center gap-1">
-                  <i className="block h-[3px] w-3 rounded bg-amber-400 not-italic" /> robust
+                  <i className="block h-[3px] w-3 rounded bg-amber-400 not-italic" /> cautious
                 </span>
               )}
             </div>
@@ -341,14 +369,20 @@ export default function CarbonChart({
       </svg>
 
       <div className="mt-1 flex flex-wrap justify-between gap-x-3 gap-y-0.5 font-mono text-[10px] text-zinc-600">
-        <span>{new Date(startTime).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span>
+        <span>{clock(startTime)}</span>
         <span className="order-last w-full text-center sm:order-none sm:w-auto">
-          min {Math.round(min)} · max {Math.round(max)} gCO₂/kWh
+          lowest {Math.round(min)} · highest {Math.round(max)} g CO₂ per kWh
           {showNow ? " · dashed line = now" : ""}
-          {isForecastActive ? " · 90% prediction interval" : ""}
+          {isForecastActive && forecast
+            ? ` · likely range covers ${Math.round(forecast.provenance.interval_nominal_coverage * 100)}% of past outcomes`
+            : ""}
         </span>
-        <span>{new Date(endTime).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span>
+        <span>{clock(endTime)}</span>
       </div>
+      <p className="mt-2 text-[12px] leading-5 text-zinc-600" aria-live="polite">
+        {MODE_HELP[activeMode]}
+        {activeMode !== "ACTUAL" && !isForecastActive ? " No forecast is available right now, so the chart shows the current signal." : ""}
+      </p>
     </div>
   );
 }

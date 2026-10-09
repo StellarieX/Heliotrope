@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import type { ExecutionState, OverrideCommand, ScheduleHistory } from "../../lib/api/types";
+import { jobStatusLabel, lifecycleLabel, reasonLabel, solverLabel } from "./labels";
 
 const STATUS_STYLE: Record<string, string> = {
   PENDING: "bg-white/5 text-zinc-400",
@@ -14,20 +15,14 @@ const STATUS_STYLE: Record<string, string> = {
   CANCELLED: "bg-white/5 text-zinc-600",
 };
 
-const STATUS_LABEL: Record<string, string> = {
-  PENDING: "planned",
-  READY: "ready",
-  RUNNING: "running",
-  PAUSED: "paused",
-  COMPLETED: "done",
-  MISSED: "slot passed",
-  FAILED: "didn't run",
-  CANCELLED: "cancelled",
-};
-
+/** "7:30 PM", or "Tue 1:00 AM" when it falls on another day, so an overnight run reads correctly. */
 function fmtTime(iso: string | null) {
   if (!iso) return "—";
-  return new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const d = new Date(iso);
+  const t = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return d.toDateString() === new Date().toDateString()
+    ? t
+    : `${d.toLocaleDateString([], { weekday: "short" })} ${t}`;
 }
 
 const actionBtn =
@@ -61,16 +56,16 @@ export default function ExecutionPanel({
         <div className="flex items-center gap-3">
           <span className="live-dot h-1.5 w-1.5 rounded-full bg-lime-300" />
           <p className="text-[15px] font-medium">
-            {state.lifecycle.toLowerCase()} <span className="font-mono text-[12px] text-zinc-500">· v{state.version}</span>
+            {lifecycleLabel(state.lifecycle)} <span className="font-mono text-[12px] text-zinc-500">· version {state.version}</span>
           </p>
         </div>
         <button
           onClick={onReplan}
           disabled={busy}
-          title="Re-optimise whatever hasn't run yet, from the current time"
+          title="Re-plan whatever hasn't run yet, starting from now, using the latest grid forecast"
           className="min-h-11 cursor-pointer rounded-full bg-lime-300 px-5 py-2 text-[12px] font-medium text-black transition hover:bg-lime-200 active:scale-[0.97] disabled:cursor-wait disabled:opacity-50"
         >
-          Replan the rest
+          Update schedule
         </button>
       </div>
 
@@ -90,15 +85,15 @@ export default function ExecutionPanel({
                   <div className="flex flex-wrap items-center gap-2">
                     <p className="truncate text-sm font-medium">{names[j.job_id] ?? "Removed load"}</p>
                     <span className={`rounded-full px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${STATUS_STYLE[j.status] ?? "bg-white/5 text-zinc-400"}`}>
-                      {STATUS_LABEL[j.status] ?? j.status.toLowerCase()}
+                      {jobStatusLabel(j.status)}
                     </span>
                   </div>
                   <p className="mt-1 font-mono text-[11px] text-zinc-500">
-                    {fmtTime(j.scheduled_start)} → {fmtTime(j.scheduled_end)} · {j.energy_delivered_kwh.toFixed(2)}/{j.expected_energy_kwh.toFixed(2)} kWh
+                    {fmtTime(j.scheduled_start)} → {fmtTime(j.scheduled_end)} · {j.energy_delivered_kwh.toFixed(2)} of {j.expected_energy_kwh.toFixed(2)} kWh used
                   </p>
                   {j.status === "MISSED" && (
                     <p className="mt-1 text-[12px] leading-5 text-red-300/90">
-                      Its planned start passed without you starting it. Start it now, or replan.
+                      Its planned start time has passed. Start it now, or press “Update schedule” to find a new time.
                     </p>
                   )}
                   <div className="mt-1.5 h-1 max-w-md overflow-hidden rounded-full bg-white/10">
@@ -109,10 +104,10 @@ export default function ExecutionPanel({
                   {j.status === "PENDING" || j.status === "READY" || j.status === "MISSED" ? (
                     <>
                       <button onClick={() => onOverride(j.job_id, "START_NOW")} disabled={busy} className={actionBtn}>
-                        Run now
+                        Start now
                       </button>
                       <button onClick={() => onEvent(j.job_id, "JOB_STARTED")} disabled={busy} className={actionBtn}>
-                        Mark started
+                        I started it
                       </button>
                     </>
                   ) : null}
@@ -122,7 +117,7 @@ export default function ExecutionPanel({
                         Pause
                       </button>
                       <button onClick={() => onEvent(j.job_id, "JOB_COMPLETED")} disabled={busy} className={actionBtn}>
-                        Mark done
+                        It&apos;s done
                       </button>
                     </>
                   )}
@@ -136,10 +131,10 @@ export default function ExecutionPanel({
                       onClick={() => setMoveOpen(moveOpen === j.job_id ? null : j.job_id)}
                       disabled={busy}
                       aria-expanded={moveOpen === j.job_id}
-                      title="Allow this load to finish later"
+                      title="Allow this load to finish later than planned"
                       className={actionBtn}
                     >
-                      Move
+                      Give more time
                     </button>
                   )}
                   {!terminal && j.status !== "FAILED" && (
@@ -148,7 +143,7 @@ export default function ExecutionPanel({
                       disabled={busy}
                       className={`${actionBtn} text-zinc-500 hover:border-red-500/40 hover:text-red-300`}
                     >
-                      Didn&apos;t run
+                      It didn&apos;t run
                     </button>
                   )}
                   {!terminal && confirmCancel !== j.job_id && (
@@ -170,10 +165,10 @@ export default function ExecutionPanel({
                         disabled={busy}
                         className={`${actionBtn} border-red-500/40 text-red-300 hover:border-red-400 hover:text-red-200`}
                       >
-                        Confirm cancel
+                        Yes, cancel it
                       </button>
                       <button onClick={() => setConfirmCancel(null)} className={actionBtn}>
-                        Keep
+                        Keep it
                       </button>
                     </>
                   )}
@@ -181,7 +176,7 @@ export default function ExecutionPanel({
               </div>
               {!terminal && moveOpen === j.job_id && (
                 <div className="mt-2 flex flex-wrap items-center gap-2">
-                  <span className="text-[12px] text-zinc-500">Allow it to finish later, up to</span>
+                  <span className="text-[12px] text-zinc-500">Let it finish later than planned, by up to</span>
                   {[1, 3].map((h) => (
                     <button
                       key={h}
@@ -192,7 +187,7 @@ export default function ExecutionPanel({
                       }}
                       className={actionBtn}
                     >
-                      +{h}h
+                      {h} more hour{h === 1 ? "" : "s"}
                     </button>
                   ))}
                 </div>
@@ -204,11 +199,11 @@ export default function ExecutionPanel({
 
       {history && history.versions.length > 1 && (
         <div className="mt-4">
-          <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-600">Schedule updated</p>
+          <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-600">Changes since the first plan</p>
           {history.versions.slice(1).map((v) => (
             <div key={v.version} className="mt-2 rounded-xl border border-white/10 p-4">
               <p className="font-mono text-[11px] text-zinc-500">
-                v{v.version} · {v.reason.toLowerCase()} · {v.solver_status.toLowerCase()}
+                Version {v.version} · {reasonLabel(v.reason)} · {solverLabel(v.solver_status)}
               </p>
               {v.changed_jobs.map((c) => (
                 <p key={c.job_id} className="mt-1.5 text-[13px] text-zinc-300">
@@ -221,7 +216,7 @@ export default function ExecutionPanel({
         </div>
       )}
       <p className="mt-3 text-[11px] leading-5 text-zinc-600">
-        Progress is what you report. No meters or devices are connected yet, so nothing here is read from hardware.
+        Progress is what you report. No meters or devices are connected yet, so nothing here is read from hardware. kWh (kilowatt-hours) is the unit your electricity meter counts.
       </p>
     </div>
   );

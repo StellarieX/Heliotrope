@@ -3,6 +3,12 @@
 import { useMemo } from "react";
 import type { CoordinationAggregatePoint } from "../../lib/api/types";
 
+function clock(iso: string) {
+  const d = new Date(iso);
+  const t = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return d.toDateString() === new Date().toDateString() ? t : `${d.toLocaleDateString([], { weekday: "short" })} ${t}`;
+}
+
 /** Building aggregate: baseline + flexible + capacity ceiling + congestion.
  *  Props-driven like CarbonChart; the backend computes, this only draws. */
 export default function BuildingChart({ points }: { points: CoordinationAggregatePoint[] }) {
@@ -33,9 +39,9 @@ export default function BuildingChart({ points }: { points: CoordinationAggregat
     return (
       <div>
         <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-500">
-          Building load · kW
+          Power used at once · kilowatts (kW)
         </p>
-        <p className="mt-4 font-mono text-[12px] text-zinc-600">No building coordination profile computed yet.</p>
+        <p className="mt-4 font-mono text-[12px] text-zinc-600">No combined profile yet.</p>
       </div>
     );
   }
@@ -44,12 +50,12 @@ export default function BuildingChart({ points }: { points: CoordinationAggregat
     <div>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-500">
-          Building load · kW
+          Power used at once · kilowatts (kW)
         </p>
         <div className="flex items-center gap-3 font-mono text-[10px] text-zinc-500">
-          <span className="flex items-center gap-1"><i className="block h-[3px] w-4 rounded bg-lime-300 not-italic" /> total</span>
-          <span className="flex items-center gap-1"><i className="block h-[3px] w-4 rounded bg-zinc-500 not-italic" /> flexible</span>
-          <span className="flex items-center gap-1"><i className="block h-[3px] w-4 rounded bg-white/40 not-italic" /> capacity</span>
+          <span className="flex items-center gap-1"><i className="block h-[3px] w-4 rounded bg-lime-300 not-italic" /> all loads</span>
+          <span className="flex items-center gap-1"><i className="block h-[3px] w-4 rounded bg-zinc-500 not-italic" /> movable loads</span>
+          <span className="flex items-center gap-1"><i className="block h-[3px] w-4 rounded bg-white/40 not-italic" /> limit</span>
         </div>
       </div>
       <svg
@@ -57,7 +63,7 @@ export default function BuildingChart({ points }: { points: CoordinationAggregat
         className="mt-3 h-36 w-full"
         preserveAspectRatio="none"
         role="img"
-        aria-label={`Building aggregate load, peak ${peak.toFixed(1)} kilowatts`}
+        aria-label={`Power used at once across all loads, highest ${peak.toFixed(1)} kilowatts`}
       >
         <path d={`${total} L${W},${H} L0,${H} Z`} fill="#a3e635" opacity="0.08" />
         <path d={cap} fill="none" stroke="#fff" strokeWidth="1.2" strokeDasharray="5 4" opacity="0.45" vectorEffect="non-scaling-stroke" />
@@ -65,8 +71,10 @@ export default function BuildingChart({ points }: { points: CoordinationAggregat
         <path d={total} fill="none" stroke="#a3e635" strokeWidth="1.8" vectorEffect="non-scaling-stroke" />
       </svg>
       <div className="mt-1 flex justify-between font-mono text-[10px] text-zinc-600">
-        <span>peak {peak.toFixed(1)} kW</span>
-        <span>{points.length} slots</span>
+        <span>highest {peak.toFixed(1)} kW</span>
+        <span>
+          {clock(safePoints[0].timestamp)} to {clock(safePoints[safePoints.length - 1].timestamp)}
+        </span>
       </div>
     </div>
   );
