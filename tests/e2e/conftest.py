@@ -5,6 +5,15 @@ for TestClient, domain generators, Firestore rules evaluation, and mocks.
 """
 
 from __future__ import annotations
+# Tests must never write into the developer's real execution database: a local demo
+# would otherwise count hundreds of test schedules as other users' load.
+import os as _os
+import tempfile as _tempfile
+
+_os.environ.setdefault(
+    "HELIOTROPE_EXECUTION_DB",
+    _os.path.join(_tempfile.mkdtemp(prefix="heliotrope-tests-"), "execution.db"),
+)
 
 import json
 import os
