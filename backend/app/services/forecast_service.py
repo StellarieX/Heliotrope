@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import bisect
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
 
 from ..domain.carbon import CarbonPoint, CarbonSignal, Quality, SignalType
@@ -57,6 +57,17 @@ class ForecastServiceError(ValueError):
 
 class ForecastHistoryTooShort(ForecastServiceError):
     """There is not enough history before the window to forecast it."""
+
+
+def _floor_to_grid(moment: datetime, resolution_minutes: int) -> datetime:
+    step = resolution_minutes * 60
+    seconds = int(moment.timestamp())
+    return datetime.fromtimestamp(seconds - seconds % step, tz=timezone.utc)
+
+
+def _ceil_to_grid(moment: datetime, resolution_minutes: int) -> datetime:
+    floored = _floor_to_grid(moment, resolution_minutes)
+    return floored if floored == moment else floored + timedelta(minutes=resolution_minutes)
 
 
 class ForecastService:
@@ -322,6 +333,10 @@ class ForecastService:
             )
         if resolution_minutes <= 0 or resolution_minutes > 60:
             raise ForecastServiceError("resolution_minutes must be between 1 and 60")
+        # Snap to the slot grid. History sits on whole slots (:00, :15, ...); a forecast
+        # that starts at 16:23:08 would match no time-of-day bucket and collapse every
+        # point to the pooled mean, i.e. a flat line.
+        start, end = _floor_to_grid(start, resolution_minutes), _ceil_to_grid(end, resolution_minutes)
 
         usable = history if history is not None else self.resolve_history(
             start, history_days, resolution_minutes

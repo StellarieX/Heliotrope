@@ -193,3 +193,15 @@ def test_forecast_signal_built_from_synthetic_history_stays_synthetic():
     assert signal.points
     assert all(p.signal_type is SignalType.SYNTHETIC for p in signal.points)
     assert all(p.is_forecast for p in signal.points)
+
+
+def test_forecast_starting_off_the_slot_grid_still_follows_the_daily_shape():
+    """A start like 16:23:08 must snap to the 15-minute grid. Unsnapped, no point
+    matches a time-of-day bucket and the whole forecast collapses to one value."""
+    service = ForecastService()
+    start = datetime(2026, 10, 9, 16, 23, 8, tzinfo=timezone.utc)
+    forecast = service.forecast(start, start + timedelta(hours=24))
+    first = forecast.points[0].timestamp
+    assert first.minute % 15 == 0 and first.second == 0
+    predicted = {round(p.predicted_gco2_per_kwh, 3) for p in forecast.points}
+    assert len(predicted) > 10, "forecast is flat: points did not match the history grid"
