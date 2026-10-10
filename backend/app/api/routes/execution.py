@@ -75,18 +75,21 @@ def _no_feasible_plan(
     solver_status: str, reason: str, warnings: list[str], left_out: list[dict]
 ) -> JSONResponse:
     """422 for a plan with nothing storable: no record, no cancellation."""
-    detail = (
-        f"No feasible plan ({solver_status})."
-        + (f" {reason}" if reason else "")
-        + " Your loads need more power than the building limit allows at once,"
-        " or a deadline is too tight. Raise the limit or give more time."
-    )
-    if warnings:
-        detail += " Warnings: " + "; ".join(warnings)
     if left_out:
-        detail += "; left out: " + "; ".join(
+        # The specific per-load reasons come first; the generic
+        # power/deadline sentence adds nothing once a load names its cause.
+        detail = "Couldn't plan: " + "; ".join(
             f"{l['name']}: {l['reason']}" for l in left_out
         )
+    else:
+        detail = (
+            f"No feasible plan ({solver_status})."
+            + (f" {reason}" if reason else "")
+            + " Your loads need more power than the building limit allows at once,"
+            " or a deadline is too tight. Raise the limit or give more time."
+        )
+    if warnings:
+        detail += " Warnings: " + "; ".join(warnings)
     return JSONResponse(
         status_code=422,
         content={"detail": detail, "code": "no_feasible_plan", "message": detail},
@@ -224,13 +227,16 @@ def plan_single(body: PlanRequest) -> JSONResponse:
     result = service.run(solve_input, name, config=body.solver_config, explain=True)
     if result.status not in ("OPTIMAL", "FEASIBLE"):
         # Graceful degrade: drop the largest-energy load per round until the
-        # remainder solves. Probes run cheap (explain=False); one final
-        # explained run reproduces the surviving input's explanations.
+        # remainder solves. Drop rounds run on a short clock so failure paths
+        # stay well under the frontend timeout; only the final explained run
+        # uses the caller's full solver config.
         from ...services.plan_fallback import drop_until_feasible
 
         solve_dropped: list[dict] = []
         drop_until_feasible(
-            lambda inp: service.run(inp, name, config=body.solver_config, explain=False),
+            lambda inp: service.run(
+                inp, name, config=SchedulerConfig(time_limit_seconds=2.0), explain=False
+            ),
             solve_input,
             body.capacity_kw,
             solve_dropped,
@@ -254,8 +260,9 @@ def plan_single(body: PlanRequest) -> JSONResponse:
     # flexible load was dropped and there is nothing to store.
     has_fixed = any(j.job_type is LoadType.FIXED for j in body.jobs)
     if not solve_input.jobs and not has_fixed:
-        solver_status = result.solver.status.value if result.solver else result.status.value
-        return _no_feasible_plan(solver_status, result.reason, warnings, left_out)
+        # Every flexible load was dropped: the empty re-solve trivially reports
+        # OPTIMAL, which must never leak into the message — nothing was plannable.
+        return _no_feasible_plan("INFEASIBLE", result.reason, warnings, left_out)
     if body.replaces_schedule_id:
         old = store.get(body.replaces_schedule_id)
         if old is not None and old.lifecycle not in (

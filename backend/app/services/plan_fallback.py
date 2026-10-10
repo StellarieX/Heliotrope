@@ -56,7 +56,7 @@ def drop_until_feasible(
                 "job_id": victim.id,
                 "name": victim.name,
                 "reason": (
-                    f"{victim.name} was left out to fit the {capacity_kw:g} kW limit. "
+                    f"can't fit within the {capacity_kw:g} kW limit. "
                     f"{result.reason or result.status}"
                 ),
             }

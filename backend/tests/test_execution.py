@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
@@ -660,3 +660,80 @@ def test_fixed_only_plan_is_valid():
     sid = plan([fan_job(release_at=at(18), deadline_at=at(24))])
     state = client.get(f"/api/v1/schedules/{sid}/state").json()
     assert state["jobs"] == []
+
+
+def test_ac_one_kw_plans():
+    # Holdability at 1.0 kW: (5.1 - 1.4*1.0)/0.15 = 3.7/0.15 ~= 24.7 C, inside
+    # 22-26 C. Cooling has no reachability check (the solver only requires
+    # end_state >= target with the band held), so this plans.
+    ac = _weak_thermal_job(
+        job_id="ac-1",
+        name="Balcony AC",
+        category="Cooling",
+        spec=ThermalSpec(
+            a=0.85,
+            b=-1.4,
+            c=5.1,
+            max_power_kw=1.0,
+            resolution_minutes=15,
+            temperature_initial_c=26.0,
+            temperature_min_c=22.0,
+            temperature_max_c=26.0,
+            temperature_target_c=24.0,
+        ),
+        power_kw=1.0,
+    )
+    body = {
+        "jobs": [spec_dict(ac)],
+        "capacity_kw": 20.0,
+        "scheduler": "CPSAT",
+        "carbon_start": CARBON_START,
+        "carbon_end": CARBON_END,
+    }
+    res = client.post("/api/v1/schedules/plan", json=body)
+    assert res.status_code == 200, res.text
+    payload = res.json()
+    assert len(payload["jobs"]) == 1
+    assert payload["jobs"][0]["job_id"] == "ac-1"
+    assert payload.get("left_out", []) == []
+
+
+def test_geyser_short_deadline_left_out():
+    # Holdability passes at 2 kW (steady state 75 C >= 40 C floor) but one
+    # 15-minute slot from 45 C only reaches 0.9*45 + 2.75*2 + 2.0 = 48 C,
+    # short of the 55 C target: the geyser is left out with "can't reach"
+    # while the EV still plans.
+    geyser = _weak_thermal_job(
+        job_id="geyser-1",
+        name="Rushed geyser",
+        category="Water heating",
+        spec=ThermalSpec(
+            a=0.90,
+            b=2.75,
+            c=2.0,
+            max_power_kw=2.0,
+            resolution_minutes=15,
+            temperature_initial_c=45.0,
+            temperature_min_c=40.0,
+            temperature_max_c=65.0,
+            temperature_target_c=55.0,
+        ),
+        power_kw=2.0,
+    )
+    geyser.release_at = at(18)
+    geyser.deadline_at = at(18) + timedelta(minutes=15)
+    body = {
+        "jobs": [spec_dict(geyser), spec_dict(ev_job(energy_required_kwh=7.2))],
+        "capacity_kw": 20.0,
+        "scheduler": "CPSAT",
+        "carbon_start": CARBON_START,
+        "carbon_end": CARBON_END,
+    }
+    res = client.post("/api/v1/schedules/plan", json=body)
+    assert res.status_code == 200, res.text
+    payload = res.json()
+    assert [j["job_id"] for j in payload["jobs"]] == ["ev-1"]
+    left_out = payload["left_out"]
+    assert len(left_out) == 1
+    assert left_out[0]["job_id"] == "geyser-1"
+    assert "can't reach" in left_out[0]["reason"]

@@ -475,28 +475,21 @@ class SchedulerNormalizer:
                     )
 
         target_c = thermal.target_milli / 1000 if thermal.target_milli is not None else None
-        if target_c is not None:
+        # Reachability is a HEATING-only check. The CP-SAT model judges the
+        # target as end_state >= target for every thermal job and enforces the
+        # band on every state, so a cooler that holds the band is feasible even
+        # when it never drives the room down to the target: demanding
+        # end_state <= target for cooling rejected feasible AC loads.
+        if target_c is not None and b >= 0:
             T = clamped
             steps = deadline_slot - release_slot
-            reached = False
-            if b >= 0:
-                if T >= target_c - 1e-9:
-                    reached = True
-                else:
-                    for _ in range(steps):
-                        T = a * T + b * P_kw + c
-                        if T >= target_c - 1e-9:
-                            reached = True
-                            break
-            else:
-                if T <= target_c + 1e-9:
-                    reached = True
-                else:
-                    for _ in range(steps):
-                        T = a * T + b * P_kw + c
-                        if T <= target_c + 1e-9:
-                            reached = True
-                            break
+            reached = T >= target_c - 1e-9
+            if not reached:
+                for _ in range(steps):
+                    T = a * T + b * P_kw + c
+                    if T >= target_c - 1e-9:
+                        reached = True
+                        break
             if not reached:
                 raise NormalizationError(
                     f"{spec.normalized_name} can't reach {target_c:g} C by "
