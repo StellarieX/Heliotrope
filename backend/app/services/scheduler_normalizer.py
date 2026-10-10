@@ -22,7 +22,7 @@ Flexible jobs are placed into that headroom, never into the raw capacity, so a
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Optional
 
@@ -36,6 +36,7 @@ from ..domain.scaling import (
     to_carbon_int,
     to_energy_wmin,
     to_power_w,
+    to_temperature_milli,
 )
 from ..domain.scheduling import (
     BaselineProfile,
@@ -405,6 +406,9 @@ class SchedulerNormalizer:
                     "so it cannot be simulated"
                 )
             thermal = ThermalScale.from_spec(spec.thermal, horizon.slot_minutes)
+            thermal = self._preflight_thermal(
+                spec, thermal, max_power_w, release_slot, deadline_slot, horizon, report
+            )
 
         energy_wmin = (
             to_energy_wmin(spec.energy_required_kwh)
@@ -429,6 +433,76 @@ class SchedulerNormalizer:
             category=spec.category,
             shiftable=spec.shiftable,
         )
+
+    def _preflight_thermal(
+        self, spec, thermal, max_power_w, release_slot, deadline_slot, horizon, report
+    ) -> ThermalScale:
+        tmin_c = thermal.min_milli / 1000
+        tmax_c = thermal.max_milli / 1000
+        tinit_c = thermal.initial_milli / 1000
+        clamped = min(max(tinit_c, tmin_c), tmax_c)
+        if tinit_c < tmin_c or tinit_c > tmax_c:
+            thermal = replace(thermal, initial_milli=to_temperature_milli(clamped))
+            report.warnings.append(
+                f"{spec.normalized_name}: starting temperature {tinit_c:g} C is "
+                f"outside its {tmin_c:g}-{tmax_c:g} C comfort band, so it starts "
+                f"at {clamped:g} C instead."
+            )
+
+        a = spec.thermal.a
+        b = spec.thermal.b
+        c = spec.thermal.c
+        P_kw = min(max_power_w / 1000.0, thermal.max_power_millikw / 1000.0)
+        if abs(1 - a) >= 1e-9:
+            steady = (c + b * P_kw) / (1 - a)
+            if b > 0:
+                if steady < tmin_c - 1e-9:
+                    raise NormalizationError(
+                        f"{spec.normalized_name} at {P_kw:g} kW can't keep "
+                        f"{tmin_c:g}-{tmax_c:g} C; raise its power"
+                    )
+            elif b < 0:
+                if steady > tmax_c + 1e-9:
+                    raise NormalizationError(
+                        f"{spec.normalized_name} at {P_kw:g} kW can't keep "
+                        f"{tmin_c:g}-{tmax_c:g} C; raise its power"
+                    )
+            else:
+                if steady < tmin_c - 1e-9 or steady > tmax_c + 1e-9:
+                    raise NormalizationError(
+                        f"{spec.normalized_name} at {P_kw:g} kW can't keep "
+                        f"{tmin_c:g}-{tmax_c:g} C; raise its power"
+                    )
+
+        target_c = thermal.target_milli / 1000 if thermal.target_milli is not None else None
+        if target_c is not None:
+            T = clamped
+            steps = deadline_slot - release_slot
+            reached = False
+            if b >= 0:
+                if T >= target_c - 1e-9:
+                    reached = True
+                else:
+                    for _ in range(steps):
+                        T = a * T + b * P_kw + c
+                        if T >= target_c - 1e-9:
+                            reached = True
+                            break
+            else:
+                if T <= target_c + 1e-9:
+                    reached = True
+                else:
+                    for _ in range(steps):
+                        T = a * T + b * P_kw + c
+                        if T <= target_c + 1e-9:
+                            reached = True
+                            break
+            if not reached:
+                raise NormalizationError(
+                    f"{spec.normalized_name} can't reach {target_c:g} C by "
+                    f"{spec.deadline_at.isoformat()}; give it more time"
+                )
+        return thermal
 
     # --- carbon (§37) -------------------------------------------------------
 

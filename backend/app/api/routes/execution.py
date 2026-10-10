@@ -48,10 +48,10 @@ from ...services.load_pool import attach_pool, pool_summary
 from ...services.meter_provider import InMemoryMeterProvider
 from ...services.receding import RecedingHorizon, RemainingInfeasible, now_slot
 from ...services.scheduler_normalizer import NormalizationError
-from ...services.scheduler_service import SchedulerService
+from ...services.scheduler_service import SchedulerService, resolve_scheduler
 from ...services.schedulers import SchedulerName
 from ...services.simulator import ExecutionSimulator
-from .schedule import ScheduleRequest, _prepare
+from .schedule import ScheduleRequest, _prepare_graceful
 
 router = APIRouter()
 store = ExecutionStore()
@@ -68,6 +68,28 @@ def _err(detail: str, code: str, status: int) -> JSONResponse:
     return JSONResponse(
         status_code=status,
         content={"detail": detail, "code": code, "message": detail},
+    )
+
+
+def _no_feasible_plan(
+    solver_status: str, reason: str, warnings: list[str], left_out: list[dict]
+) -> JSONResponse:
+    """422 for a plan with nothing storable: no record, no cancellation."""
+    detail = (
+        f"No feasible plan ({solver_status})."
+        + (f" {reason}" if reason else "")
+        + " Your loads need more power than the building limit allows at once,"
+        " or a deadline is too tight. Raise the limit or give more time."
+    )
+    if warnings:
+        detail += " Warnings: " + "; ".join(warnings)
+    if left_out:
+        detail += "; left out: " + "; ".join(
+            f"{l['name']}: {l['reason']}" for l in left_out
+        )
+    return JSONResponse(
+        status_code=422,
+        content={"detail": detail, "code": "no_feasible_plan", "message": detail},
     )
 
 
@@ -139,6 +161,7 @@ def _state_payload(record: ScheduleRecord) -> dict:
         "lifecycle": record.lifecycle.value,
         "version": v.version,
         "solver_status": v.solver_status,
+        "left_out": record.context.get("left_out", []),
         "jobs": [
             {
                 "job_id": s.job_id,
@@ -175,10 +198,20 @@ class CoordinatedPlanRequest(CoordinationRequest):
 
 @router.post("/schedules/plan")
 def plan_single(body: PlanRequest) -> JSONResponse:
-    prepared, error = _prepare(body)
-    if error is not None:
-        return error
-    name, scheduler_input, warnings, _fc, _forecast = prepared
+    probe_run = lambda inp: service.run(
+        inp,
+        resolve_scheduler(body.scheduler),
+        config=SchedulerConfig(time_limit_seconds=2.0),
+        explain=False,
+    )
+    name, scheduler_input, warnings, _fc, _forecast, left_out, fatal = (
+        _prepare_graceful(body, probe_run)
+    )
+    if fatal is not None:
+        return fatal
+    if scheduler_input is None:
+        # Every load was dropped by its own probe: nothing to solve.
+        return _no_feasible_plan("INFEASIBLE", "", warnings, left_out)
     pool = pool_summary(None)
     solve_input = scheduler_input
     if body.share_pool:
@@ -190,22 +223,39 @@ def plan_single(body: PlanRequest) -> JSONResponse:
         )
     result = service.run(solve_input, name, config=body.solver_config, explain=True)
     if result.status not in ("OPTIMAL", "FEASIBLE"):
+        # Graceful degrade: drop the largest-energy load per round until the
+        # remainder solves. Probes run cheap (explain=False); one final
+        # explained run reproduces the surviving input's explanations.
+        from ...services.plan_fallback import drop_until_feasible
+
+        solve_dropped: list[dict] = []
+        drop_until_feasible(
+            lambda inp: service.run(inp, name, config=body.solver_config, explain=False),
+            solve_input,
+            body.capacity_kw,
+            solve_dropped,
+        )
+        left_out = [*left_out, *solve_dropped]
+        dropped_ids = {d["job_id"] for d in solve_dropped}
+        solve_input = solve_input.model_copy(
+            update={"jobs": [j for j in solve_input.jobs if j.id not in dropped_ids]}
+        )
+        # An emptied flexible input still solves (verified by probe: CPSAT
+        # OPTIMAL, GREEDY/ASAP FEASIBLE on zero jobs), so rely on the re-run.
+        result = service.run(solve_input, name, config=body.solver_config, explain=True)
+    if result.status not in ("OPTIMAL", "FEASIBLE"):
         # Never store an empty schedule: an INFEASIBLE/UNKNOWN result carries
         # no allocations, so persisting it would render "version 1" with no
         # jobs and leave the pool empty. The replaced schedule stays live.
         solver_status = result.solver.status.value if result.solver else result.status.value
-        detail = (
-            f"No feasible plan ({solver_status})."
-            + (f" {result.reason}" if result.reason else "")
-            + " Your loads need more power than the building limit allows at once,"
-            " or a deadline is too tight. Raise the limit or give more time."
-        )
-        if warnings:
-            detail += " Warnings: " + "; ".join(warnings)
-        return JSONResponse(
-            status_code=422,
-            content={"detail": detail, "code": "no_feasible_plan", "message": detail},
-        )
+        return _no_feasible_plan(solver_status, result.reason, warnings, left_out)
+    # A surviving empty flexible set is only a plan when FIXED baseline load
+    # carries it (FIXED-only or FIXED-plus-dropped-flex input); otherwise every
+    # flexible load was dropped and there is nothing to store.
+    has_fixed = any(j.job_type is LoadType.FIXED for j in body.jobs)
+    if not solve_input.jobs and not has_fixed:
+        solver_status = result.solver.status.value if result.solver else result.status.value
+        return _no_feasible_plan(solver_status, result.reason, warnings, left_out)
     if body.replaces_schedule_id:
         old = store.get(body.replaces_schedule_id)
         if old is not None and old.lifecycle not in (
@@ -220,11 +270,13 @@ def plan_single(body: PlanRequest) -> JSONResponse:
         "scheduler": name.value,
         "execution": body.execution.model_dump(mode="json"),
         "solver_config": body.solver_config.model_dump(mode="json") if body.solver_config else None,
+        "left_out": left_out,
     }
     store._persist(record)  # the context is what makes replans faithful after a restart
     payload = _state_payload(record)
     payload["warnings"] = warnings
     payload["pool"] = pool
+    payload["left_out"] = left_out
     return JSONResponse(status_code=200, content=payload)
 
 

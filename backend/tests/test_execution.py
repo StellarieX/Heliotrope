@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 import app.api.routes.execution as execution
 from app.domain.execution import RescheduleReason, ScheduleEvent, ScheduleEventType
+from app.domain.loads import LoadSpec, LoadType, ThermalSpec
 from app.main import app
 from app.services.execution_store import ExecutionStore
 from app.services.scheduler_service import SchedulerService
@@ -553,3 +554,109 @@ def test_start_now_pins_an_atomic_job_to_start_at_once(monkeypatch):
     start = datetime.fromisoformat(job["scheduled_start"])
     # The slot holding `now` (18:15) or the next one: never a later, cleaner hour.
     assert now.replace(minute=15) <= start <= now.replace(minute=30), job
+
+
+def _weak_thermal_job(
+    *,
+    job_id: str,
+    name: str,
+    category: str,
+    spec: ThermalSpec,
+    power_kw: float,
+) -> LoadSpec:
+    return LoadSpec(
+        id=job_id,
+        normalized_name=name,
+        category=category,
+        job_type=LoadType.THERMAL,
+        power_kw=power_kw,
+        max_power_kw=power_kw,
+        thermal=spec,
+        release_at=at(18),
+        deadline_at=at(31),
+    )
+
+
+def test_partial_plan_leaves_out_infeasible_ac():
+    # Holdability arithmetic (AC_SYNTHETIC cooling coeffs a=0.85, b=-1.40,
+    # c=5.10, band 22-26 C, target 24 C inside the band): at full 0.5 kW the
+    # steady state is (c + b*P) / (1 - a) = (5.1 - 1.4*0.5) / 0.15
+    # = 4.4 / 0.15 ~= 29.3 C, which EXCEEDS the 26 C ceiling, so the cooler
+    # alone cannot hold the band. The EV survives; the AC lands in left_out.
+    ac = _weak_thermal_job(
+        job_id="ac-1",
+        name="Weak AC",
+        category="Cooling",
+        spec=ThermalSpec(
+            a=0.85,
+            b=-1.4,
+            c=5.1,
+            max_power_kw=0.5,
+            resolution_minutes=15,
+            temperature_initial_c=26.0,
+            temperature_min_c=22.0,
+            temperature_max_c=26.0,
+            temperature_target_c=24.0,
+        ),
+        power_kw=0.5,
+    )
+    body = {
+        "jobs": [spec_dict(ac), spec_dict(ev_job(energy_required_kwh=7.2))],
+        "capacity_kw": 20.0,
+        "scheduler": "CPSAT",
+        "carbon_start": CARBON_START,
+        "carbon_end": CARBON_END,
+    }
+    res = client.post("/api/v1/schedules/plan", json=body)
+    assert res.status_code == 200, res.text
+    payload = res.json()
+    assert len(payload["jobs"]) == 1
+    assert payload["jobs"][0]["job_id"] == "ev-1"
+    left_out = payload["left_out"]
+    assert len(left_out) == 1
+    assert left_out[0]["job_id"] == "ac-1"
+    assert "can't keep" in left_out[0]["reason"]
+
+
+def test_weak_geyser_holdability_reason():
+    # Holdability arithmetic (GEYSER_SYNTHETIC heating coeffs a=0.90, b=2.75,
+    # c=2.0, band 40-65 C): at full 0.5 kW the steady state is
+    # (c + b*P) / (1 - a) = (2.0 + 2.75*0.5) / 0.10 = 3.375 / 0.1 = 33.75 C,
+    # BELOW the 40 C floor, so the geyser alone cannot hold the band and no
+    # flexible job is plannable -> 422 no_feasible_plan.
+    geyser = _weak_thermal_job(
+        job_id="geyser-1",
+        name="Weak geyser",
+        category="Water heating",
+        spec=ThermalSpec(
+            a=0.90,
+            b=2.75,
+            c=2.0,
+            max_power_kw=0.5,
+            resolution_minutes=15,
+            temperature_initial_c=45.0,
+            temperature_min_c=40.0,
+            temperature_max_c=65.0,
+            temperature_target_c=55.0,
+        ),
+        power_kw=0.5,
+    )
+    body = {
+        "jobs": [spec_dict(geyser)],
+        "capacity_kw": 20.0,
+        "scheduler": "CPSAT",
+        "carbon_start": CARBON_START,
+        "carbon_end": CARBON_END,
+    }
+    res = client.post("/api/v1/schedules/plan", json=body)
+    assert res.status_code == 422, res.text
+    payload = res.json()
+    assert payload["code"] == "no_feasible_plan"
+    combined = f"{payload.get('message', '')} {payload.get('detail', '')}"
+    assert "can't keep 40-65" in combined
+
+
+def test_fixed_only_plan_is_valid():
+    sid = plan([fan_job(release_at=at(18), deadline_at=at(24))])
+    state = client.get(f"/api/v1/schedules/{sid}/state").json()
+    assert state["jobs"] == []

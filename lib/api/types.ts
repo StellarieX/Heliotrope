@@ -225,6 +225,9 @@ export interface ExecutionState {
   version: number;
   solver_status: string;
   jobs: ExecutionJobState[];
+  /** Loads the backend left out of the plan (with reasons). Present on plan/state payloads. */
+  left_out?: Array<{ job_id: string; name: string; reason: string }>;
+  warnings?: string[];
   /** Present on plan responses. */
   pool?: PoolSummary;
 }

@@ -26,7 +26,7 @@ import math
 from ...domain.forecasting import ForecastConfig, ForecastMode
 from ...domain.horizon import HorizonError, SchedulingHorizon
 from ...domain.scaling import ScalingError
-from ...domain.loads import LoadSpec
+from ...domain.loads import LoadSpec, LoadType
 from ...domain.scheduling import (
     ObjectiveWeights,
     SchedulerConfig,
@@ -210,20 +210,20 @@ def _load_signal(request: ScheduleRequest):
     return carbon.get_signal(start, end, request.carbon_resolution_minutes)
 
 
-def _prepare(request: ScheduleRequest):
-    """Shared preamble: validate, normalize, and turn engine errors into HTTP.
+def _load_signal_and_config(request: ScheduleRequest):
+    """Scheduler resolution + signal/forecast loading + forecast config.
 
-    §38: when the request carries a `carbon` block in FORECAST mode, the signal
-    handed to the scheduler is the FORECAST, and the per-slot upper prediction
-    bound rides alongside so the normalizer can build the objective. Everything
-    else is untouched, so the forecast path and the observed path normalize
-    through exactly the same code.
+    Everything `_prepare` did before `service.build_input`, extracted verbatim
+    so graceful planning can reuse the identical preamble. Returns
+    `(name, signal, forecast_config, forecast, grid_horizon, uncertainty_upper,
+    error)` where `error` is a JSONResponse on failure (the other six are then
+    None) and None on success.
     """
     try:
         name = resolve_scheduler(request.scheduler)
     except KeyError as exc:
         detail = str(exc.args[0])
-        return None, _err(detail, "invalid_scheduler", 400)
+        return None, None, None, None, None, None, _err(detail, "invalid_scheduler", 400)
 
     forecast = None
     uncertainty_upper = None
@@ -251,19 +251,19 @@ def _prepare(request: ScheduleRequest):
             )
         except (ForecastServiceError, ForecastError, ValueError) as exc:
             detail = str(exc)
-            return None, _err(detail, "invalid_request", 422)
+            return None, None, None, None, None, None, _err(detail, "invalid_request", 422)
     else:
         try:
             signal = _load_signal(request)
         except CarbonBadRequest as exc:
             detail = str(exc)
-            return None, _err(detail, "invalid_request", 422)
+            return None, None, None, None, None, None, _err(detail, "invalid_request", 422)
         except CarbonUnavailable as exc:
             detail = str(exc)
-            return None, _err(detail, "provider_unavailable", 503)
+            return None, None, None, None, None, None, _err(detail, "provider_unavailable", 503)
         except ValueError as exc:
             detail = str(exc)
-            return None, _err(detail, "invalid_request", 422)
+            return None, None, None, None, None, None, _err(detail, "invalid_request", 422)
 
     try:
         forecast_config = ForecastConfig(
@@ -281,7 +281,25 @@ def _prepare(request: ScheduleRequest):
         # A config the model rejects (a partial-slot deadline buffer, an
         # out-of-range risk weight) is a malformed REQUEST, not a server fault.
         detail = str(exc)
-        return None, _err(detail, "invalid_request", 422)
+        return None, None, None, None, None, None, _err(detail, "invalid_request", 422)
+
+    return name, signal, forecast_config, forecast, grid_horizon, uncertainty_upper, None
+
+
+def _prepare(request: ScheduleRequest):
+    """Shared preamble: validate, normalize, and turn engine errors into HTTP.
+
+    §38: when the request carries a `carbon` block in FORECAST mode, the signal
+    handed to the scheduler is the FORECAST, and the per-slot upper prediction
+    bound rides alongside so the normalizer can build the objective. Everything
+    else is untouched, so the forecast path and the observed path normalize
+    through exactly the same code.
+    """
+    name, signal, forecast_config, forecast, grid_horizon, uncertainty_upper, error = (
+        _load_signal_and_config(request)
+    )
+    if error is not None:
+        return None, error
 
     try:
         scheduler_input, warnings = service.build_input(
@@ -303,6 +321,130 @@ def _prepare(request: ScheduleRequest):
         return None, _err(detail, "invalid_request", 422)
 
     return (name, scheduler_input, warnings, forecast_config, forecast), None
+
+
+def _prepare_graceful(request: ScheduleRequest, probe_run):
+    """Like `_prepare`, but one bad load does not fail the whole plan.
+
+    `probe_run` is a callable taking a `SchedulerInput` and returning a
+    `SchedulerResult` (the caller supplies the scheduler + a short probe
+    config). Returns `(name, scheduler_input, warnings, forecast_config,
+    forecast, left_out, fatal)` where `left_out` is a list of plain
+    `{"job_id", "name", "reason"}` dicts and `fatal` is a JSONResponse on
+    genuinely malformed input (or None on success).
+
+    When the combined `build_input` fails with a per-job error, each non-FIXED
+    spec is probed alone (scalar capacity, ACTUAL forecast mode — forecast mode
+    never changes feasibility, only preference — with the request's deadline
+    buffer preserved because it changes feasibility). FIXED specs are kept
+    unconditionally: they become baseline, they are never solved. Specs that
+    fail to build or probe INFEASIBLE are dropped into `left_out`; the
+    survivors are rebuilt with the ORIGINAL params. If that rebuild fails, the
+    input is genuinely malformed (duplicates, baseline over capacity) and a
+    fatal 422 is returned.
+    """
+    name, signal, forecast_config, forecast, grid_horizon, uncertainty_upper, error = (
+        _load_signal_and_config(request)
+    )
+    if error is not None:
+        return None, None, None, None, None, [], error
+
+    provenance = forecast.provenance.model_dump(mode="json") if forecast is not None else None
+    horizon = grid_horizon if grid_horizon is not None else request.horizon
+
+    try:
+        scheduler_input, warnings = service.build_input(
+            request.jobs,
+            signal,
+            request.capacity_kw,
+            objective=request.objective,
+            horizon=horizon,
+            tariff=request.tariff,
+            forecast_config=forecast_config,
+            uncertainty_upper=uncertainty_upper,
+            forecast_provenance=provenance,
+            capacity_profile_kw=request.capacity_profile_kw,
+        )
+        return name, scheduler_input, warnings, forecast_config, forecast, [], None
+    except (NormalizationError, ScalingError, HorizonError):
+        pass
+
+    left_out: list[dict] = []
+    probe_warnings: list[str] = []
+    kept: list[LoadSpec] = []
+    for spec in request.jobs:
+        if spec.job_type is LoadType.FIXED:
+            kept.append(spec)
+            continue
+        try:
+            single_input, single_warnings = service.build_input(
+                [spec],
+                signal,
+                request.capacity_kw,
+                objective=request.objective,
+                horizon=None,
+                tariff=request.tariff,
+                forecast_config=ForecastConfig(
+                    forecast_mode=ForecastMode.ACTUAL,
+                    risk_weight=0.0,
+                    deadline_buffer_minutes=(
+                        request.carbon.deadline_buffer_minutes if request.carbon else 0
+                    ),
+                ),
+                uncertainty_upper=None,
+                forecast_provenance=None,
+                capacity_profile_kw=None,
+                hints=None,
+            )
+        except Exception as exc:
+            left_out.append(
+                {"job_id": spec.id, "name": spec.normalized_name, "reason": str(exc)}
+            )
+            continue
+        try:
+            probe_result = probe_run(single_input)
+        except Exception as exc:
+            left_out.append(
+                {"job_id": spec.id, "name": spec.normalized_name, "reason": str(exc)}
+            )
+            continue
+        if probe_result.status == "INFEASIBLE":
+            left_out.append(
+                {
+                    "job_id": spec.id,
+                    "name": spec.normalized_name,
+                    "reason": probe_result.reason or f"solver status {probe_result.status}",
+                }
+            )
+            continue
+        kept.append(spec)
+        probe_warnings.extend(single_warnings)
+
+    if not kept:
+        # No spec at all survived (no FIXED baseline either): there is nothing
+        # to build, let alone solve. Callers answer 422 no_feasible_plan with
+        # the per-job reasons instead of a malformed-input error.
+        return name, None, probe_warnings, forecast_config, forecast, left_out, None
+    try:
+        scheduler_input, warnings = service.build_input(
+            kept,
+            signal,
+            request.capacity_kw,
+            objective=request.objective,
+            horizon=horizon,
+            tariff=request.tariff,
+            forecast_config=forecast_config,
+            uncertainty_upper=uncertainty_upper,
+            forecast_provenance=provenance,
+            capacity_profile_kw=request.capacity_profile_kw,
+        )
+    except (NormalizationError, ScalingError, HorizonError, ValueError) as exc:
+        detail = str(exc)
+        return None, None, None, None, None, left_out, _err(detail, "invalid_request", 422)
+    # The rebuild re-runs the same per-job checks (clamps, preflight), so
+    # dedupe against the probe warnings instead of reporting each twice.
+    merged = list(dict.fromkeys(probe_warnings + warnings))
+    return name, scheduler_input, merged, forecast_config, forecast, left_out, None
 
 
 def _horizon_start(request: ScheduleRequest) -> datetime:
@@ -504,10 +646,29 @@ def _forecast_summary(
 
 @router.post("/schedule/compare")
 def compare_schedules(request: CompareRequest) -> JSONResponse:
-    prepared, error = _prepare(request)
-    if error is not None:
-        return error
-    _name, scheduler_input, warnings, _config, _forecast = prepared
+    probe_run = lambda inp: service.run(
+        inp, SchedulerName.CPSAT, config=SchedulerConfig(time_limit_seconds=2.0), explain=False
+    )
+    _name, scheduler_input, warnings, _config, _forecast, left_out, fatal = (
+        _prepare_graceful(request, probe_run)
+    )
+    if fatal is not None:
+        return fatal
+    if scheduler_input is None or not scheduler_input.jobs:
+        detail = (
+            "No feasible plan (INFEASIBLE). Every load was left out or the input "
+            "carries only FIXED baseline load, so there is nothing to compare."
+        )
+        if left_out:
+            detail += " Left out: " + "; ".join(
+                f"{l['name']}: {l['reason']}" for l in left_out
+            )
+        if warnings:
+            detail += " Warnings: " + "; ".join(warnings)
+        return JSONResponse(
+            status_code=422,
+            content={"detail": detail, "code": "no_feasible_plan", "message": detail},
+        )
 
     names: list[SchedulerName] = [SchedulerName.ASAP, SchedulerName.GREEDY, SchedulerName.CPSAT]
     if request.schedulers:
@@ -524,4 +685,5 @@ def compare_schedules(request: CompareRequest) -> JSONResponse:
     payload = comparison.model_dump(mode="json")
     payload["warnings"] = warnings
     payload["pool"] = pool
+    payload["left_out"] = left_out
     return JSONResponse(status_code=200, content=payload)

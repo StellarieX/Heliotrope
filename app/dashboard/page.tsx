@@ -574,12 +574,18 @@ export default function Dashboard() {
       const seq = ++impactSeq.current;
       // Replacing our own plan: the backend cancels it so it doesn't count as someone else's load.
       const state = await planSchedule({ ...planBody, ...(liveId ? { replaces_schedule_id: liveId } : {}) });
-      if (state.jobs.length === 0) {
+      const hasFlexible = specs.some((s) => s.job_type !== "FIXED");
+      const leftOut = state.left_out ?? [];
+      const leftOutMsg = leftOut.length
+        ? `Left out: ${leftOut.map((l) => `${l.name}: ${l.reason}`).join("; ")}.`
+        : "";
+      if (state.jobs.length === 0 && hasFlexible) {
         // Safety net: the backend rejects infeasible plans with a 422, but an
         // empty state must never be adopted as the live schedule. Say why
         // instead of rendering "version 1" with an empty list.
         setLiveError(
-          `No loads could be scheduled (${state.solver_status}). Your loads need more power than the limit allows at once, or a deadline is too tight. Raise the limit or give more time.`
+          `No loads could be scheduled (${state.solver_status}). Your loads need more power than the limit allows at once, or a deadline is too tight. Raise the limit or give more time.` +
+            (leftOutMsg ? ` ${leftOutMsg}` : "")
         );
         return;
       }
@@ -618,7 +624,10 @@ export default function Dashboard() {
       }
       setPlannedJobsSignature(jobsSignature);
       await refreshLive(state.schedule_id);
-      if (left.length) setLiveError(`Left out until you add their details: ${left.map((n) => n.job.name).join(", ")}.`);
+      const parts: string[] = [];
+      if (leftOutMsg) parts.push(leftOutMsg);
+      if (left.length) parts.push(`Left out until you add their details: ${left.map((n) => n.job.name).join(", ")}.`);
+      if (parts.length) setLiveError(parts.join(" "));
     } catch (e) {
       setLiveError(e instanceof Error ? e.message : "Scheduling failed.");
     } finally {
