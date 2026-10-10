@@ -574,6 +574,15 @@ export default function Dashboard() {
       const seq = ++impactSeq.current;
       // Replacing our own plan: the backend cancels it so it doesn't count as someone else's load.
       const state = await planSchedule({ ...planBody, ...(liveId ? { replaces_schedule_id: liveId } : {}) });
+      if (state.jobs.length === 0) {
+        // Safety net: the backend rejects infeasible plans with a 422, but an
+        // empty state must never be adopted as the live schedule. Say why
+        // instead of rendering "version 1" with an empty list.
+        setLiveError(
+          `No loads could be scheduled (${state.solver_status}). Your loads need more power than the limit allows at once, or a deadline is too tight. Raise the limit or give more time.`
+        );
+        return;
+      }
       setPoolInfo(state.pool ?? null);
       setPoolRefresh((n) => n + 1);
       // Fire-and-forget: the impact card is a bonus and must never block or fail the plan.

@@ -179,6 +179,33 @@ def plan_single(body: PlanRequest) -> JSONResponse:
     if error is not None:
         return error
     name, scheduler_input, warnings, _fc, _forecast = prepared
+    pool = pool_summary(None)
+    solve_input = scheduler_input
+    if body.share_pool:
+        # The plan being replaced is left out of its own pool: it is cancelled
+        # below on the feasible path, so it must not count as someone else's load.
+        solve_input, pool = attach_pool(
+            store, scheduler_input,
+            [body.replaces_schedule_id] if body.replaces_schedule_id else [],
+        )
+    result = service.run(solve_input, name, config=body.solver_config, explain=True)
+    if result.status not in ("OPTIMAL", "FEASIBLE"):
+        # Never store an empty schedule: an INFEASIBLE/UNKNOWN result carries
+        # no allocations, so persisting it would render "version 1" with no
+        # jobs and leave the pool empty. The replaced schedule stays live.
+        solver_status = result.solver.status.value if result.solver else result.status.value
+        detail = (
+            f"No feasible plan ({solver_status})."
+            + (f" {result.reason}" if result.reason else "")
+            + " Your loads need more power than the building limit allows at once,"
+            " or a deadline is too tight. Raise the limit or give more time."
+        )
+        if warnings:
+            detail += " Warnings: " + "; ".join(warnings)
+        return JSONResponse(
+            status_code=422,
+            content={"detail": detail, "code": "no_feasible_plan", "message": detail},
+        )
     if body.replaces_schedule_id:
         old = store.get(body.replaces_schedule_id)
         if old is not None and old.lifecycle not in (
@@ -186,11 +213,6 @@ def plan_single(body: PlanRequest) -> JSONResponse:
         ):
             old.lifecycle = ScheduleLifecycle.CANCELLED
             store._persist(old)
-    pool = pool_summary(None)
-    solve_input = scheduler_input
-    if body.share_pool:
-        solve_input, pool = attach_pool(store, scheduler_input)
-    result = service.run(solve_input, name, config=body.solver_config, explain=True)
     record = store.create(scheduler_input, result, reason=RescheduleReason.MANUAL)
     record.lifecycle = ScheduleLifecycle.SCHEDULED
     record.context = {
@@ -775,6 +797,8 @@ def post_replan(schedule_id: str, body: ReplanBody) -> JSONResponse:
     except ValueError as exc:
         return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_request", "message": str(exc)})
     # Phase 2: mutate.
+    saved_input = record.scheduler_input
+    saved_execution = {jid: st.model_copy(deep=True) for jid, st in record.execution.items()}
     record.scheduler_input = new_input
     for state in cancel_states:
         transition(state, JobStatus.CANCELLED, "removed by replan request")
@@ -784,6 +808,14 @@ def post_replan(schedule_id: str, body: ReplanBody) -> JSONResponse:
             expected_energy_kwh=job.energy_kwh() or 0.0, last_updated=now,
         )
     out = _do_replan(record, now, body.reason)
+    if out.get("error") is not None:
+        # Infeasible replan: keep the old version AND its input. The candidate
+        # above already mutated the record, so roll that back before persisting.
+        record.scheduler_input = saved_input
+        for jid in [jid for jid in record.execution if jid not in saved_execution]:
+            del record.execution[jid]
+        for jid, st in saved_execution.items():
+            record.execution[jid] = st
     # Phase 3: persist once, whichever way the replan went.
     store._persist(record)
     out["state"] = _state_payload(record)

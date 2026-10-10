@@ -515,6 +515,33 @@ def test_override_move_to_empty_window_is_rejected_unchanged():
     assert execution.store.get(sid).scheduler_input.jobs[0].deadline_slot == before
 
 
+def test_plan_single_infeasible_returns_422_without_storing():
+    """An impossible plan is a 422, never an empty "version 1".
+
+    `plan_single` must not create a record (no empty jobs list rendered,
+    no empty allocations leaking into the pool) and must leave the schedule
+    it was asked to replace untouched.
+    """
+    sid = plan([ev_job(energy_required_kwh=7.2)], capacity_kw=20.0)
+    before = len(execution.store.list_records())
+    body = {
+        "jobs": [spec_dict(ev_job(energy_required_kwh=10.0, power_kw=7.0, max_power_kw=7.0))],
+        "capacity_kw": 0.5,
+        "scheduler": "CPSAT",
+        "carbon_start": CARBON_START,
+        "carbon_end": CARBON_END,
+        "replaces_schedule_id": sid,
+    }
+    res = client.post("/api/v1/schedules/plan", json=body)
+    assert res.status_code == 422, res.text
+    assert res.json()["code"] == "no_feasible_plan"
+    assert len(execution.store.list_records()) == before
+    # The replaced schedule is still live: it was not cancelled.
+    state = client.get(f"/api/v1/schedules/{sid}/state").json()
+    assert state["lifecycle"] == "SCHEDULED"
+    assert len(state["jobs"]) == 1
+
+
 def test_start_now_pins_an_atomic_job_to_start_at_once(monkeypatch):
     """Run now must run now: the optimizer may not slide the job to a cleaner hour later."""
     sid = plan([washing_machine_job()])

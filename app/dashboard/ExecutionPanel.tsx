@@ -75,6 +75,13 @@ export default function ExecutionPanel({
       </div>
 
       <ul className="mt-4 divide-y divide-white/5 border-y border-white/10">
+        {state.jobs.length === 0 && (
+          <li className="py-4">
+            <p className="text-sm text-zinc-300">
+              No loads could be scheduled ({solverLabel(state.solver_status)}). Raise the power limit or give more time, then schedule again.
+            </p>
+          </li>
+        )}
         {state.jobs.map((j) => {
           const pct =
             j.expected_energy_kwh > 0
