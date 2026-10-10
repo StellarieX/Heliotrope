@@ -104,7 +104,7 @@ function thermalFor(j: StoredJob, now: Date): LoadSpec {
   const maxC = j.tempMaxC ?? (isAc ? 26.0 : 65.0);
   const tMin = Math.min(minC, maxC);
   const tMax = Math.max(minC, maxC);
-  const tInit = isAc ? Math.max(tMax + 2, 30.0) : Math.min(tMin + 5, (tMin + tMax) / 2);
+  const tInit = isAc ? tMax : Math.min(tMin + 5, (tMin + tMax) / 2);
   const tTarget = (tMin + tMax) / 2;
   const coeffs = isAc ? { a: 0.85, b: -1.4, c: 5.1 } : { a: 0.9, b: 2.75, c: 2.0 };
   const thermal: ThermalSpec = {
