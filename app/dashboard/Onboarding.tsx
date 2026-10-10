@@ -123,7 +123,7 @@ function DraftCard({
             <>
               <span className={answer.provider === "jev" ? "text-violet-300" : "text-zinc-400"}>
                 {answer.provider === "jev"
-                  ? `Jev: ${TYPE_NAME[answer.jobType]} · ${pct}% sure`
+                  ? `H1: ${TYPE_NAME[answer.jobType]} · ${pct}% sure`
                   : `Built-in rules: ${TYPE_NAME[answer.jobType]}`}
               </span>
               <span className="text-zinc-600">{answer.category}</span>
@@ -633,7 +633,7 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
                         <p className="truncate text-sm font-medium">{j.name}</p>
                       </div>
                       {mixedSources && j.source === "jev" && (
-                        <span className="shrink-0 rounded-full bg-violet-400/15 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-violet-300">jev</span>
+                        <span className="shrink-0 rounded-full bg-violet-400/15 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-violet-300">h1</span>
                       )}
                       <span className={`shrink-0 rounded-full px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider ${j.band === "Critical" ? "bg-red-500/15 text-red-300" : j.band === "High" ? "bg-orange-400/15 text-orange-300" : j.band === "Normal" ? "bg-white/10 text-zinc-300" : "bg-white/5 text-zinc-500"}`}>
                         {j.band}
