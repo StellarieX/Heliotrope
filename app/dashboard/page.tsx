@@ -998,10 +998,10 @@ export default function Dashboard() {
         provider: res.provider,
         note:
           res.provider === "jev"
-            ? `Order set by Jev (how essential each appliance is), plus time pressure, size and flexibility.${res.notes[0] ? ` ${res.notes[0]}` : ""}`
+            ? `Order set by H1 (how essential each appliance is), plus time pressure, size and flexibility.${res.notes[0] ? ` ${res.notes[0]}` : ""}`
             : res.provider === "mixed"
-              ? `Partly ordered by Jev; the rest by built-in rules. ${res.notes[0] ?? ""}`.trim()
-              : res.notes[0] ?? "Order set by built-in rules (time pressure, size and flexibility). Jev isn't switched on for this server.",
+              ? `Partly ordered by H1; the rest by built-in rules. ${res.notes[0] ?? ""}`.trim()
+              : res.notes[0] ?? "Order set by built-in rules (time pressure, size and flexibility). H1 isn't switched on for this server.",
       });
     } catch {
       if (seq !== rankSeq.current) return;
@@ -1322,9 +1322,9 @@ export default function Dashboard() {
                         : rank
                           ? ` · ranked by ${
                               rank.provider === "jev"
-                                ? "Jev"
+                                ? "H1"
                                 : rank.provider === "mixed"
-                                  ? "Jev and built-in rules"
+                                  ? "H1 and built-in rules"
                                   : rank.provider === "local"
                                     ? "a rough local estimate"
                                     : "built-in rules"
@@ -1336,7 +1336,7 @@ export default function Dashboard() {
             <button
               onClick={() => void runRanking(jobs, rankKey)}
               disabled={ranking || rankKey === ""}
-              title="Ask again which load matters first. Jev judges how essential each appliance is; time pressure, size and flexibility are added. Start times come from “Schedule my loads”."
+              title="Ask again which load matters first. H1 judges how essential each appliance is; time pressure, size and flexibility are added. Start times come from “Schedule my loads”."
               className="min-h-11 cursor-pointer rounded-full px-4 py-2 text-[13px] text-zinc-400 transition hover:text-white active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-30"
             >
               {ranking ? "Ranking…" : "Refresh ranking"}
@@ -1374,12 +1374,12 @@ export default function Dashboard() {
                           <BandChip band={j.band} reason={j.reason} />
                           {rank?.provider === "mixed" && (
                             <span
-                              title={j.source === "jev" ? "Jev judged how essential this appliance is" : "Built-in rules, not Jev"}
+                              title={j.source === "jev" ? "H1 judged how essential this appliance is" : "Built-in rules, not H1"}
                               className={`shrink-0 rounded-full px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${
                                 j.source === "jev" ? "bg-violet-400/15 text-violet-300" : "bg-white/5 text-zinc-500"
                               }`}
                             >
-                              {j.source === "jev" ? "Jev" : "rules"}
+                              {j.source === "jev" ? "H1" : "rules"}
                             </span>
                           )}
                         </>
@@ -1449,9 +1449,9 @@ export default function Dashboard() {
                       ? `${backend === "online" ? "Couldn't reach the classifier" : "The planner isn't reachable yet"}, so this is only a guess made from the name.${backend === "online" ? " Edit the name to try again." : ""}`
                       : activePreview
                       ? activePreview.provider === "jev"
-                        ? `Category: ${activePreview.category}. Decided by Jev.`
+                        ? `Category: ${activePreview.category}. Decided by H1.`
                         : activePreview.fallbackReason
-                          ? `Category: ${activePreview.category}. Jev couldn't answer (${activePreview.fallbackReason}), so the built-in rules did.`
+                          ? `Category: ${activePreview.category}. H1 couldn't answer (${activePreview.fallbackReason}), so the built-in rules did.`
                           : `Category: ${activePreview.category}. Decided by the built-in rules.`
                       : undefined
                   }
@@ -1463,9 +1463,9 @@ export default function Dashboard() {
                       : activePreview
                         ? `${
                             activePreview.provider === "jev"
-                              ? "Jev"
+                              ? "H1"
                               : activePreview.fallbackReason
-                                ? "Built-in rules (Jev unavailable)"
+                                ? "Built-in rules (H1 unavailable)"
                                 : "Built-in rules"
                           }: ${loadTypeLabel(activePreview.jobType)} · ${Math.round(activePreview.confidence * 100)}% sure`
                         : `Rough guess from the name: ${loadTypeLabel(guessedType)}`}

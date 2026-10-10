@@ -274,7 +274,7 @@ export default function Home() {
               <div className="rounded-2xl border border-lime-300/20 bg-lime-300/[0.03] p-6">
                 <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-lime-300/80">Works today</p>
                 <ul className="mt-3 space-y-2.5 text-[13px] leading-6 text-zinc-300">
-                  <li>Describe a load in plain words; Jev (an AI model) or built-in rules classify it, and each answer says which.</li>
+                  <li>Describe a load in plain words; H1 (an AI model) or built-in rules classify it, and each answer says which.</li>
                   <li>An exact solver (OR-Tools CP-SAT) places it with hard deadlines.</li>
                   <li>
                     {signalType === "PROXY"
