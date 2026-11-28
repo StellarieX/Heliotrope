@@ -1,3 +1,4 @@
+import { getSupabase } from "../supabase";
 // Single boundary for all backend calls. No raw fetch() elsewhere.
 import type {
   CarbonSignalResponse,
@@ -103,10 +104,24 @@ function requireId(scheduleId: string): string {
   return encodeURIComponent(scheduleId);
 }
 
-async function postJson<T>(path: string, body: unknown, timeoutMs?: number): Promise<T> {
+async function authHeaders(path: string, required = false): Promise<Record<string, string>> {
+  if (!required && !/^\/api\/v1\/(schedules(?:\/|$)|simulation\/|account(?:\/|$))/.test(path)) return {};
+  const client = getSupabase();
+  if (!client) throw new Error("Sign in to continue.");
+  const { data, error } = await client.auth.getSession();
+  if (error || !data.session) throw new Error("Sign in to continue.");
+  return { Authorization: `Bearer ${data.session.access_token}` };
+}
+export async function deleteAccount(): Promise<void> {
+  const path = "/api/v1/account";
+  const res = await fetch(`${BASE}${path}`, { method: "DELETE", headers: await authHeaders(path), cache: "no-store", signal: timeoutSignal() });
+  if (!res.ok) throw await toHttpError(res);
+}
+
+async function postJson<T>(path: string, body: unknown, timeoutMs?: number, requireAuth = false): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...await authHeaders(path, requireAuth) },
     body: JSON.stringify(body),
     cache: "no-store",
     signal: timeoutMs ? AbortSignal.timeout(timeoutMs) : timeoutSignal(),
@@ -116,6 +131,7 @@ async function postJson<T>(path: string, body: unknown, timeoutMs?: number): Pro
 
 async function getJson<T>(path: string): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
+    headers: await authHeaders(path),
     cache: "no-store",
     signal: timeoutSignal(),
   });
@@ -278,7 +294,7 @@ export interface ScheduleCompareResponse {
 /** Same input through several schedulers (ASAP = "run now" baseline vs CPSAT),
  *  so the impact shown to the user is computed by the backend, not estimated here. */
 export async function compareSchedulers(body: Record<string, unknown>): Promise<ScheduleCompareResponse> {
-  return postJson<ScheduleCompareResponse>("/api/v1/schedule/compare", body);
+  return postJson<ScheduleCompareResponse>("/api/v1/schedule/compare", body, undefined, Boolean(body.pool_exclude_schedule_id));
 }
 
 /** Free text -> classification + canonical LoadSpec + feasibility. Jev decides when the
@@ -347,6 +363,11 @@ export async function validateLoad(spec: LoadSpec): Promise<ValidateResponse> {
 /** Phase 7: plan a live schedule from LoadSpecs; versions + state follow. */
 export async function planSchedule(body: Record<string, unknown>): Promise<ExecutionState> {
   return postJson<ExecutionState>("/api/v1/schedules/plan", body);
+}
+
+/** The current account's active schedule, if one exists. */
+export async function getActiveSchedule(): Promise<ExecutionState> {
+  return getJson<ExecutionState>("/api/v1/schedules/active");
 }
 
 /** Phase 7: live execution truth for a schedule. */

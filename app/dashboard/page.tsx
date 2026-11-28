@@ -2,9 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { onAuthStateChanged, signInWithPopup, signOut, type User } from "firebase/auth";
-import { addDoc, collection, deleteDoc, doc, getDoc, getDocs, updateDoc } from "firebase/firestore";
-import { getDb, getFirebaseAuth, getGoogleProvider } from "../../lib/firebase";
+import { getSupabase, onAuthStateChanged, signIn, signOut, type User } from "../../lib/supabase";
+import { getProfile, getJobs, addJob as insertJob, patchJob, removeJob as deleteJob } from "../../lib/account-data";
 import { jevRank, classifyJob, hoursUntilReady, type JobInput, type RankedJob } from "../../lib/prioritize";
 import {
   compareSchedulers,
@@ -12,6 +11,7 @@ import {
   getCarbonForecast,
   getCarbonSignal,
   getScheduleHistory,
+  getActiveSchedule,
   getScheduleState,
   prioritizeLoads,
   planSchedule,
@@ -40,14 +40,14 @@ import CarbonChart from "./CarbonChart";
 import ExecutionPanel from "./ExecutionPanel";
 import PoolPanel from "./PoolPanel";
 import Hint from "./Hint";
-import { AC_RE, buildSpecs, detailNeeded, kindOf, latestFinish, nextSlot, type Detail, type StoredJob } from "../../lib/loads/specs";
+import { AC_RE, buildSpecs, kindOf, latestFinish, nextSlot, planningDetailNeeded, type PlanningDetail, type StoredJob } from "../../lib/loads/specs";
+import { validReadyBy } from "../../lib/jobs/normalize";
 import { useLoadClassification } from "./useLoadClassification";
 import { FORECAST_MODE_LABEL, loadTypeLabel, signalTypeLabel, solverLabel } from "./labels";
 import Onboarding from "./Onboarding";
-import { scrubLegacyEmail } from "../../lib/profile";
-import { loadMaxPower, readMaxPower } from "../../lib/occupations";
+import { loadMaxPower } from "../../lib/occupations";
 
-type Profile = { username?: string; occupation?: string; place?: string; rooms?: number | null; onboarded?: boolean };
+type Profile = { display_name?: string | null; photo_url?: string | null; username?: string; occupation?: string; place?: string; rooms?: number | null; onboarded?: boolean };
 
 type RankInfo = { score: number; band: RankedJob["band"]; reason: string; source: NonNullable<RankedJob["source"]> };
 
@@ -213,28 +213,38 @@ function parseCapacity(raw: string, fallback: number): { value?: number; error?:
   return { value: n };
 }
 
-/** Inline prompt for the one number a load still needs before it can be planned. */
-function DetailPrompt({ need, onSave }: { need: Detail; onSave: (v: number) => void }) {
+const DETAIL_FIELDS = {
+  energy: { field: "energyKwh", label: "Energy needed in kilowatt-hours", question: "How much energy does it need in total?", unit: "kWh", max: 1000 },
+  duration: { field: "durationMin", label: "Run length in minutes", question: "How long does one run take?", unit: "min", max: 1440 },
+  power: { field: "powerKw", label: "Power rating in kilowatts", question: "What is its power rating?", unit: "kW", max: 1000 },
+  deadline: { field: "readyBy", label: "Ready-by time", question: "When should it be ready?", unit: "", max: 0 },
+} as const;
+
+/** Inline prompt for a missing value, including incomplete imported loads. */
+function DetailPrompt({ need, onSave }: { need: PlanningDetail; onSave: (v: number | string) => void }) {
   const [val, setVal] = useState("");
+  const details = DETAIL_FIELDS[need];
+  const isDeadline = need === "deadline";
   const n = Number(val);
-  const ok = Number.isFinite(n) && n > 0 && (need === "energy" ? n <= 1000 : n <= 1440);
+  const ok = isDeadline ? validReadyBy(val) : Number.isFinite(n) && n > 0 && n <= details.max;
   return (
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        if (ok) onSave(need === "duration" ? Math.round(n) : n);
+        if (ok) onSave(isDeadline ? val : need === "duration" ? Math.max(1, Math.round(n)) : n);
       }}
       className="mt-2.5 flex flex-wrap items-center gap-2"
     >
       <span className="font-mono text-[11px] text-amber-400/90">
-        {need === "energy" ? "How much energy does it need in total?" : "How long does one run take?"}
+        {details.question}
       </span>
       <input
         value={val}
-        onChange={(e) => setVal(e.target.value.replace(/[^0-9.]/g, ""))}
-        inputMode="decimal"
-        aria-label={need === "energy" ? "Energy needed in kilowatt-hours" : "Run length in minutes"}
-        placeholder={need === "energy" ? "kWh" : "min"}
+        type={isDeadline ? "time" : "text"}
+        onChange={(e) => setVal(isDeadline ? e.target.value : e.target.value.replace(/[^0-9.]/g, ""))}
+        inputMode={isDeadline ? undefined : "decimal"}
+        aria-label={details.label}
+        placeholder={details.unit}
         className={`w-20 ${inputCls}`}
       />
       <button
@@ -271,7 +281,7 @@ const PRESETS = [
 ];
 
 export default function Dashboard() {
-  const [auth] = useState(() => getFirebaseAuth());
+  const [auth] = useState(() => getSupabase());
   const [user, setUser] = useState<User | null>(null);
   const [ready, setReady] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -355,29 +365,39 @@ export default function Dashboard() {
   const [fPowerError, setFPowerError] = useState<string | null>(null);
   const [plannedJobsSignature, setPlannedJobsSignature] = useState<string | null>(null);
 
+  const loadSeq = useRef(0);
   const loadAll = useCallback(async (u: User) => {
-    const db = getDb();
-    if (!db) {
-      setProfileLoaded(true);
-      return;
-    }
+    const seq = ++loadSeq.current;
     setProfileError(null);
     setLoadError(null);
     try {
-      const snap = await getDoc(doc(db, "users", u.uid));
-      setProfile(snap.exists() ? (snap.data() as Profile) : {});
-      if (snap.exists()) void scrubLegacyEmail(db, u.uid, snap.data());
+      const data = await getProfile(u.uid);
+      if (seq !== loadSeq.current) return;
+      setProfile(data ?? {});
     } catch {
-      // A failed read is NOT "new user": treating it that way would pop the
-      // onboarding wizard over an existing account (offline, rules, quota).
+      if (seq !== loadSeq.current) return;
       setProfileError("Couldn't load your profile. Check your connection and retry.");
       setProfileLoaded(true);
       return;
     }
     try {
-      const js = await getDocs(collection(db, "users", u.uid, "jobs"));
-      setJobs(js.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<DashboardJob, "id">) })));
+      const data = await getJobs(u.uid);
+      if (seq !== loadSeq.current) return;
+      setJobs(data.map((row) => {
+        const spec = row.spec as Partial<DashboardJob> & Pick<DashboardJob, "name">;
+        const classification = classifyJob(spec.name);
+        return {
+          ...spec,
+          id: row.id,
+          kind: spec.kind || classification.category,
+          shiftable: spec.shiftable ?? (spec.jobType ? spec.jobType !== "FIXED" : classification.shiftable),
+          powerKw: spec.powerKw ?? 0,
+          readyBy: spec.readyBy ?? "",
+          flexHours: spec.flexHours ?? 0,
+        };
+      }));
     } catch {
+      if (seq !== loadSeq.current) return;
       setLoadError("Couldn't load your saved loads. They are safe; check your connection and retry.");
     }
     setProfileLoaded(true);
@@ -399,26 +419,44 @@ export default function Dashboard() {
     setLiveHistory(null);
   }, []);
 
+  const currentOwner = useRef<string | null>(null);
   useEffect(() => {
     if (!auth) {
-    // Firebase not configured: nothing will ever resolve, so stop showing "loading".
+    // Supabase not configured: nothing will ever resolve, so stop showing "loading".
     // Deferred, and `ready` starts false on both server and client so they render the
     // same first frame (a different initial value caused a hydration mismatch).
     queueMicrotask(() => setReady(true));
     return;
     }
     return onAuthStateChanged(auth, (u) => {
+      if (currentOwner.current && currentOwner.current !== u?.uid) {
+        loadSeq.current++;
+        clearLiveSession();
+        setRank(null);
+        setCoordResult(null);
+        capTouched.current = { live: false, coord: false };
+      }
+      currentOwner.current = u?.uid ?? null;
       setUser(u);
       setReady(true);
       // A menu left open by the previous account would leave its invisible
       // backdrop over the page and swallow the next user's first click.
       setMenuOpen(false);
       if (u) {
+        setProfileLoaded(false);
+        setProfile(null);
+        setJobs([]);
         void loadAll(u);
       } else {
         // Signed out: nothing of the previous account may linger in memory or storage.
+        loadSeq.current++;
         clearLiveSession();
         setJobs([]);
+        setProfile(null);
+        setProfileLoaded(false);
+        setProfileError(null);
+        setLoadError(null);
+        capTouched.current = { live: false, coord: false };
         rankSeq.current++;
         lastRankKey.current = null;
         setRank(null);
@@ -435,13 +473,11 @@ export default function Dashboard() {
       if (!capTouched.current.live) setLiveCapacity(String(kw));
       if (!capTouched.current.coord) setCoordCapacity(String(kw));
     };
-    const cached = readMaxPower(user.uid);
-    queueMicrotask(() => apply(cached));
     // Then the account's saved value, so a second device gets it too.
     let cancelled = false;
     void loadMaxPower(user.uid).then((kw) => {
-      if (!cancelled && kw !== cached) apply(kw);
-    });
+      if (!cancelled) apply(kw);
+    }).catch(() => { if (!cancelled) setProfileError("Could not load your saved power limit."); });
     return () => {
       cancelled = true;
     };
@@ -479,38 +515,37 @@ export default function Dashboard() {
     setLiveError(e instanceof Error ? e.message : fallback);
   }, []);
 
-  // Rehydrate a live session that survived a reload. A stale id (schedule
-  // deleted, backend restarted, network down) is dropped quietly — the user
-  // simply plans again.
+  // The server owns the active schedule; browser storage only contains optional display details.
   useEffect(() => {
     if (!user) return;
-    const savedId = lsGet(ACTIVE_SCHEDULE_KEY);
-    if (!savedId) return;
-    if (lsGet(ACTIVE_OWNER_KEY) !== user.uid) {
-      // A schedule saved by another account (or before owners were recorded).
-      queueMicrotask(clearLiveSession);
-      return;
-    }
-    // Deferred into a microtask so the effect body itself stays free of state
-    // updates; the effect only kicks off the rehydration.
-    void Promise.resolve()
-      .then(() => refreshLive(savedId))
-      .then(() => {
-        setLiveId(savedId);
+    let cancelled = false;
+    void getActiveSchedule().then(async (state) => {
+      if (cancelled) return;
+      const savedId = lsGet(ACTIVE_SCHEDULE_KEY);
+      const sameOwner = lsGet(ACTIVE_OWNER_KEY) === user.uid;
+      setLiveId(state.schedule_id);
+      setLiveState(state);
+      if (sameOwner && savedId === state.schedule_id) {
+        setPlannedJobsSignature(lsGet(ACTIVE_SIG_KEY));
         try {
-          setPlannedJobsSignature(lsGet(ACTIVE_SIG_KEY));
           const raw = lsGet(ACTIVE_IMPACT_KEY);
           const saved = raw ? (JSON.parse(raw) as { id?: string; impact?: CompareSchedulerResult }) : null;
-          if (saved?.id === savedId && saved.impact) setImpact(saved.impact);
-        } catch {
-          /* unreadable: show the schedule without the impact card */
-        }
-      })
-      .catch((e) => {
-        // Only a definitive 404 drops the saved id; a network blip keeps it for the next load.
-        if ((e as { status?: number }).status === 404) lsRemove(ACTIVE_SCHEDULE_KEY);
-      });
-  }, [user, refreshLive, clearLiveSession]);
+          if (saved?.id === state.schedule_id && saved.impact) setImpact(saved.impact);
+        } catch { /* optional cached display details */ }
+      }
+      lsSet(ACTIVE_SCHEDULE_KEY, state.schedule_id);
+      lsSet(ACTIVE_OWNER_KEY, user.uid);
+      try {
+        const history = await getScheduleHistory(state.schedule_id);
+        if (!cancelled) setLiveHistory(history);
+      } catch { /* schedule remains available without history */ }
+    }).catch((e) => {
+      if (!cancelled && (e as { status?: number }).status !== 404) {
+        setLiveError("Couldn't load your active schedule. Check your connection and retry.");
+      }
+    });
+    return () => { cancelled = true; };
+  }, [user]);
 
   // Poll the live schedule forward once a minute. Each tick advances the
   // backend clock, then we re-read state — refresh only, no other side effects.
@@ -900,8 +935,6 @@ export default function Dashboard() {
       return;
     }
     setFPowerError(null);
-    const db = getDb();
-    if (!db) return;
     setAddError(null);
     setAdding(true);
     // The backend's answer is what gets saved. Only when it couldn't be reached do we fall
@@ -920,7 +953,7 @@ export default function Dashboard() {
     const tempMaxC = isThermal ? (fTempMax ? Number(fTempMax) : isAc ? 26 : 65) : undefined;
 
     try {
-      const ref = await addDoc(collection(db, "users", user.uid, "jobs"), {
+      const ref = await insertJob(user.uid, {
         name: fName.trim(),
         kind,
         shiftable,
@@ -989,7 +1022,7 @@ export default function Dashboard() {
    *  is, and the backend combines that with time pressure, size and flexibility. If the backend
    *  can't be reached, a rough local estimate is used, and the note says so. */
   const runRanking = useCallback(async (list: DashboardJob[], key: string) => {
-    const shiftable = list.filter((j) => j.shiftable !== false);
+    const shiftable = list.filter((j) => j.shiftable !== false && j.powerKw > 0 && validReadyBy(j.readyBy));
     if (shiftable.length === 0) return;
     const seq = ++rankSeq.current;
     lastRankKey.current = key;
@@ -1023,7 +1056,7 @@ export default function Dashboard() {
       });
     } catch {
       if (seq !== rankSeq.current) return;
-      const local = jevRank(list);
+      const local = jevRank(shiftable);
       setRank({
         order: local.map((j) => j.id),
         info: Object.fromEntries(
@@ -1040,7 +1073,7 @@ export default function Dashboard() {
   // Rank automatically whenever the flexible loads change (debounced, and never twice for the
   // same set of loads), so the order is there up front instead of behind a button.
   const rankKey = jobs
-    .filter((j) => j.shiftable !== false)
+    .filter((j) => j.shiftable !== false && j.powerKw > 0 && validReadyBy(j.readyBy))
     .map((j) => `${j.id}:${j.name}:${j.kind}:${j.powerKw}:${j.readyBy}:${j.flexHours}`)
     .join("|");
   useEffect(() => {
@@ -1050,13 +1083,11 @@ export default function Dashboard() {
     return () => clearTimeout(t);
   }, [profileLoaded, backend, rankKey, jobs, runRanking]);
 
-  async function saveDetail(id: string, need: Detail, value: number) {
+  async function saveDetail(id: string, need: PlanningDetail, value: number | string) {
     if (!user) return;
-    const db = getDb();
-    if (!db) return;
-    const field = need === "energy" ? "energyKwh" : "durationMin";
+    const field = DETAIL_FIELDS[need].field;
     try {
-      await updateDoc(doc(db, "users", user.uid, "jobs", id), { [field]: value });
+      await patchJob(id, { [field]: value });
       setJobs((js) => js.map((j) => (j.id === id ? { ...j, [field]: value } : j)));
       setLoadError(null);
     } catch {
@@ -1066,12 +1097,10 @@ export default function Dashboard() {
 
   async function removeJob(id: string) {
     if (!user) return;
-    const db = getDb();
-    if (!db) return;
     const prev = jobs;
     setJobs((js) => js.filter((j) => j.id !== id));
     try {
-      await deleteDoc(doc(db, "users", user.uid, "jobs", id));
+      await deleteJob(user.uid, id);
     } catch {
       // Restore the row: the delete never landed (rules/offline), so the
       // list must still show it.
@@ -1116,7 +1145,7 @@ export default function Dashboard() {
           <h1 className="mt-4 text-3xl font-semibold tracking-tight">Sign in to continue</h1>
           {!auth && (
             <p className="mx-auto mt-4 max-w-sm text-sm leading-6 text-orange-300">
-              Sign-in isn&apos;t configured on this deployment (the Firebase keys are missing).
+              Sign-in isn&apos;t configured on this deployment (the Supabase keys are missing).
             </p>
           )}
           <button
@@ -1124,18 +1153,10 @@ export default function Dashboard() {
               setBusy(true);
               setSignInError(null);
               try {
-                const a = getFirebaseAuth();
-                if (a) await signInWithPopup(a, getGoogleProvider());
-              } catch (e) {
-                const code = e instanceof Error && "code" in e ? (e as { code?: string }).code : undefined;
-                // Closing the popup is a choice, not an error worth shouting about.
-                if (code !== "auth/popup-closed-by-user" && code !== "auth/cancelled-popup-request") {
-                  setSignInError(
-                    code === "auth/popup-blocked"
-                      ? "Your browser blocked the sign-in popup. Allow popups for this site and retry."
-                      : "Sign-in failed. Try again."
-                  );
-                }
+                const a = getSupabase();
+                if (a) await signIn(a);
+              } catch {
+                setSignInError("Sign-in failed. Try again.");
               } finally {
                 setBusy(false);
               }
@@ -1241,11 +1262,11 @@ export default function Dashboard() {
               />
               {backend === "online" ? "planner online" : backend === "offline" ? "planner offline" : backend === "waking" ? "waking planner…" : "connecting…"}
             </span>
-            {user.photoURL ? (
+            {(profile?.photo_url ?? user.photoURL) ? (
               // eslint-disable-next-line @next/next/no-img-element
-              <img src={user.photoURL} alt="" referrerPolicy="no-referrer" className="h-8 w-8 rounded-full bg-white/10 object-cover" />
+              <img src={(profile?.photo_url ?? user.photoURL)!} alt="" referrerPolicy="no-referrer" className="h-8 w-8 rounded-full bg-white/10 object-cover" />
             ) : null}
-            <span className="max-w-40 truncate text-[13px] text-zinc-300">{user.displayName ?? user.email}</span>
+            <span className="max-w-40 truncate text-[13px] text-zinc-300">{profile?.display_name ?? user.displayName ?? user.email}</span>
             <button
               onClick={() => setMenuOpen((v) => !v)}
               aria-label="Account menu"
@@ -1285,7 +1306,7 @@ export default function Dashboard() {
         </header>
 
         <h1 className="mt-12 text-3xl font-semibold tracking-tight sm:text-4xl">
-          {greeting()}, {(user.displayName ?? "there").split(" ")[0]}.
+          {greeting()}, {(profile?.display_name ?? user.displayName ?? "there").split(" ")[0]}.
         </h1>
         <p className="mt-3 max-w-lg text-[15px] leading-7 text-zinc-500">
           {profile?.place ? `${profile.place}${profile.rooms ? ` · ${profile.rooms} rooms` : ""} — ` : ""}
@@ -1405,15 +1426,15 @@ export default function Dashboard() {
                     )}
                   </div>
                   <p className="mt-1.5 text-[13px] text-zinc-500">
-                    {loadTypeLabel(kindOf(j as StoredJob)) || j.kind || "Load"} · {j.powerKw} kW · needed by {clockLabel(j.readyBy)}
-                    {j.flexHours > 0 ? ` · can finish up to ${j.flexHours} h late` : " · must finish on time"}
+                    {loadTypeLabel(kindOf(j as StoredJob)) || j.kind || "Load"} · {j.powerKw > 0 ? `${j.powerKw} kW` : "power needed"} · {validReadyBy(j.readyBy) ? `needed by ${clockLabel(j.readyBy)}` : "ready-by time needed"}
+                    {validReadyBy(j.readyBy) && (j.flexHours > 0 ? ` · can finish up to ${j.flexHours} h late` : " · must finish on time")}
                     {j.energyKwh ? ` · ${j.energyKwh} kWh` : ""}
                     {j.durationMin ? ` · ${j.durationMin} min run` : ""}
                     {j.tempMinC !== undefined && j.tempMaxC !== undefined ? ` · ${j.tempMinC}–${j.tempMaxC}°C` : ""}
                   </p>
                   {(() => {
-                    const need = detailNeeded(j as StoredJob);
-                    return need ? <DetailPrompt need={need} onSave={(v) => void saveDetail(j.id, need, v)} /> : null;
+                    const need = planningDetailNeeded(j as StoredJob);
+                    return need ? <DetailPrompt key={need} need={need} onSave={(v) => void saveDetail(j.id, need, v)} /> : null;
                   })()}
                 </div>
                 <button onClick={() => void removeJob(j.id)} aria-label={`Remove ${j.name}`} className="-mr-2 min-h-10 shrink-0 cursor-pointer px-2 py-2.5 font-mono text-[12px] text-zinc-500 transition hover:text-red-300 focus-visible:opacity-100 focus-visible:text-red-300 ">

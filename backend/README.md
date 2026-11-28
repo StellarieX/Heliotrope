@@ -9,7 +9,7 @@ simulation. Title `Heliotrope Backend` (`app/main.py:16`).
 ```bash
 python -m venv .venv
 .venv/Scripts/python -m pip install -e ".[dev]"   # from backend/
-.venv/Scripts/python -m uvicorn app.main:app --app-dir backend --port 8000
+.venv/Scripts/python -m uvicorn app.main:app --port 8000
 ```
 
 Docs: `http://localhost:8000/docs`.
@@ -20,6 +20,8 @@ All from environment (`app/core/config.py:1`):
 
 | Variable | Default | Notes |
 |---|---|---|
+| `SUPABASE_URL` / `SUPABASE_PUBLISHABLE_KEY` | unset | Supabase project URL and publishable key |
+| `SUPABASE_SECRET_KEY` / `DATABASE_URL` | unset | Server-only Auth admin key and PostgreSQL connection |
 | `HELIOTROPE_ENV` | `development` | `production` disables the loopback dev CORS rule |
 | `PORT` | `8000` | non-integer values fail fast at import |
 | `LOG_LEVEL` | `info` | |
@@ -33,9 +35,11 @@ All from environment (`app/core/config.py:1`):
 
 ## Endpoints
 
-21 endpoints under `/api/v1` (routers in `app/main.py:63`):
+Endpoints under `/api/v1` include:
 
 - `GET /health`
+- `DELETE /account` (authenticated; 204 on success)
+- `GET /schedules/active` (authenticated)
 - `GET /carbon`, `POST /carbon/forecast`, `/carbon/forecast/evaluate`, `/carbon/forecast/backtest`
 - `POST /loads/classify`, `POST /loads/validate`
 - `POST /schedule`, `POST /schedule/compare`
@@ -62,8 +66,7 @@ energy_kwh? (≥0), power_kw? (≥0)}` ingests validated meter readings
 "MEASURED"` in state, others `"SIMULATED"`. No MQTT/OCPP/Modbus driver is
 bundled yet — drivers push through this endpoint.
 
-No auth; CORS only (credentialed loopback regex in dev + explicit origins; `"*"`
-gets credential-less middleware). Invalid bodies return 422 with `code:
+Execution and account endpoints require a verified Supabase bearer token and scope data to its owner. CORS restricts browser origins and does not provide authentication. Invalid bodies return 422 with `code:
 invalid_request` (`app/main.py:56`); all errors carry `{detail, code,
 message}`. Naive datetimes are 422; `resolution_minutes` must be one of
 5/15/30/60; `coverage` is in (0,1).
@@ -81,10 +84,6 @@ a length mismatch is 422 `invalid_request`. The replan body accepts the same
 .venv/Scripts/python -m pytest tests -q   # from backend/ (38 files, configured in pyproject.toml:17)
 ```
 
-## Warning
+## Storage
 
-The execution store is SQLite-backed (`backend/data/heliotrope_execution.db`,
-overridable via `HELIOTROPE_EXECUTION_DB`, with an in-memory read-through
-cache): planned schedules, versions, and simulation state survive restarts.
-Mount/persist the DB file as a volume in hosted deploys; do not treat an
-ephemeral container filesystem as durable storage.
+Execution records are stored in PostgreSQL, scoped to the authenticated user. See `../docs/DEPLOYMENT.md` for setup and legacy import.

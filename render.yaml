@@ -1,17 +1,8 @@
-# Render Blueprint: Heliotrope FastAPI backend (Docker).
-# Render dashboard > New > Blueprint > pick this repo. Then set the Vercel
-# project's BACKEND_URL to the service URL and leave NEXT_PUBLIC_BACKEND_URL unset
-# (same-origin mode, see docs/DEPLOYMENT.md).
-#
-# Free plan: the service sleeps after ~15 min idle and cold-starts in ~50s.
-# Hit /api/v1/health a minute before a demo. There is no disk on the free
-# plan, so the SQLite execution store resets on every restart/redeploy.
 services:
   - type: web
     name: heliotrope-backend
     runtime: docker
     plan: free
-    # Closest Render region to the Vercel function region (iad1).
     region: virginia
     dockerContext: .
     dockerfilePath: ./backend/Dockerfile
@@ -20,23 +11,19 @@ services:
     envVars:
       - key: HELIOTROPE_ENV
         value: production
-      # Live grid signal: a carbon-intensity estimate built from real solar/wind
-      # forecasts (Open-Meteo, no key). Set CARBON_LAT / CARBON_LON to your site
-      # (defaults to Bhopal, India) and tune CARBON_WEATHER_* in docs/DEPLOYMENT.md.
       - key: CARBON_PROVIDER
         value: weather
-      # Jev (TypeSafe AI's System One model) decides what kind of load something is
-      # and how essential it is. Used whenever a key is present; each request falls
-      # back to the built-in rules if Jev is unreachable.
       - key: LOAD_INTELLIGENCE_PROVIDER
         value: auto
-      # Solve to within 0.01% of the proven optimum instead of chasing the last
-      # fraction for the full time limit (0.17s vs 12s on a household with a water
-      # heater). Results that stop inside the tolerance are reported FEASIBLE with
-      # their real gap, never OPTIMAL. Set to 0 to always prove optimality.
       - key: SOLVER_RELATIVE_GAP
         value: "0.0001"
-      # Your TypeSafe / Jev API key (the one from console.typesafe.ai/keys). It is only
-      # ever sent to api.typesafe.ai. Leave blank to run on the built-in rules.
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_PUBLISHABLE_KEY
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
       - key: JEV_API_KEY
         sync: false

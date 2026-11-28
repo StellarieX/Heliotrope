@@ -17,12 +17,13 @@ important answer, not a malformed request (§20, §44).
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, Header
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 import math
 
+from ...core.auth import verified_user
 from ...domain.forecasting import ForecastConfig, ForecastMode
 from ...domain.horizon import HorizonError, SchedulingHorizon
 from ...domain.scaling import ScalingError
@@ -110,7 +111,7 @@ class CarbonForecastOptions(BaseModel):
 
 
 class ScheduleRequest(BaseModel):
-    jobs: list[LoadSpec] = Field(min_length=1)
+    jobs: list[LoadSpec] = Field(min_length=1, max_length=200)
     capacity_kw: float = Field(gt=0)
     #: optional per-slot connection capacity in kW. Overrides the scalar
     #: `capacity_kw` slot by slot when given; the length must equal the
@@ -396,18 +397,12 @@ def _prepare_graceful(request: ScheduleRequest, probe_run):
                 capacity_profile_kw=None,
                 hints=None,
             )
-        except Exception as exc:
+        except (NormalizationError, ScalingError, HorizonError) as exc:
             left_out.append(
                 {"job_id": spec.id, "name": spec.normalized_name, "reason": str(exc)}
             )
             continue
-        try:
-            probe_result = probe_run(single_input)
-        except Exception as exc:
-            left_out.append(
-                {"job_id": spec.id, "name": spec.normalized_name, "reason": str(exc)}
-            )
-            continue
+        probe_result = probe_run(single_input)
         if probe_result.status == "INFEASIBLE":
             left_out.append(
                 {
@@ -505,24 +500,32 @@ def _forecast_for(request: ScheduleRequest, end=None):
     )
 
 
-def _with_pool(request: ScheduleRequest, scheduler_input):
+async def _pool_owner(authorization: str | None = Header(default=None)) -> str | None:
+    if authorization is None:
+        return None
+    return (await verified_user(authorization)).owner_id
+
+
+def _with_pool(request: ScheduleRequest, scheduler_input, owner_id: str | None):
     """Attach the anti-herding pool when the caller opts in (aggregate load only)."""
     from ...services.load_pool import attach_pool, pool_summary
     from .execution import store
 
     if not request.share_pool:
         return scheduler_input, pool_summary(None)
-    exclude = [request.pool_exclude_schedule_id] if request.pool_exclude_schedule_id else []
+    exclude = []
+    if request.pool_exclude_schedule_id and owner_id and store.owner_has_schedule(request.pool_exclude_schedule_id, owner_id):
+        exclude.append(request.pool_exclude_schedule_id)
     return attach_pool(store, scheduler_input, exclude)
 
 
 @router.post("/schedule")
-def create_schedule(request: ScheduleRequest) -> JSONResponse:
+def create_schedule(request: ScheduleRequest, owner_id: str | None = Depends(_pool_owner)) -> JSONResponse:
     prepared, error = _prepare(request)
     if error is not None:
         return error
     name, scheduler_input, warnings, forecast_config, forecast = prepared
-    scheduler_input, pool = _with_pool(request, scheduler_input)
+    scheduler_input, pool = _with_pool(request, scheduler_input, owner_id)
 
     result = service.run(
         scheduler_input, name, config=request.solver_config, explain=request.explain
@@ -645,7 +648,7 @@ def _forecast_summary(
 
 
 @router.post("/schedule/compare")
-def compare_schedules(request: CompareRequest) -> JSONResponse:
+def compare_schedules(request: CompareRequest, owner_id: str | None = Depends(_pool_owner)) -> JSONResponse:
     probe_run = lambda inp: service.run(
         inp, SchedulerName.CPSAT, config=SchedulerConfig(time_limit_seconds=2.0), explain=False
     )
@@ -678,7 +681,7 @@ def compare_schedules(request: CompareRequest) -> JSONResponse:
             detail = str(exc.args[0])
             return _err(detail, "invalid_scheduler", 400)
 
-    scheduler_input, pool = _with_pool(request, scheduler_input)
+    scheduler_input, pool = _with_pool(request, scheduler_input, owner_id)
     comparison = service.compare(
         scheduler_input, schedulers=names, config=request.solver_config
     )

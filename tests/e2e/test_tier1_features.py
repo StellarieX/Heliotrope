@@ -23,7 +23,6 @@ from app.services.scheduler_normalizer import SchedulerNormalizer
 from app.services.schedulers.cpsat import CPSATScheduler
 
 from .conftest import (
-    FirestoreRulesEvaluator,
     LocalStorageSimulator,
     make_load_spec,
     make_thermal_spec,
@@ -36,72 +35,28 @@ BASE_TIME = datetime(2026, 10, 6, 8, 0, 0, tzinfo=timezone.utc)
 # Feature 1: Public Profile Route Access (M1, R1)
 # ============================================================================
 
-def test_tier1_f01_public_profile_unauthenticated_read(rules_evaluator: FirestoreRulesEvaluator):
-    """F1.1: Unauthenticated visitors can read /users/{uid} public profile documents."""
-    allowed = rules_evaluator.evaluate_user_read(auth_uid=None, target_uid="user_alice_123")
-    assert allowed is True, "Unauthenticated visitors must have read access to /users/{uid} per R1"
 
 
-def test_tier1_f01_public_profile_authenticated_visitor_read(rules_evaluator: FirestoreRulesEvaluator):
-    """F1.2: Authenticated visitors can read other users' /users/{uid} public profiles."""
-    allowed = rules_evaluator.evaluate_user_read(auth_uid="user_bob_456", target_uid="user_alice_123")
-    assert allowed is True, "Authenticated users viewing another profile must not be blocked"
 
 
-def test_tier1_f01_public_profile_claimed_username_lookup(rules_evaluator: FirestoreRulesEvaluator):
-    """F1.3: Claimed username documents at /usernames/{name} permit public read."""
-    assert rules_evaluator.verify_rule_content("match /usernames/{name}"), "Missing match for /usernames/{name}"
-    assert rules_evaluator.verify_rule_content("allow read: if true;"), "Missing public read on /usernames"
 
 
-def test_tier1_f01_public_profile_unclaimed_username_handling():
-    """F1.4: Querying an unclaimed username resolves cleanly to missing profile state."""
-    db_usernames: dict[str, dict] = {"alice": {"uid": "user_alice"}}
-    query_name = "bob_unclaimed"
-    exists = query_name in db_usernames
-    assert exists is False, "Unclaimed username must report exists=False"
 
 
-def test_tier1_f01_public_profile_subcollection_jobs_privacy(rules_evaluator: FirestoreRulesEvaluator):
-    """F1.5: Private subcollection /users/{uid}/jobs/{jobId} remains strictly owner-only."""
-    # Reading jobs must require auth.uid == uid
-    match_jobs = rules_evaluator.verify_rule_content("match /jobs/{jobId}")
-    assert match_jobs is True, "Jobs subcollection rule must be explicitly protected"
-    assert "request.auth != null && request.auth.uid == uid;" in rules_evaluator.rules_content
 
 
 # ============================================================================
 # Feature 2: Username Claim Ownership Security (M1, R1)
 # ============================================================================
 
-def test_tier1_f02_claim_creation_by_owner_allowed(rules_evaluator: FirestoreRulesEvaluator):
-    """F2.1: Authenticated user claiming /usernames/{name} with matching UID is permitted."""
-    allowed = rules_evaluator.evaluate_username_create(auth_uid="user_alice", resource_uid="user_alice")
-    assert allowed is True, "Owner must be allowed to create their username claim"
 
 
-def test_tier1_f02_claim_creation_unauthenticated_rejected(rules_evaluator: FirestoreRulesEvaluator):
-    """F2.2: Unauthenticated visitors cannot create username claim documents."""
-    allowed = rules_evaluator.evaluate_username_create(auth_uid=None, resource_uid="user_alice")
-    assert allowed is False, "Unauthenticated create must be rejected"
 
 
-def test_tier1_f02_claim_creation_for_other_user_rejected(rules_evaluator: FirestoreRulesEvaluator):
-    """F2.3: Authenticated user cannot create a claim document with someone else's UID."""
-    allowed = rules_evaluator.evaluate_username_create(auth_uid="user_attacker", resource_uid="user_victim")
-    assert allowed is False, "Creating claim for a third-party UID must be rejected"
 
 
-def test_tier1_f02_claim_update_by_owner_allowed(rules_evaluator: FirestoreRulesEvaluator):
-    """F2.4: Owner updating their own claim document is permitted."""
-    allowed = rules_evaluator.evaluate_username_update(auth_uid="user_alice", existing_uid="user_alice", new_uid="user_alice")
-    assert allowed is True, "Owner must be allowed to update their own claim"
 
 
-def test_tier1_f02_claim_delete_by_owner_allowed(rules_evaluator: FirestoreRulesEvaluator):
-    """F2.5: Owner deleting their own claim document is permitted."""
-    allowed = rules_evaluator.evaluate_username_delete(auth_uid="user_alice", existing_uid="user_alice")
-    assert allowed is True, "Owner must be allowed to delete their own claim"
 
 
 # ============================================================================

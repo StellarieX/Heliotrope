@@ -19,7 +19,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
@@ -43,7 +43,9 @@ from ...domain.scheduling import BaselineProfile, SchedulerConfig, SchedulerInpu
 from ...services.carbon_service import CarbonBadRequest, CarbonUnavailable
 from ...services.coordinator import CoordinationError, MultiUserCoordinator
 from ...services.execution_events import apply_event, check_override, transition
-from ...services.execution_store import ExecutionStore, utcnow
+from ...services.execution_store import utcnow
+from ...services.postgres_execution_store import PostgresExecutionStore
+from ...core.auth import execution_session
 from ...services.load_pool import attach_pool, pool_summary
 from ...services.meter_provider import InMemoryMeterProvider
 from ...services.receding import RecedingHorizon, RemainingInfeasible, now_slot
@@ -53,8 +55,8 @@ from ...services.schedulers import SchedulerName
 from ...services.simulator import ExecutionSimulator
 from .schedule import ScheduleRequest, _prepare_graceful
 
-router = APIRouter()
-store = ExecutionStore()
+router = APIRouter(dependencies=[Depends(execution_session, scope="function")])
+store = PostgresExecutionStore()
 service = SchedulerService()
 coordinator = MultiUserCoordinator()
 simulator = ExecutionSimulator()
@@ -74,7 +76,11 @@ def _err(detail: str, code: str, status: int) -> JSONResponse:
 def _no_feasible_plan(
     solver_status: str, reason: str, warnings: list[str], left_out: list[dict]
 ) -> JSONResponse:
-    """422 for a plan with nothing storable: no record, no cancellation."""
+    """Report why no record was stored, including inconclusive solves."""
+    if solver_status == "UNKNOWN":
+        return _err("The optimizer could not determine feasibility in time. Try planning again.", "solve_timeout", 503)
+    if solver_status == "INTERNAL_ERROR":
+        return _err("The optimizer could not produce a valid result.", "solver_error", 500)
     if left_out:
         # The specific per-load reasons come first; the generic
         # power/deadline sentence adds nothing once a load names its cause.
@@ -108,8 +114,8 @@ def _require_aware_dt(v: Optional[datetime], field: str) -> Optional[datetime]:
     return v
 
 
-def _record_or_404(schedule_id: str):
-    record = store.get(schedule_id)
+def _record_or_404(schedule_id: str, *, for_update: bool = True):
+    record = store.get(schedule_id, for_update=for_update)
     if record is None:
         return None, _err("unknown schedule_id", "not_found", 404)
     return record, None
@@ -201,6 +207,12 @@ class CoordinatedPlanRequest(CoordinationRequest):
 
 @router.post("/schedules/plan")
 def plan_single(body: PlanRequest) -> JSONResponse:
+    if body.replaces_schedule_id:
+        replaced = store.get(body.replaces_schedule_id)
+        if replaced is None:
+            return _err("unknown schedule_id", "not_found", 404)
+        if replaced.lifecycle in (ScheduleLifecycle.CANCELLED, ScheduleLifecycle.STALE):
+            return _err("schedule has already been replaced", "conflict", 409)
     probe_run = lambda inp: service.run(
         inp,
         resolve_scheduler(body.scheduler),
@@ -225,7 +237,7 @@ def plan_single(body: PlanRequest) -> JSONResponse:
             [body.replaces_schedule_id] if body.replaces_schedule_id else [],
         )
     result = service.run(solve_input, name, config=body.solver_config, explain=True)
-    if result.status not in ("OPTIMAL", "FEASIBLE"):
+    if result.status == "INFEASIBLE":
         # Graceful degrade: drop the largest-energy load per round until the
         # remainder solves. Drop rounds run on a short clock so failure paths
         # stay well under the frontend timeout; only the final explained run
@@ -270,7 +282,8 @@ def plan_single(body: PlanRequest) -> JSONResponse:
         ):
             old.lifecycle = ScheduleLifecycle.CANCELLED
             store._persist(old)
-    record = store.create(scheduler_input, result, reason=RescheduleReason.MANUAL)
+    stored_input = scheduler_input.model_copy(update={"jobs": solve_input.jobs})
+    record = store.create(stored_input, result, reason=RescheduleReason.MANUAL)
     record.lifecycle = ScheduleLifecycle.SCHEDULED
     record.context = {
         "kind": "single",
@@ -323,9 +336,17 @@ def plan_coordinated(body: CoordinatedPlanRequest) -> JSONResponse:
 # --- state + history ------------------------------------------------------------
 
 
+@router.get("/schedules/active")
+def get_active() -> JSONResponse:
+    record = store.latest_active()
+    if record is None:
+        return _err("no active schedule", "not_found", 404)
+    return JSONResponse(status_code=200, content=_state_payload(record))
+
+
 @router.get("/schedules/{schedule_id}/state")
 def get_state(schedule_id: str) -> JSONResponse:
-    record, error = _record_or_404(schedule_id)
+    record, error = _record_or_404(schedule_id, for_update=False)
     if error is not None:
         return error
     assert record is not None
@@ -334,7 +355,7 @@ def get_state(schedule_id: str) -> JSONResponse:
 
 @router.get("/schedules/{schedule_id}/history")
 def get_history(schedule_id: str) -> JSONResponse:
-    record, error = _record_or_404(schedule_id)
+    record, error = _record_or_404(schedule_id, for_update=False)
     if error is not None:
         return error
     assert record is not None
@@ -440,11 +461,11 @@ def post_tick(schedule_id: str, body: TickBody) -> JSONResponse:
     event = ScheduleEvent(
         event_type=ScheduleEventType.CLOCK_ADVANCED, timestamp=now,
     )
-    store.record_event(record, event)
     try:
         _advised, notes = apply_event(record, event)
     except ValueError as exc:
         return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_transition", "message": str(exc)})
+    store.record_event(record, event)
     _refresh_lifecycle(record, now)
     due = _periodic_due(record, now)
     out: dict = {
@@ -609,7 +630,7 @@ def post_telemetry(schedule_id: str, body: TelemetryBody) -> JSONResponse:
     target = state.expected_energy_kwh
     complete = target > 0 and state.energy_delivered_kwh + 1e-9 >= target
     terminal = state.status in (JobStatus.COMPLETED, JobStatus.CANCELLED)
-    applied: list[str] = []
+    applied: list[ScheduleEvent] = []
     notes: list[str] = []
     advised = False
 
@@ -617,8 +638,9 @@ def post_telemetry(schedule_id: str, body: TelemetryBody) -> JSONResponse:
         event = ScheduleEvent(
             event_type=event_type, timestamp=ts, job_id=body.job_id, payload=dict(payload),
         )
-        store.record_event(record, event)
-        return apply_event(record, event)
+        result = apply_event(record, event)
+        applied.append(event)
+        return result
 
     try:
         if terminal:
@@ -627,25 +649,24 @@ def post_telemetry(schedule_id: str, body: TelemetryBody) -> JSONResponse:
             if state.status is not JobStatus.RUNNING:
                 # PENDING has no direct edge to COMPLETED; start first.
                 a, n = _emit(ScheduleEventType.JOB_STARTED)
-                applied.append(ScheduleEventType.JOB_STARTED.value)
                 advised, notes = a, notes + n
             a, n = _emit(ScheduleEventType.JOB_COMPLETED)
-            applied.append(ScheduleEventType.JOB_COMPLETED.value)
             advised, notes = advised or a, notes + n
         else:
             # Progress note: bring the job to RUNNING, or record a
             # same-state measured heartbeat when already running.
             a, n = _emit(ScheduleEventType.JOB_STARTED)
-            applied.append(ScheduleEventType.JOB_STARTED.value)
             advised, notes = a, notes + n
     except ValueError as exc:
         return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_transition", "message": str(exc)})
+    for event in applied:
+        store.record_event(record, event)
     _refresh_lifecycle(record, ts)
     store._persist(record)
     out: dict = {
         "accepted": True,
         "source": "MEASURED",
-        "event_types": applied,
+        "event_types": [event.event_type.value for event in applied],
         "completed": complete,
         "notes": notes,
         "replan_advised": advised,

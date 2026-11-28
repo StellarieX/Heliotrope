@@ -1,7 +1,7 @@
 """Pytest configuration and fixtures for Heliotrope E2E Test Suite.
 
 Ensures backend modules are on sys.path and provides shared fixtures
-for TestClient, domain generators, Firestore rules evaluation, and mocks.
+for TestClient, domain generators, and mocks.
 """
 
 from __future__ import annotations
@@ -45,6 +45,22 @@ def pytest_configure(config: pytest.Config) -> None:
     )
 
 
+@pytest.fixture(scope="session", autouse=True)
+def execution_test_adapter():
+    from app.api.routes import execution
+    from app.core.auth import execution_session
+
+    async def test_session():
+        yield None
+
+    original = execution.store
+    execution.store = ExecutionStore(_os.environ["HELIOTROPE_EXECUTION_DB"])
+    app.dependency_overrides[execution_session] = test_session
+    yield
+    app.dependency_overrides.pop(execution_session, None)
+    execution.store = original
+
+
 @pytest.fixture(scope="session")
 def client():
     """HTTP client for the Heliotrope API.
@@ -68,96 +84,6 @@ def client():
 def clean_execution_store():
     """Provides a fresh ExecutionStore instance isolated per test."""
     return ExecutionStore()
-
-
-class FirestoreRulesEvaluator:
-    """Evaluates security rule constraints directly against firestore.rules on disk."""
-
-    def __init__(self, rules_path: Optional[Path] = None):
-        self.rules_path = rules_path or (_repo_root / "firestore.rules")
-        if not self.rules_path.exists():
-            raise FileNotFoundError(f"firestore.rules not found at {self.rules_path}")
-        self.rules_content = self.rules_path.read_text(encoding="utf-8")
-
-    def verify_rule_content(self, expected_substring: str) -> bool:
-        """Verifies exact rule snippet is present in firestore.rules."""
-        return expected_substring in self.rules_content
-
-    def evaluate_user_read(self, auth_uid: Optional[str], target_uid: str) -> bool:
-        """Evaluates read permission on /users/{uid}."""
-        # /users/{uid} rule: allow read: if true;
-        match = re.search(r"match\s+/users/\{uid\}\s*\{([^}]+(?:\{[^}]*\}[^}]*)*)\}", self.rules_content)
-        if match:
-            block = match.group(1)
-            read_match = re.search(r"allow\s+read:\s*if\s+([^;]+);", block)
-            if read_match:
-                condition = read_match.group(1).strip()
-                if condition == "true":
-                    return True
-                if "request.auth != null" in condition and "request.auth.uid == uid" in condition:
-                    return auth_uid is not None and auth_uid == target_uid
-        return False
-
-    def evaluate_user_write(self, auth_uid: Optional[str], target_uid: str) -> bool:
-        """Evaluates write permission on /users/{uid}."""
-        # /users/{uid} rule: allow write: if request.auth != null && request.auth.uid == uid;
-        match = re.search(r"match\s+/users/\{uid\}\s*\{([^}]+(?:\{[^}]*\}[^}]*)*)\}", self.rules_content)
-        if match:
-            block = match.group(1)
-            write_match = re.search(r"allow\s+write:\s*if\s+([^;]+);", block)
-            if write_match:
-                condition = write_match.group(1).strip()
-                if "request.auth != null" in condition and "request.auth.uid == uid" in condition:
-                    return auth_uid is not None and auth_uid == target_uid
-        return False
-
-    def evaluate_username_create(self, auth_uid: Optional[str], resource_uid: str) -> bool:
-        """Evaluates create on /usernames/{name}."""
-        match = re.search(r"match\s+/usernames/\{name\}\s*\{([^}]+)\}", self.rules_content)
-        if match:
-            block = match.group(1)
-            m = re.search(r"allow\s+create:\s*if\s+([^;]+);", block)
-            if m:
-                cond = m.group(1).strip()
-                # Condition: request.auth != null && request.resource.data.uid == request.auth.uid
-                has_auth_check = "request.auth != null" in cond
-                has_claim_check = "request.resource.data.uid == request.auth.uid" in cond
-                if has_auth_check and has_claim_check:
-                    return auth_uid is not None and auth_uid == resource_uid
-        return False
-
-    def evaluate_username_update(self, auth_uid: Optional[str], existing_uid: str, new_uid: str) -> bool:
-        """Evaluates update on /usernames/{name}."""
-        match = re.search(r"match\s+/usernames/\{name\}\s*\{([^}]+)\}", self.rules_content)
-        if match:
-            block = match.group(1)
-            m = re.search(r"allow\s+update:\s*if\s+([^;]+);", block)
-            if m:
-                cond = m.group(1).strip()
-                # Condition: request.auth != null && resource.data.uid == request.auth.uid && request.resource.data.uid == request.auth.uid
-                if auth_uid is None:
-                    return False
-                return (existing_uid == auth_uid) and (new_uid == auth_uid)
-        return False
-
-    def evaluate_username_delete(self, auth_uid: Optional[str], existing_uid: str) -> bool:
-        """Evaluates delete on /usernames/{name}."""
-        match = re.search(r"match\s+/usernames/\{name\}\s*\{([^}]+)\}", self.rules_content)
-        if match:
-            block = match.group(1)
-            m = re.search(r"allow\s+delete:\s*if\s+([^;]+);", block)
-            if m:
-                cond = m.group(1).strip()
-                # Condition: request.auth != null && resource.data.uid == request.auth.uid
-                if auth_uid is None:
-                    return False
-                return existing_uid == auth_uid
-        return False
-
-
-@pytest.fixture(scope="session")
-def rules_evaluator() -> FirestoreRulesEvaluator:
-    return FirestoreRulesEvaluator()
 
 
 class LocalStorageSimulator:

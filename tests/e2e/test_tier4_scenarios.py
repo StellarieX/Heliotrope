@@ -19,7 +19,6 @@ from app.services.load_intelligence import RuleBasedLoadClassifier
 from app.services.providers.synthetic import SyntheticDuckCurveProvider
 
 from .conftest import (
-    FirestoreRulesEvaluator,
     LocalStorageSimulator,
     make_load_spec,
     make_thermal_spec,

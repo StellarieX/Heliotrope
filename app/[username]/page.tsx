@@ -2,8 +2,8 @@
 
 import { use, useEffect, useState } from "react";
 import Link from "next/link";
-import { doc, getDoc } from "firebase/firestore";
-import { getDb } from "../../lib/firebase";
+import { getSupabase } from "../../lib/supabase";
+import { getPublicProfile } from "../../lib/account-data";
 import { validUsername } from "../../lib/username";
 
 type Profile = { username: string; displayName: string | null; photoURL: string | null };
@@ -19,7 +19,7 @@ export default function PublicProfile({ params }: { params: Promise<{ username: 
   const { username } = use(params);
   const name = username.toLowerCase();
   const nameValid = validUsername(name);
-  const [db] = useState(() => getDb());
+  const [db] = useState(() => getSupabase());
   const [result, setResult] = useState<Result | null>(null);
   const [attempt, setAttempt] = useState(0);
 
@@ -34,26 +34,16 @@ export default function PublicProfile({ params }: { params: Promise<{ username: 
     let cancelled = false;
     (async () => {
       try {
-        const claim = await getDoc(doc(db, "usernames", name));
-        const uid = claim.exists() ? claim.data().uid : null;
-        if (typeof uid !== "string") {
-          if (!cancelled) setResult({ name, kind: "missing" });
-          return;
-        }
-        const snap = await getDoc(doc(db, "users", uid));
+        const d = await getPublicProfile(name);
         if (cancelled) return;
-        if (!snap.exists()) {
-          setResult({ name, kind: "missing" });
-          return;
-        }
-        const d = snap.data();
+        if (!d) { setResult({ name, kind: "missing" }); return; }
         setResult({
           name,
           kind: "found",
           profile: {
             username: name,
-            displayName: typeof d.displayName === "string" ? d.displayName : null,
-            photoURL: typeof d.photoURL === "string" ? d.photoURL : null,
+            displayName: typeof d.display_name === "string" ? d.display_name : null,
+            photoURL: typeof d.photo_url === "string" ? d.photo_url : null,
           },
         });
       } catch {

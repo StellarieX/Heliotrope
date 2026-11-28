@@ -1,7 +1,7 @@
 """Graceful planning fallback: drop loads until the plan fits (§20).
 
 One bad (oversized, impossible-window) load must not fail the whole plan.
-`drop_until_feasible` repeatedly solves and, while the result is not feasible,
+`drop_until_feasible` repeatedly solves and, while the result proves infeasibility,
 removes the single largest-energy job — biggest first, because one big load is
 the most likely cause of a capacity breach — recording each removal as a plain
 `{"job_id", "name", "reason"}` dict in the caller-supplied `left_out` list.
@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from ..domain.scheduling import NormalizedJob, SchedulerInput, SchedulerResult
+from ..domain.scheduling import NormalizedJob, ScheduleStatus, SchedulerInput, SchedulerResult
 
 
 def job_energy_wmin(job: NormalizedJob, slot_minutes: int) -> int:
@@ -43,9 +43,7 @@ def drop_until_feasible(
     """
     while True:
         result = run(solve_input)
-        if result.status in ("OPTIMAL", "FEASIBLE"):
-            return result
-        if not solve_input.jobs:
+        if result.status != ScheduleStatus.INFEASIBLE or not solve_input.jobs:
             return result
         victim = max(
             solve_input.jobs,

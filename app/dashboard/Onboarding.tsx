@@ -1,15 +1,14 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { signOut, updateProfile, type User } from "firebase/auth";
-import { collection, doc, getDoc, writeBatch } from "firebase/firestore";
-import { getDb, getFirebaseAuth } from "../../lib/firebase";
-import { claimUsername, validUsername } from "../../lib/username";
+import { getSupabase, signOut, type User } from "../../lib/supabase";
+import { completeOnboarding, getProfile, getPublicProfile } from "../../lib/account-data";
+import { validUsername } from "../../lib/username";
 import { classifyJob, type JobInput } from "../../lib/prioritize";
 import { detailNeeded, kindOf, type StoredJob } from "../../lib/loads/specs";
 import { useJevClassify } from "../../lib/onboarding/useJevClassify";
 import { useBackendRanking } from "../../lib/onboarding/useRanking";
-import { OCCUPATIONS, PLACES, profileFor, saveMaxPower, type LoadPreset } from "../../lib/occupations";
+import { OCCUPATIONS, PLACES, profileFor, type LoadPreset } from "../../lib/occupations";
 import type { JobType } from "../../lib/api/types";
 
 type Draft = {
@@ -244,14 +243,14 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
   // after four steps of typing. The registry is publicly readable by design.
   useEffect(() => {
     if (!unameValid) return;
-    const db = getDb();
+    const db = getSupabase();
     if (!db) return;
     let cancelled = false;
     const t = setTimeout(() => {
-      getDoc(doc(db, "usernames", uname))
-        .then((snap) => {
+      Promise.all([getPublicProfile(uname), getProfile(user.uid)])
+        .then(([entry, profile]) => {
           if (cancelled) return;
-          const state: Availability = !snap.exists() ? "free" : snap.data().uid === user.uid ? "mine" : "taken";
+          const state: Availability = !entry ? "free" : profile?.username === uname ? "mine" : "taken";
           setAvail({ name: uname, state });
         })
         .catch(() => {
@@ -359,69 +358,28 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
       setErr(maxPowerError);
       return;
     }
-    const db = getDb();
+    const db = getSupabase();
     if (!db) {
       setErr("Database not configured.");
       return;
     }
     setWorking(true);
     try {
-      const vName = name.trim();
-      if (vName !== user.displayName) await updateProfile(user, { displayName: vName });
-      let prev: string | null = null;
-      try {
-        const existing = await getDoc(doc(db, "users", user.uid));
-        if (existing.exists()) prev = (existing.data().username as string | undefined) ?? null;
-      } catch {
-        /* profile unreadable — claim without releasing a prev name */
-      }
-      // 1) Claim the name (atomic; the only step that can fail with "taken").
-      //    Re-running it on a retry is idempotent for the same user.
-      // The email is deliberately NOT stored: this document is world-readable.
-      await claimUsername(db, user.uid, uname, prev, {
-        displayName: vName,
-        photoURL: user.photoURL ?? null,
+      await completeOnboarding({
+        p_username: uname, p_display_name: name.trim(), p_photo_url: user.photoURL,
+        p_occupation: occupation, p_place: place, p_rooms: rooms ? Number(rooms) : null,
+        p_max_power_kw: maxPowerKw,
+        p_jobs: stored.map((job) => ({ name: job.name, kind: job.kind, shiftable: job.shiftable, powerKw: job.powerKw, readyBy: job.readyBy, flexHours: job.flexHours, jobType: job.jobType, energyKwh: job.energyKwh, durationMin: job.durationMin, confidence: job.confidence, createdAt: new Date().toISOString() })),
       });
-      // 2) Loads and the `onboarded` flag land in ONE atomic batch. If it fails,
-      //    nothing is half-written, so a retry cannot duplicate loads or leave
-      //    the user "onboarded" with an empty list.
-      const batch = writeBatch(db);
-      const jobsCol = collection(db, "users", user.uid, "jobs");
-      for (const j of stored) {
-        batch.set(doc(jobsCol), {
-          name: j.name,
-          kind: j.kind,
-          shiftable: j.shiftable ?? true,
-          powerKw: j.powerKw,
-          readyBy: j.readyBy,
-          flexHours: j.flexHours,
-          // Optional fields are written only when known, so a missing value stays missing.
-          ...(j.jobType ? { jobType: j.jobType } : {}),
-          ...(j.energyKwh ? { energyKwh: j.energyKwh } : {}),
-          ...(j.durationMin ? { durationMin: j.durationMin } : {}),
-          ...(j.confidence !== undefined ? { confidence: j.confidence } : {}),
-          createdAt: new Date().toISOString(),
-        });
-      }
-      batch.set(
-        doc(db, "users", user.uid),
-        { occupation, place, rooms: rooms ? Number(rooms) : null, onboarded: true },
-        { merge: true }
-      );
-      await batch.commit();
-      saveMaxPower(user.uid, maxPowerKw);
       onDone();
     } catch (e) {
-      const msg = e instanceof Error ? e.message : "";
-      const code = e instanceof Error && "code" in e ? (e as { code?: string }).code : undefined;
-      if (msg === "taken") {
+      const msg = (e as { message?: string })?.message ?? "";
+      const code = (e as { code?: string })?.code;
+      if (code === "23505" || msg === "taken") {
         setAvail({ name: uname, state: "taken" });
         setStep(0);
         setErr(`@${uname} was just taken. Pick another.`);
-      } else if (code === "permission-denied") setErr("Saving was blocked by the database security rules. If this is your own project, deploy firestore.rules.");
-      else if (code === "not-found" || /does not exist/i.test(msg)) setErr("The Firestore database doesn't exist yet — create it in the Firebase console, then retry.");
-      else if (code === "unavailable") setErr("You appear to be offline. Check your connection and retry.");
-      else setErr(`Couldn't save (${code ?? "unknown"}). Try again.`);
+      } else setErr("Couldn't save. Check your connection and try again.");
       setWorking(false);
     }
   }
@@ -664,7 +622,7 @@ export default function Onboarding({ user, onDone }: { user: User; onDone: () =>
             <button
               type="button"
               onClick={() => {
-                const a = getFirebaseAuth();
+                const a = getSupabase();
                 if (a) void signOut(a);
               }}
               className="min-h-11 cursor-pointer px-1 font-mono text-[11px] text-zinc-600 transition hover:text-white"

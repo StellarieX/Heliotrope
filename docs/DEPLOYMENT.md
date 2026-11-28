@@ -1,126 +1,29 @@
-# Deployment
+# Deployment and legacy migration
 
-End-to-end recipe: Next.js frontend on Vercel + FastAPI backend in Docker.
-Two supported frontend-to-backend modes: **same-origin** (recommended) and
-**direct**.
+Configure the Google provider for the target Supabase project. In Google Cloud, authorize `https://<project-ref>.supabase.co/auth/v1/callback`. In Supabase Auth, set the frontend site URL and allow the frontend's `/auth/callback` URL. Apply the SQL migrations and verify row-level security before serving traffic.
 
-## Modes
+Set `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` on the frontend. Set `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SECRET_KEY`, and `DATABASE_URL` on the backend. Keep the secret and database URL server-side. The SQL migration defines the `heliotrope_api` database role with the execution permissions the backend requires. Give a dedicated database login membership in that role and put its TLS-enabled connection string in `DATABASE_URL`.
 
-| Mode | `NEXT_PUBLIC_BACKEND_URL` | `BACKEND_URL` | CORS needed? |
-|---|---|---|---|
-| Same-origin (recommended) | `""` (empty) | Set, server-only, to the backend URL | No — browser calls `/api/v1/*`, Next.js rewrites server-side to `BACKEND_URL` |
-| Direct | Backend URL (e.g. `http://localhost:8000` in dev) | Unset | Yes — browser calls the backend cross-origin |
+For the Vercel same-origin rewrite, set `BACKEND_URL` and leave `NEXT_PUBLIC_BACKEND_URL` unset. Configure exact CORS origins if calling the backend cross-origin. Render's Blueprint lists required backend variables.
 
-`next.config.ts`: `RAW_BACKEND_URL = BACKEND_URL || NEXT_PUBLIC_BACKEND_URL || ""`,
-trimmed of trailing slashes. No rewrite is registered when the result is empty,
-so an unset backend never proxies to localhost in production. `vercel.json`:
-`framework: nextjs`, `regions: ["iad1"]`, `Cache-Control: no-store` on
-`/api/v1/*`.
+## Importing historical data
 
-## Frontend (Vercel)
+Back up the Firebase export and SQLite database, and take a restorable PostgreSQL backup. Import or create Supabase Auth accounts separately, verify their identities, and explicitly map each Firebase UID to its Supabase UUID. Verify a schedule's ownership separately because the previous store carried no account identifier. Freeze writes during cutover and rehearse on an isolated database first. Fold `users/{uid}/settings/prefs.maxPowerKw` into `profile.maxPowerKw` in the normalized export.
 
-1. Connect the repo to Vercel (build `npm run build`, install `npm install`).
-2. Production environment variables (Vercel dashboard, per environment):
-   - Do **not** set `NEXT_PUBLIC_BACKEND_URL` (Vercel cannot store an empty value; unset = same-origin mode in a production build).
-   - `BACKEND_URL` = `https://<your-backend-host>` (server-only; no `NEXT_PUBLIC_` prefix).
-   - Four `NEXT_PUBLIC_FIREBASE_*` keys.
-   - `HELIOTROPE_ENV=production` is not a frontend var; set it on the backend.
-3. Local dev: leave `NEXT_PUBLIC_BACKEND_URL=http://localhost:8000` in `.env.local`;
-   the bundle calls the backend directly and no rewrite is needed.
+The importer accepts normalized JSON rather than a vendor-specific export. Convert the Firestore export into this shape, preserving document IDs and job values. Export SQLite `schedules` rows into the `schedules` array; `data` may be a parsed object or its original JSON string.
 
-## Backend on Render (demo hosting)
-
-`render.yaml` at the repo root is a Render Blueprint for the Docker image
-below: Render dashboard → New → Blueprint → this repo. Then, in Vercel,
-set `BACKEND_URL=https://<service>.onrender.com` and
-leave `NEXT_PUBLIC_BACKEND_URL` unset, and redeploy (env changes only apply to new builds). Free-plan caveats: the
-service sleeps after ~15 min idle (first request takes ~50s, longer than the
-client's 30s timeout), so open `/api/v1/health` before a demo. There is no disk,
-so execution records reset on restart; the dashboard drops a lost schedule and
-asks you to plan again.
-
-## Backend (Docker)
-
-Build from the **repo root** (paths in `backend/Dockerfile` are root-relative):
-
-```bash
-docker build -f backend/Dockerfile -t heliotrope-backend .
-docker run -p 8000:8000 \
-  -e HELIOTROPE_ENV=production \
-  -e CORS_ALLOW_ORIGINS=https://<your-app>.vercel.app \
-  -v heliotrope-data:/srv/data \
-  heliotrope-backend
+```json
+{"users":{"firebase-uid":{"profile":{"username":"alice","displayName":"Alice","photoURL":null,"occupation":null,"place":null,"rooms":2,"maxPowerKw":5,"onboarded":true},"jobs":{"original-job-id":{"name":"Washer","createdAt":"2026-01-01T00:00:00Z"}}}},"schedules":[]}
 ```
 
-Image notes: `python:3.11-slim`, installs from `backend/requirements.lock`
-(runtime-only; dev tools stay out), `PYTHONDONTWRITEBYTECODE=1` /
-`PYTHONUNBUFFERED=1`, runs as non-root `appuser`, `HEALTHCHECK` on
-`GET /api/v1/health`.
+Provide a second JSON file with explicit mappings. Each schedule maps to a Firebase UID already present in `users`; omit it when ownership cannot be established. Unmapped users and schedules are skipped and reported. Do not upload either file to the repository.
 
-Environment:
+```json
+{"users":{"firebase-uid":"00000000-0000-0000-0000-000000000001"},"schedules":{}}
+```
 
-| Variable | Required | Notes |
-|---|---|---|
-| `HELIOTROPE_ENV` | no (`development`) | `production` disables the loopback dev CORS rule |
-| `PORT` | no (`8000`) | Fail-fast: non-integer values raise at import |
-| `LOG_LEVEL` | no (`info`) | |
-| `CORS_ALLOW_ORIGINS` | only for direct cross-origin mode | Comma-separated, slashes stripped; `"*"` gets a credential-less middleware (credentials + wildcard is rejected by browsers) |
-| `CARBON_PROVIDER` | **set to `weather` in production** | Library default is `synthetic` (deterministic, for tests); `render.yaml` sets `weather` |
-| `CARBON_LAT` / `CARBON_LON` / `CARBON_UTC_OFFSET_HOURS` | no | Site for the weather proxy; defaults to Bhopal, India (`23.2599`, `77.4126`, `5.5`) |
-| `CARBON_WEATHER_BASE_GCO2` / `CARBON_WEATHER_SOLAR_SHARE` / `CARBON_WEATHER_WIND_SHARE` | no | Proxy calibration: intensity with no renewables (`700`) and the largest share full sun (`0.20`) / wind (`0.10`) can displace |
-| `CARBON_CSV_PATH` / `CARBON_MAX_RANGE_DAYS` / `CARBON_CACHE_TTL_S` / `CARBON_SYNTHETIC_SEED` | no | Defaults empty / `7` / `300` / `7` |
-| `POOL_ENABLED` / `POOL_BETA` / `POOL_REF_KW` / `POOL_SCALE_KW` | no (`true` / `0.3` / `20` / `10`) | Anti-herding pool: other active schedules' planned load adds a bounded logistic surcharge (at most `1 + POOL_BETA`) to the carbon a new plan minimizes, so users spread out instead of all taking the cleanest slot. Preference only: deadlines and capacity are unchanged and reported CO2 uses the real signal |
-| `SOLVER_RELATIVE_GAP` | `0.0001` in `render.yaml` | Library default `0` (always prove optimality). A small tolerance returns a schedule within that fraction of the proven optimum in a fraction of a second; such a result is `FEASIBLE` with `solver.relative_gap` set, never `OPTIMAL`. A request's own `solver_config.relative_gap_limit` wins |
-| `LOAD_INTELLIGENCE_PROVIDER` | `auto` in `render.yaml` | `auto`/`jev`: Jev when a key is set, else rules. `rule_based` never calls Jev |
-| `DEFAULT_LOAD_TIMEZONE` | no (`UTC`) | |
-| `ELECTRICITY_MAPS_API_KEY` / `ELECTRICITY_MAPS_ZONE` | no | Only for `CARBON_PROVIDER=external`; that adapter returns the past 24h, so it cannot drive planning on its own |
-| `JEV_API_KEY` (or `TYPESAFE_API_KEY`) | for Jev | Your TypeSafe key from console.typesafe.ai/keys, set on **Render** (never Vercel, never the browser). Only ever sent to `api.typesafe.ai`. Without it the built-in rules answer |
-| `JEV_MODEL` / `JEV_MAX_CALLS_PER_MIN` / `JEV_BASE_URL` | no | Default `jev-latest` / `120` Jev calls per minute for the whole process (the API is public; over the cap the rules answer) / `https://api.typesafe.ai` |
+From `backend`, run `python scripts/import_legacy.py export.json mapping.json` for a dry run. Review skipped records and identity mappings. Set `DATABASE_URL` for the intended database and add `--apply` to execute. The importer checks that mapped target accounts exist, inserts without overwriting, and commits all eligible records in one transaction; a constraint or conflict rolls back the transaction. A dry run validates input and reports counts but does not connect to the target or detect database conflicts. Account verification and source conversion are operator responsibilities.
 
-`config.py` auto-trusts Vercel's own `VERCEL_URL` /
-`VERCEL_PROJECT_PRODUCTION_URL` hosts, so per-deployment URLs do not need manual
-`CORS_ALLOW_ORIGINS` entries when the backend runs on Vercel. Explicit entries
-always win.
+For rollback, stop writes and restore the pre-cutover database backup; retain the original Firebase and SQLite data until reconciliation is complete. Restoring a backup also removes subsequent writes, so plan the cutover window accordingly. No live migration has been performed by this repository.
 
-## SQLite volume
-
-`ExecutionStore` is SQLite (`backend/data/heliotrope_execution.db`, overridable
-via `HELIOTROPE_EXECUTION_DB`; writes serialized under a `Lock`, WAL mode,
-30s busy timeout). Mount/persist the DB file as a volume in hosted deploys —
-an ephemeral container filesystem loses it, and multiple instances must share
-one DB file. A lost DB file surfaces as 404 `not_found` on known schedule IDs.
-
-## Firestore rules deploy
-
-- Source of truth: root `firestore.rules` (includes a `uid is string` guard on
-  claim creation). No recursive-wildcard catch-all by design; unmatched
-  collections are default-deny.
-- Deploy: `firebase deploy --only firestore:rules` (root `firebase.json` already
-  points at `firestore.rules`; pick the project with `firebase use <id>`). **Deploy
-  the rules before the new frontend**: the new onboarding no longer stores emails, and
-  the stricter rules reject any profile write that still contains one. Existing profiles
-  are cleaned automatically when their owner next opens the app.
-- Test against the real rules engine (needs Java 21+), then the Python models:
-  - `npx firebase emulators:exec --only firestore --project demo-heliotrope "node tests/rules/rules.test.mjs"` (see the file header)
-  - `pytest tests/test_firestore_rules_challenge.py`
-  - `pytest tests/e2e/test_m1_adversarial_challenger.py`
-
-## Live E2E check
-
-`tests/e2e` supports `HELIOTROPE_E2E_BASE_URL` for a live deploy check plus a
-`live`-marked test. CI (`.github/workflows/ci.yml`): `frontend` (lint + tsc +
-build, pinned Node via `.nvmrc`), `backend` (`py_compile` on `main.py` +
-`config.py`, then `pytest backend/tests`, pinned Python via `.python-version`),
-`e2e-and-rules` (hermetic `tests/e2e -k "not live"` + rules challenge).
-
-## Troubleshooting
-
-| Symptom | Cause | Fix |
-|---|---|---|
-| CORS error in prod (direct mode) | `CORS_ALLOW_ORIGINS` unset | Set to the Vercel URL, redeploy backend; or switch to same-origin mode (empty `NEXT_PUBLIC_BACKEND_URL` + `BACKEND_URL`) |
-| Backend calls go to localhost in prod | `BACKEND_URL` unset while rewrite expected | Set server-only `BACKEND_URL` in Vercel dashboard |
-| 404 on known schedule ID | Ephemeral/lost SQLite file | Re-create schedule; put `HELIOTROPE_EXECUTION_DB` on a persisted volume |
-| `/[username]` 404 | Missing `usernames/{name}` claim or `users/{uid}` doc | Re-claim username while signed in |
-| Vercel build fail | Lint/TS error | Run `npm run lint`, `npx tsc --noEmit` locally first |
-| Backend boot crash `ValueError: Invalid PORT` | Non-integer `PORT` | Set `PORT` to an integer |
-| `public/*.svg` branding | Dead stock assets, generic `favicon.ico` | Replace before a public launch |
+The production backend Dockerfile installs the pinned `backend/requirements.lock` on Python 3.11. Build the frontend with Node 24 and `npm ci` using `package-lock.json`. Configure deployment credentials in the owner's hosting accounts; no remote resources are changed by these instructions.

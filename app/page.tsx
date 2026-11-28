@@ -2,8 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { onAuthStateChanged, signInWithPopup, type User } from "firebase/auth";
-import { getFirebaseAuth, getGoogleProvider } from "../lib/firebase";
+import { getSupabase, onAuthStateChanged, signIn, type User } from "../lib/supabase";
 import type { SignalType } from "../lib/api/types";
 import LivePlan from "./LivePlan";
 
@@ -30,7 +29,7 @@ function Avatar({ name, email, photoURL }: { name: string | null; email: string 
 
 export default function Home() {
   const router = useRouter();
-  const [auth] = useState(() => getFirebaseAuth());
+  const [auth] = useState(() => getSupabase());
   const [user, setUser] = useState<User | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
   const [signingIn, setSigningIn] = useState(false);
@@ -90,13 +89,12 @@ export default function Home() {
   async function handleSignIn() {
     setAuthError(null);
     if (!auth) {
-      setAuthError("Add Firebase keys to .env.local first.");
+      setAuthError("Add Supabase keys to .env.local first.");
       return;
     }
     setSigningIn(true);
     try {
-      await signInWithPopup(auth, getGoogleProvider());
-      router.push("/dashboard");
+      await signIn(auth);
     } catch {
       setAuthError("Sign-in failed. Try again.");
       setSigningIn(false);

@@ -14,7 +14,7 @@
 // those carry an explicit "estimated" assumption and the comfort band is theirs.
 
 import type { LoadSpec, ThermalSpec } from "../api/types";
-import { readyByToDeadline } from "../jobs/normalize";
+import { readyByToDeadline, validReadyBy } from "../jobs/normalize";
 import type { JobInput } from "../prioritize";
 
 export type StoredJob = JobInput & {
@@ -25,6 +25,7 @@ export type StoredJob = JobInput & {
 
 export type LoadKind = "FIXED" | "THERMAL" | "DEFERRABLE_INTERRUPTIBLE" | "DEFERRABLE_ATOMIC";
 export type Detail = "energy" | "duration";
+export type PlanningDetail = Detail | "power" | "deadline";
 
 export const THERMAL_RE = /heater|geyser|cool|ac\b|thermal|boiler/i;
 export const AC_RE = /cool|ac\b|air/i;
@@ -60,6 +61,12 @@ export function detailNeeded(j: StoredJob): Detail | null {
   if (k === "DEFERRABLE_INTERRUPTIBLE" && !positive(j.energyKwh)) return "energy";
   if (k === "DEFERRABLE_ATOMIC" && !positive(j.durationMin)) return "duration";
   return null;
+}
+
+export function planningDetailNeeded(j: StoredJob): PlanningDetail | null {
+  if (!positive(j.powerKw)) return "power";
+  if (!validReadyBy(j.readyBy)) return "deadline";
+  return detailNeeded(j);
 }
 
 /** Latest finish = ready-by (next occurrence) + the flexibility the user allowed. */
@@ -136,13 +143,18 @@ function thermalFor(j: StoredJob, now: Date): LoadSpec {
 export interface BuiltSpecs {
   specs: LoadSpec[];
   /** Loads left out of the plan because a number the user must give is missing. */
-  needsDetail: Array<{ job: StoredJob; need: Detail }>;
+  needsDetail: Array<{ job: StoredJob; need: PlanningDetail }>;
 }
 
 export function buildSpecs(jobs: StoredJob[], now: Date = nextSlot()): BuiltSpecs {
   const specs: LoadSpec[] = [];
   const needsDetail: BuiltSpecs["needsDetail"] = [];
   for (const j of jobs) {
+    const need = planningDetailNeeded(j);
+    if (need) {
+      needsDetail.push({ job: j, need });
+      continue;
+    }
     const kind = kindOf(j);
     if (kind === "FIXED") {
       specs.push(base(j, now, { job_type: "FIXED", category: j.kind || "Always-on" }));
@@ -150,11 +162,6 @@ export function buildSpecs(jobs: StoredJob[], now: Date = nextSlot()): BuiltSpec
     }
     if (kind === "THERMAL") {
       specs.push(thermalFor(j, now));
-      continue;
-    }
-    const need = detailNeeded(j);
-    if (need) {
-      needsDetail.push({ job: j, need });
       continue;
     }
     if (kind === "DEFERRABLE_INTERRUPTIBLE") {

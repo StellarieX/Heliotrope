@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 import app.api.routes.execution as execution
 from app.domain.execution import RescheduleReason, ScheduleEvent, ScheduleEventType
 from app.domain.loads import LoadSpec, LoadType, ThermalSpec
+from app.domain.scheduling import SchedulerResult, ScheduleStatus
 from app.main import app
 from app.services.execution_store import ExecutionStore
 from app.services.scheduler_service import SchedulerService
@@ -50,6 +51,27 @@ def test_plan_state_history_lifecycle():
     history = client.get(f"/api/v1/schedules/{sid}/history").json()
     assert len(history["versions"]) == 1
     assert history["versions"][0]["reason"] == "MANUAL"
+
+
+def test_inconclusive_solver_result_keeps_existing_plan(monkeypatch):
+    job = ev_job(energy_required_kwh=7.2)
+    previous = plan([job])
+    calls = []
+
+    def time_out(scheduler_input, *args, **kwargs):
+        calls.append([item.id for item in scheduler_input.jobs])
+        return SchedulerResult(status=ScheduleStatus.UNKNOWN, scheduler="CPSAT", reason="Time limit")
+
+    monkeypatch.setattr(execution.service, "run", time_out)
+    response = client.post("/api/v1/schedules/plan", json={
+        "jobs": [spec_dict(job)], "capacity_kw": 20, "scheduler": "CPSAT",
+        "carbon_start": CARBON_START, "carbon_end": CARBON_END, "replaces_schedule_id": previous,
+    })
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "solve_timeout"
+    assert calls == [[job.id]]
+    assert client.get(f"/api/v1/schedules/{previous}/state").json()["lifecycle"] == "SCHEDULED"
 
 
 def test_invalid_transition_rejected():
