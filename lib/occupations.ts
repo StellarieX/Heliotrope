@@ -1,6 +1,3 @@
-import { doc, getDoc, serverTimestamp, setDoc } from "firebase/firestore";
-import { getDb } from "./firebase";
-
 // What we know about the person's building, turned into starting points.
 //
 // Onboarding asks "what do you do" and "where will this run". This module is
@@ -161,54 +158,10 @@ export function profileFor(occupation: string, place: string, rooms?: number | n
   return { primary, more: [...placeFirst, ...rest], capacityKw: capacity, capacityNote: note, advice: ADVICE[key] };
 }
 
-// "Max power at once" is private (it describes the site), so it never goes in the
-// world-readable profile. It lives in the owner-only `users/{uid}/settings/prefs`
-// document, with this browser's copy as a fast cache for the first render.
-const capacityKey = (uid: string) => `heliotrope.maxPowerKw.${uid}`;
-
-function cacheMaxPower(uid: string, kw: number): void {
-  try {
-    localStorage.setItem(capacityKey(uid), String(kw));
-  } catch {
-    /* storage unavailable: the account copy still holds it */
-  }
-}
-
-export function saveMaxPower(uid: string, kw: number): void {
-  cacheMaxPower(uid, kw);
-  const db = getDb();
-  if (!db) return;
-  void setDoc(
-    doc(db, "users", uid, "settings", "prefs"),
-    { maxPowerKw: kw, updatedAt: serverTimestamp() },
-    { merge: true }
-  ).catch(() => {
-    /* offline or rules: the browser copy is still used */
-  });
-}
-
-/** The saved value from the account (any device), refreshing the browser cache. */
+// Account preferences are loaded from the owner-only profile on every device.
 export async function loadMaxPower(uid: string): Promise<number | null> {
-  const db = getDb();
-  if (!db) return readMaxPower(uid);
-  try {
-    const snap = await getDoc(doc(db, "users", uid, "settings", "prefs"));
-    const kw = snap.exists() ? Number(snap.data().maxPowerKw) : NaN;
-    if (Number.isFinite(kw) && kw > 0) {
-      cacheMaxPower(uid, kw);
-      return kw;
-    }
-  } catch {
-    /* fall back to the browser copy */
-  }
-  return readMaxPower(uid);
-}
-
-export function readMaxPower(uid: string): number | null {
-  try {
-    const n = Number(localStorage.getItem(capacityKey(uid)));
-    return Number.isFinite(n) && n > 0 ? n : null;
-  } catch {
-    return null;
-  }
+  const { getProfile } = await import("./account-data");
+  const profile = await getProfile(uid);
+  const value = Number(profile?.max_power_kw);
+  return Number.isFinite(value) && value > 0 ? value : null;
 }

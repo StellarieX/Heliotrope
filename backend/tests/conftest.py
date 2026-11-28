@@ -19,6 +19,21 @@ from app.domain.jobs import Job, JobType
 from app.main import app
 
 
+@pytest.fixture(autouse=True)
+def execution_test_adapter(monkeypatch, tmp_path):
+    from app.api.routes import execution
+    from app.core.auth import execution_session
+    from app.services.execution_store import ExecutionStore
+
+    async def test_session():
+        yield None
+
+    monkeypatch.setattr(execution, "store", ExecutionStore(str(tmp_path / "execution.db")))
+    app.dependency_overrides[execution_session] = test_session
+    yield
+    app.dependency_overrides.pop(execution_session, None)
+
+
 @pytest.fixture()
 def client() -> TestClient:
     return TestClient(app)

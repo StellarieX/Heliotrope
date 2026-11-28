@@ -91,17 +91,6 @@ def test_tier5_over_capacity_participants_infeasible(client: TestClient):
     assert res.json()["status"] == "INFEASIBLE"
 
 
-def test_tier5_unauthenticated_open_access_documented(client: TestClient):
-    """T5.5: Backend is open-access by design: plan needs no auth (200), and a
-    foreign/unknown schedule_id is a structured 404 — never a 500."""
-    j = make_load_spec("j1", "Washer", LoadType.DEFERRABLE_ATOMIC, power_kw=1.0, duration_minutes=60)
-    res = client.post("/api/v1/schedules/plan", json={"jobs": [j.model_dump(mode="json")], "capacity_kw": 5.0})
-    assert res.status_code == 200, f"open-access plan must work without auth: {res.text}"
-    assert "schedule_id" in res.json()
-    foreign = client.get("/api/v1/schedules/sched_belongs_to_someone_else_zzz/state")
-    assert foreign.status_code == 404
-    assert foreign.json()["code"] == "not_found"
-    assert foreign.status_code != 500
 
 
 def test_tier5_meter_negative_energy_rejected(client: TestClient):

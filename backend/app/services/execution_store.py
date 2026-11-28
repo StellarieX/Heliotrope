@@ -1,15 +1,7 @@
-"""Durable execution store (Phase 7, Milestone 3).
+"""SQLite execution-store adapter for explicit local tests.
 
-Records live here: schedule versions (immutable, appended), per-job execution
-truth, events, and forecast-vs-actual carbon. Every mutation is persisted to a
-SQLite database so records survive process restarts and are shared across
-store instances; the in-memory dict remains as a read-through cache for fast
-lookups.
-
-The database file defaults to ``backend/data/heliotrope_execution.db`` and can
-be overridden with the ``HELIOTROPE_EXECUTION_DB`` environment variable or the
-``db_path`` constructor argument. Connections are opened per operation (each
-FastAPI worker thread gets its own), and the schema is created up front.
+The running API uses PostgresExecutionStore; this adapter preserves the existing
+in-process test interface and must not be selected as production persistence.
 """
 
 from __future__ import annotations
@@ -109,7 +101,20 @@ class ExecutionStore:
         result: SchedulerResult,
         reason: RescheduleReason = RescheduleReason.MANUAL,
     ) -> ScheduleRecord:
-        schedule_id = uuid.uuid4().hex[:12]
+        record = self._new_record(uuid.uuid4().hex[:12], scheduler_input, result, reason)
+        with self._lock:
+            self._records[record.schedule_id] = record
+            self._persist(record)
+        log.info("schedule_created schedule_id=%s reason=%s", record.schedule_id, reason.value)
+        return record
+
+    @staticmethod
+    def _new_record(
+        schedule_id: str,
+        scheduler_input: SchedulerInput,
+        result: SchedulerResult,
+        reason: RescheduleReason,
+    ) -> ScheduleRecord:
         now = utcnow()
         record = ScheduleRecord(
             schedule_id=schedule_id,
@@ -139,13 +144,9 @@ class ExecutionStore:
         by_id = {j.id: j.participant_id for j in scheduler_input.jobs}
         for state in record.execution.values():
             state.participant_id = by_id.get(state.job_id, "")
-        with self._lock:
-            self._records[schedule_id] = record
-            self._persist(record)
-        log.info("schedule_created schedule_id=%s reason=%s", schedule_id, reason.value)
         return record
 
-    def get(self, schedule_id: str) -> ScheduleRecord | None:
+    def get(self, schedule_id: str, *, for_update: bool = True) -> ScheduleRecord | None:
         # Double-checked under the lock so concurrent first-loads share one record.
         with self._lock:
             record = self._records.get(schedule_id)
@@ -168,6 +169,15 @@ class ExecutionStore:
                 if sid not in ids:
                     out.append(record)
             return out
+
+    def owner_has_schedule(self, schedule_id: str, owner_id: str) -> bool:
+        return self.get(schedule_id) is not None
+
+    def latest_active(self) -> ScheduleRecord | None:
+        records = [r for r in self.list_records() if r.lifecycle in (
+            ScheduleLifecycle.SCHEDULED, ScheduleLifecycle.ACTIVE, ScheduleLifecycle.DRAFT
+        )]
+        return records[-1] if records else None
 
     def append_version(
         self,

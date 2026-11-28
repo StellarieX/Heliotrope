@@ -127,3 +127,9 @@ POOL_ENABLED = _get("POOL_ENABLED", "true").strip().lower() in ("1", "true", "ye
 POOL_BETA = _get_float("POOL_BETA", "0.3")
 POOL_REF_KW = _get_float("POOL_REF_KW", "20")
 POOL_SCALE_KW = _get_float("POOL_SCALE_KW", "10")
+
+# Server-only authentication and persistence configuration.
+SUPABASE_URL = _get("SUPABASE_URL", "").rstrip("/")
+SUPABASE_PUBLISHABLE_KEY = _get("SUPABASE_PUBLISHABLE_KEY", "")
+SUPABASE_SECRET_KEY = _get("SUPABASE_SECRET_KEY", "")
+DATABASE_URL = _get("DATABASE_URL", "")

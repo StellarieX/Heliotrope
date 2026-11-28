@@ -46,7 +46,6 @@ venv/
 
 # local tool output
 *.log
-.firebase/
 *.egg-info/
 
 # sqlite / local execution store

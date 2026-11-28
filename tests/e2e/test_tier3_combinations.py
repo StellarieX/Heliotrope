@@ -20,7 +20,6 @@ from app.services.load_intelligence import RuleBasedLoadClassifier
 from app.services.providers.synthetic import SyntheticDuckCurveProvider
 
 from .conftest import (
-    FirestoreRulesEvaluator,
     LocalStorageSimulator,
     make_load_spec,
     make_thermal_spec,
@@ -29,18 +28,6 @@ from .conftest import (
 BASE_TIME = datetime(2026, 10, 6, 8, 0, 0, tzinfo=timezone.utc)
 
 
-def test_t3_01_f1_f2_claim_lifecycle_and_profile_access(rules_evaluator: FirestoreRulesEvaluator):
-    """T3.01: F1 + F2 — Complete username claim lifecycle and public profile accessibility."""
-    # 1. Owner creates claim
-    assert rules_evaluator.evaluate_username_create("user_carol", "user_carol") is True
-    # 2. Public reads profile
-    assert rules_evaluator.evaluate_user_read(None, "user_carol") is True
-    # 3. Third party cannot overwrite
-    assert rules_evaluator.evaluate_username_update("user_mallory", "user_carol", "user_mallory") is False
-    # 4. Owner updates claim
-    assert rules_evaluator.evaluate_username_update("user_carol", "user_carol", "user_carol") is True
-    # 5. Owner deletes claim
-    assert rules_evaluator.evaluate_username_delete("user_carol", "user_carol") is True
 
 
 def test_t3_02_f3_f4_building_coordination_with_robust_forecast(client: TestClient):

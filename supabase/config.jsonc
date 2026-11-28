@@ -1,0 +1,30 @@
+{
+  "$schema": "https://supabase.com/schemas/config/v1.json",
+  "project_id": "heliotrope",
+  "api": {
+    "enabled": true,
+    "port": 54321,
+    "schemas": ["public"],
+    "extra_search_path": ["public", "extensions"],
+    "max_rows": 1000,
+    "auto_expose_new_tables": false
+  },
+  "db": {
+    "port": 54322,
+    "shadow_port": 54320,
+    "major_version": 17,
+    "seed": { "enabled": false }
+  },
+  "auth": {
+    "enabled": true,
+    "site_url": "http://localhost:3000",
+    "additional_redirect_urls": [
+      "http://localhost:3000/auth/callback",
+      "http://127.0.0.1:3000/auth/callback"
+    ],
+    "enable_anonymous_sign_ins": false
+  },
+  "realtime": { "enabled": false },
+  "storage": { "enabled": false },
+  "analytics": { "enabled": false }
+}

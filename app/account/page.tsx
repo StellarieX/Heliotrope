@@ -3,18 +3,17 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { deleteUser, onAuthStateChanged, reauthenticateWithPopup, signOut, updateProfile, type User } from "firebase/auth";
-import { deleteDoc, doc, getDoc, getDocs, collection, serverTimestamp, setDoc } from "firebase/firestore";
-import { getDb, getFirebaseAuth, getGoogleProvider } from "../../lib/firebase";
-import { claimUsername as claimUsernameFor, validUsername } from "../../lib/username";
-import { scrubLegacyEmail } from "../../lib/profile";
-import { OCCUPATIONS, PLACES, profileFor, readMaxPower, saveMaxPower } from "../../lib/occupations";
+import { getSupabase, onAuthStateChanged, signIn, signOut, type User } from "../../lib/supabase";
+import { getProfile, updateAccount } from "../../lib/account-data";
+import { deleteAccount } from "../../lib/api/client";
+import { validUsername } from "../../lib/username";
+import { OCCUPATIONS, PLACES, profileFor } from "../../lib/occupations";
 
 type Status = { kind: "idle" | "ok" | "err"; text: string };
 
 export default function Account() {
   const router = useRouter();
-  const [auth] = useState(() => getFirebaseAuth());
+  const [auth] = useState(() => getSupabase());
   const [user, setUser] = useState<User | null>(null);
   const [ready, setReady] = useState(false);
   const [name, setName] = useState("");
@@ -40,55 +39,33 @@ export default function Account() {
 
   useEffect(() => {
     if (!auth) {
-    // Firebase not configured: nothing will ever resolve, so stop showing "loading".
+    // Supabase not configured: nothing will ever resolve, so stop showing "loading".
     // Deferred, and `ready` starts false on both server and client so they render the
     // same first frame (a different initial value caused a hydration mismatch).
     queueMicrotask(() => setReady(true));
     return;
     }
     let cancelled = false;
-    const unsub = onAuthStateChanged(auth, async (u) => {
+    let generation = 0;
+    const unsub = onAuthStateChanged(auth, (u) => {
+      const current = ++generation;
       setUser(u);
       setReady(true);
-      if (!u) {
-        // Signed out (or switched account): drop everything that belonged to the last user.
-        setName("");
-        setUsername("");
-        setCurrentUsername(null);
-        setOccupation("");
-        setPlace("");
-        setMaxPower("");
-        setProfileState("loading");
-        return;
-      }
-      setName(u.displayName ?? "");
-      const saved = readMaxPower(u.uid);
-      setMaxPower(saved !== null ? String(saved) : "");
-      const db = getDb();
-      if (!db) {
-        setProfileState("ready");
-        return;
-      }
+      setName(u?.displayName ?? "");
+      setUsername(""); setCurrentUsername(null); setOccupation(""); setPlace(""); setMaxPower("");
       setProfileState("loading");
-      try {
-        const snap = await getDoc(doc(db, "users", u.uid));
-        if (cancelled) return;
-        const data = snap.exists() ? snap.data() : null;
-        if (data) void scrubLegacyEmail(db, u.uid, data);
-        const un = typeof data?.username === "string" ? data.username : null;
-        setCurrentUsername(un);
-        setUsername(un ?? "");
-        setOccupation(typeof data?.occupation === "string" ? data.occupation : "");
-        setPlace(typeof data?.place === "string" ? data.place : "");
+      if (!u) return;
+      void getProfile(u.uid).then((data) => {
+        if (cancelled || current !== generation) return;
+        setName(data?.display_name ?? u.displayName ?? "");
+        setCurrentUsername(data?.username ?? null);
+        setUsername(data?.username ?? "");
+        setOccupation(data?.occupation ?? ""); setPlace(data?.place ?? "");
+        setMaxPower(data?.max_power_kw != null ? String(data.max_power_kw) : "");
         setProfileState("ready");
-      } catch {
-        if (!cancelled) setProfileState("error");
-      }
+      }).catch(() => { if (!cancelled && current === generation) setProfileState("error"); });
     });
-    return () => {
-      cancelled = true;
-      unsub();
-    };
+    return () => { cancelled = true; unsub(); };
   }, [auth, loadAttempt]);
 
   if (!ready) {
@@ -120,23 +97,13 @@ export default function Account() {
       return;
     }
     setSaving(true);
-    let signInUpdated = false;
     try {
-      await updateProfile(user!, { displayName: v });
-      signInUpdated = true;
-      const db = getDb();
-      if (db) await setDoc(doc(db, "users", user!.uid), { displayName: v, updatedAt: serverTimestamp() }, { merge: true });
+      await updateAccount(user!.uid, { display_name: v });
+      setUser((old) => old ? { ...old, displayName: v } : old);
       setNameStatus({ kind: "ok", text: "Name updated." });
     } catch {
-      setNameStatus({
-        kind: "err",
-        text: signInUpdated
-          ? "Your name changed on your account but not on your public page. Save again to retry."
-          : "Couldn't save. Try again.",
-      });
-    } finally {
-      setSaving(false);
-    }
+      setNameStatus({ kind: "err", text: "Couldn't save. Try again." });
+    } finally { setSaving(false); }
   }
 
   async function claimUsername() {
@@ -150,39 +117,16 @@ export default function Account() {
       setUserStatus({ kind: "ok", text: `@${v} is already yours.` });
       return;
     }
-    const db = getDb();
-    if (!db) {
-      setUserStatus({ kind: "err", text: "Database not configured." });
-      return;
-    }
     setChecking(true);
     try {
-      // Profile docs are world-readable, so the email is never stored there.
-      await claimUsernameFor(db, user!.uid, v, currentUsername, {
-        displayName: user!.displayName ?? null,
-        photoURL: user!.photoURL ?? null,
-      });
+      await updateAccount(user!.uid, { username: v });
       const old = currentUsername;
       setCurrentUsername(v);
-      setUserStatus({
-        kind: "ok",
-        text: old ? `@${v} is yours. /${old} no longer leads to your page.` : `@${v} is yours.`,
-      });
+      setUserStatus({ kind: "ok", text: old ? `@${v} is yours. /${old} no longer leads to your page.` : `@${v} is yours.` });
     } catch (e) {
-      const code = e instanceof Error && "code" in e ? (e as { code?: string }).code : undefined;
-      const msg = e instanceof Error ? e.message : "";
-      if (msg === "taken") {
-        setUserStatus({ kind: "err", text: `@${v} is taken. Try another.` });
-      } else if (code === "permission-denied") {
-        setUserStatus({ kind: "err", text: "Firestore rules are blocking this — deploy firestore.rules, then retry." });
-      } else if (code === "not-found" || /does not exist/i.test(msg)) {
-        setUserStatus({ kind: "err", text: "Firestore database doesn't exist yet — create it in Firebase Console → Firestore, then retry." });
-      } else {
-        setUserStatus({ kind: "err", text: `Couldn't claim (${code ?? "unknown"}). Try again.` });
-      }
-    } finally {
-      setChecking(false);
-    }
+      const code = (e as { code?: string }).code;
+      setUserStatus({ kind: "err", text: code === "23505" ? `@${v} is taken. Try another.` : "Couldn't claim that username. Try again." });
+    } finally { setChecking(false); }
   }
 
   async function saveAbout() {
@@ -192,76 +136,27 @@ export default function Account() {
       setAboutStatus({ kind: "err", text: "Max power at once must be above 0 and at most 1000 kW." });
       return;
     }
-    const db = getDb();
-    if (!db) {
-      setAboutStatus({ kind: "err", text: "Database not configured." });
-      return;
-    }
     setProfileSaving(true);
     try {
-      await setDoc(doc(db, "users", user!.uid), { occupation, place, updatedAt: serverTimestamp() }, { merge: true });
-      if (kw !== null) saveMaxPower(user!.uid, kw);
+      await updateAccount(user!.uid, { occupation, place, max_power_kw: kw });
       setAboutStatus({ kind: "ok", text: "Saved." });
     } catch {
       setAboutStatus({ kind: "err", text: "Couldn't save. Try again." });
-    } finally {
-      setProfileSaving(false);
-    }
+    } finally { setProfileSaving(false); }
   }
 
   async function handleDelete() {
     setDeleteStatus({ kind: "idle", text: "" });
-    const auth = getFirebaseAuth();
-    const db = getDb();
-    if (!auth?.currentUser) return;
-    if (profileState !== "ready") {
-      setDeleteStatus({
-        kind: "err",
-        text: "Your saved profile hasn't loaded, so we can't tell which username to release. Reload this page and try again.",
-      });
-      return;
-    }
+    const auth = getSupabase();
+    if (!auth) return;
     setDeleting(true);
     try {
-      // Re-authenticate FIRST: deleteUser needs a recent login, and if that
-      // fails after the data is gone the user keeps an account with no
-      // profile or username. The popup is the first await, so it still runs
-      // inside the click gesture and isn't blocked.
-      await reauthenticateWithPopup(auth.currentUser, getGoogleProvider());
-      // Then delete Firestore docs while still authenticated — deleting the
-      // auth user first would leave these orphaned behind owner-only rules.
-      const uid = auth.currentUser.uid;
-      if (db) {
-        try {
-          const js = await getDocs(collection(db, "users", uid, "jobs"));
-          await Promise.all(js.docs.map((d) => deleteDoc(d.ref)));
-        } catch {
-          // Stop here: deleting the login now would strand data nobody can remove.
-          throw new Error("cleanup");
-        }
-        // The public profile and username claim must be gone before the login is.
-        if (currentUsername) await deleteDoc(doc(db, "usernames", currentUsername));
-        await deleteDoc(doc(db, "users", uid));
-      }
-      await deleteUser(auth.currentUser);
+      await deleteAccount();
+      await auth.auth.signOut({ scope: "local" });
       router.push("/");
     } catch (e) {
-      const cleanup = e instanceof Error && e.message === "cleanup";
-      const code = e instanceof Error && "code" in e ? (e as { code?: string }).code : undefined;
-      setDeleteStatus({
-        kind: "err",
-        text: cleanup
-          ? "Couldn't remove your saved data, so your account was kept. Check your connection and try again."
-          : code === "auth/popup-closed-by-user" || code === "auth/cancelled-popup-request"
-            ? "The sign-in window was closed, so nothing was deleted."
-            : code === "auth/popup-blocked"
-              ? "Your browser blocked the sign-in window. Allow pop-ups for this site and try again."
-              : code === "auth/network-request-failed" || code === "unavailable"
-                ? "You appear to be offline, so nothing was deleted. Check your connection and try again."
-                : code === "permission-denied"
-                  ? "The database refused the request, so your account was kept. If this is your own project, deploy firestore.rules."
-                  : "Couldn't delete the account. Your data may be partly removed; try again to finish.",
-      });
+      const status = (e as { status?: number }).status;
+      setDeleteStatus({ kind: "err", text: status === 401 || status === 403 ? "Sign in again with Google, then confirm deletion." : "Couldn't delete your account. Check your connection and try again." });
       setDeleting(false);
     }
   }
@@ -296,7 +191,7 @@ export default function Account() {
                   </Link>
                   <button
                     onClick={async () => {
-                      const auth = getFirebaseAuth();
+                      const auth = getSupabase();
                       if (auth) await signOut(auth);
                     }}
                     className="block w-full cursor-pointer px-4 py-2.5 text-left text-[13px] text-zinc-300 transition hover:bg-white/5 hover:text-white active:bg-white/10"
@@ -460,7 +355,7 @@ export default function Account() {
           <h2 className="text-[15px] font-medium text-red-300">Delete account</h2>
           <p className="mt-2 text-sm leading-6 text-zinc-500">
             Permanently removes your profile, username{currentUsername ? ` (@${currentUsername})` : ""} and sign-in.
-            This can&apos;t be undone.
+            This can&apos;t be undone. Sign in again with Google before confirming deletion.
           </p>
           {!confirmDelete ? (
             <button
@@ -480,6 +375,7 @@ export default function Account() {
               </button>
             </div>
           )}
+          <button onClick={() => { const a = getSupabase(); if (a) void signIn(a, "account", true).catch(() => setDeleteStatus({ kind: "err", text: "Couldn't start Google sign-in. Try again." })); }} className="mt-4 block text-sm text-red-300 underline">Sign in again with Google</button>
           {deleteStatus.text && <p className="mt-2 font-mono text-[12px] text-orange-300">{deleteStatus.text}</p>}
         </section>
 

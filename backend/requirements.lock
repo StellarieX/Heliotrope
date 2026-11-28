@@ -1,10 +1,85 @@
-# Pinned backend RUNTIME dependencies (tested 2026-10-05, Python 3.11.9).
-# Installed by backend/Dockerfile. Dev tools (pytest, hypothesis) are
-# intentionally NOT pinned here; install them via the `dev` extra:
-#   python -m pip install -e "./backend[dev]"
-# Every pin satisfies the ranges in backend/pyproject.toml.
-fastapi==0.141.1
-uvicorn==0.53.0
-pydantic==2.13.5
-httpx==0.28.1
+absl-py==2.5.1
+    # via ortools
+annotated-doc==0.0.7
+    # via fastapi
+annotated-types==0.8.0
+    # via pydantic
+anyio==4.16.0
+    # via
+    #   fastapi
+    #   httpx
+    #   starlette
+certifi==2026.11.20
+    # via
+    #   httpcore
+    #   httpx
+click==8.5.1
+    # via uvicorn
+fastapi==0.165.0
+    # via heliotrope-backend (backend/pyproject.toml)
+h11==0.16.0
+    # via
+    #   httpcore
+    #   uvicorn
+httpcore==1.0.9
+    # via httpx
+httpx==0.29.0
+    # via heliotrope-backend (backend/pyproject.toml)
+idna==3.20
+    # via
+    #   anyio
+    #   httpx
+immutabledict==4.3.1
+    # via ortools
+numpy==2.4.6 ; python_full_version < '3.12'
+    # via
+    #   ortools
+    #   pandas
+numpy==2.5.5 ; python_full_version >= '3.12'
+    # via
+    #   ortools
+    #   pandas
+opentelemetry-api==1.45.2
+    # via fastapi
 ortools==9.15.6755
+    # via heliotrope-backend (backend/pyproject.toml)
+pandas==3.1.1
+    # via ortools
+protobuf==6.33.6
+    # via ortools
+psycopg==3.3.9
+    # via heliotrope-backend (backend/pyproject.toml)
+psycopg-binary==3.3.9 ; implementation_name != 'pypy'
+    # via psycopg
+pydantic==2.14.4
+    # via
+    #   heliotrope-backend (backend/pyproject.toml)
+    #   fastapi
+pydantic-core==2.50.5
+    # via pydantic
+python-dateutil==4.0.0
+    # via pandas
+starlette==1.10.0
+    # via fastapi
+typing-extensions==4.16.0
+    # via
+    #   anyio
+    #   fastapi
+    #   opentelemetry-api
+    #   ortools
+    #   psycopg
+    #   pydantic
+    #   pydantic-core
+    #   starlette
+    #   typing-inspection
+typing-inspection==0.4.5
+    # via
+    #   fastapi
+    #   pydantic
+tzdata==2026.6
+    # via
+    #   pandas
+    #   psycopg
+    #   python-dateutil
+uvicorn==0.54.0
+    # via heliotrope-backend (backend/pyproject.toml)

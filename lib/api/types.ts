@@ -162,13 +162,6 @@ export interface ScheduleRequest {
   explain?: boolean;
 }
 
-export interface NotImplementedError {
-  detail: string;
-  solver?: string;
-  provider?: string;
-  jobs_received?: number;
-}
-
 export interface HealthResponse {
   status: string;
   service: string;

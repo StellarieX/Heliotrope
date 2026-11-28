@@ -1,6 +1,6 @@
 # Heliotrope API
 
-Base URL: `process.env.NEXT_PUBLIC_BACKEND_URL` (default `http://localhost:8000`). All paths below are prefixed with `/api/v1` except `GET /`. No auth, no token. Interactive docs at `GET /docs`.
+Base URL: `process.env.NEXT_PUBLIC_BACKEND_URL` (default `http://localhost:8000`). All paths below are prefixed with `/api/v1` except `GET /`. Interactive docs at `GET /docs`. Execution and simulation routes, and account deletion, require a verified Supabase access token in `Authorization: Bearer <token>`. A signed-in user can access only their own schedules.
 
 Error shape: `{detail, code, message}` where code is one of `invalid_scheduler`, `unknown_model`, `invalid_request`, `invalid_transition`, `override_rejected`, `provider_unavailable`, `not_found`, `internal_error`, `http_error`. Validation failures (FastAPI request models) are 422 `invalid_request`; `detail` preserves the pydantic error list (arrays for 422s — clients must not assume a string). Response-schema failures are 500 `internal_error`; framework 404s are `not_found`. `INFEASIBLE` results are HTTP 200 with `status: "INFEASIBLE"`.
 
@@ -21,7 +21,7 @@ Error shape: `{detail, code, message}` where code is one of `invalid_scheduler`,
 | 12 | `POST /api/v1/coordination/compare` | same as #11 | `{independent: CoordinationResult, coordinated: CoordinationResult}` | same as #11 |
 | — | Anti-herding pool (#9, #10, #13, replans) | `share_pool?: bool` (default `false` on #9/#10, `true` on #13), `pool_exclude_schedule_id?` (#9/#10), `replaces_schedule_id?` (#13: cancels the caller's previous plan first) | `pool{applied, active_schedules, peak_pooled_kw, beta}`: aggregate kW only, never ids or names. Other active plans' load raises each slot's objective carbon by a logistic factor in `[1, 1 + POOL_BETA]`; deadlines, capacity and reported CO₂ are unchanged | — |
 | 12b | `GET /api/v1/pool/stats?start&end&resolution_minutes` | query: `start`, `end` (tz-aware ISO-8601; naive is 422 `invalid_request`; default now floored to 15 min through +24 h; window at most 7 days), `resolution_minutes` (5/15/30/60, default 15) | `{generated_at, start, end, resolution_minutes, active_schedules, active_loads, total_planned_kwh, peak_kw, peak_at (null when no load), average_kw (mean over slots that carry load, 0 if none), peak_to_average (null when no load; 1.0 is flat, higher is more crowded), slots[{timestamp, kw}] (every slot, zeros included), pool{enabled, beta, ref_kw, scale_kw}}`. The planned load of all live, unfinished schedules in the window (the same pool that tilts new plans away from crowded slots), summed per slot. Aggregates only: no schedule ids, job ids, names or per-user rows; nothing is cached per user. `active_schedules` / `active_loads` count plans / non-finished jobs with load in the window. `start`/`end` echo the slot grid actually used. Planned, not metered | 422 `invalid_request` |
-| 13 | `POST /api/v1/schedules/plan` | #9 shape + `execution?: {policy: MANUAL\|PERIODIC\|EVENT_DRIVEN\|HYBRID, horizon_minutes?, reoptimization_interval_minutes?, commitment_window_minutes?, min_shift_minutes?, change_penalty_weight?, improvement_threshold_percent?}` | `ExecutionState{schedule_id (12 hex), lifecycle, version: 1, solver_status, jobs[{job_id, participant_id, status, scheduled_start/end, energy_delivered_kwh, expected_energy_kwh, note}]}` + `warnings` | same as #9 |
+| 13 | `POST /api/v1/schedules/plan` | #9 shape + `execution?: {policy: MANUAL\|PERIODIC\|EVENT_DRIVEN\|HYBRID, horizon_minutes?, reoptimization_interval_minutes?, commitment_window_minutes?, min_shift_minutes?, change_penalty_weight?, improvement_threshold_percent?}` | `ExecutionState{schedule_id, lifecycle, version: 1, solver_status, jobs[{job_id, participant_id, status, scheduled_start/end, energy_delivered_kwh, expected_energy_kwh, note}]}` + `warnings` | same as #9 |
 | 14 | `POST /api/v1/schedules/plan-coordinated` | #11 shape + `execution?` (as #13) | `ExecutionState` + `coordination: CoordinationResult`; INFEASIBLE building returns the coordination result (200) without creating a record | 422 `invalid_request`, 503 `provider_unavailable` |
 | 15 | `GET /api/v1/schedules/{id}/state` | path `schedule_id` | `ExecutionState` (live truth): `{schedule_id, lifecycle, version, solver_status, jobs[{job_id, participant_id, status, scheduled_start, scheduled_end, deadline_at (end of the job's last allowed slot), energy_delivered_kwh, expected_energy_kwh, note, source}]}` | 404 `not_found` |
 | 16 | `GET /api/v1/schedules/{id}/history` | path `schedule_id` | `{schedule_id, lifecycle, versions[{version, created_at, reason, solver_status, carbon_estimate_kg, peak_kw, changed_jobs[{job_id, previous_start, new_start, previous_end, new_end, change_minutes, reason}]}]}` | 404 `not_found` |
@@ -31,6 +31,10 @@ Error shape: `{detail, code, message}` where code is one of `invalid_scheduler`,
 | 20 | `POST /api/v1/simulation/{id}/advance` (developer/test tool; the app does not call it) | `{to_time, script?: [], carbon_actual?: []}` | `{simulated: true, trace, state: ExecutionState, metrics{planned_energy_kwh, actual_energy_kwh, planned_co2_kg, realized_co2_kg, job_counts, versions}}` | 404 `not_found` |
 | 21 | `POST /api/v1/schedules/{id}/tick` | `{now?}` (daemon calls every N min; no in-process cron) | `{ticked: true, now, periodic_due, replan_advised, replanned?, version?, changes?, notes[], state: ExecutionState}` — records `CLOCK_ADVANCED`, marks overdue starts `MISSED`, auto-replans with reason `PERIODIC` when policy is `PERIODIC`/`HYBRID` and `reoptimization_interval_minutes` elapsed since `last_replan_at` (else version `created_at`); `MANUAL` never auto-replans | 404 `not_found` |
 | 22 | `POST /api/v1/schedules/{id}/telemetry` | `{job_id, timestamp?, energy_kwh? (≥0), power_kw? (≥0), source?}` (at least one of `energy_kwh`/`power_kw`; real meter reading, not simulation) | `{accepted: true, source: "MEASURED", event_types[], completed, notes[], replan_advised, state: ExecutionState}` — emits `JOB_STARTED` (+`JOB_COMPLETED` when cumulative energy meets the expected target) via the existing event path; job `source` in state is `MEASURED`, `SIMULATED` otherwise | 404 `not_found`, 422 `invalid_request` / `invalid_transition` |
+| 23 | `GET /api/v1/schedules/active` | Supabase access token | The account's latest active `ExecutionState`, available on another device | 401 `unauthorized`, 404 `not_found` |
+| 24 | `DELETE /api/v1/account` | Supabase access token from a recent sign-in | 204. Deletes the Auth user and cascades to their profile, loads and execution plans | 401 `unauthorized`, 403 `forbidden`, 503 `service_unavailable` |
+
+Planning distinguishes a proven infeasible schedule from a solver timeout. A timeout returns 503 `solve_timeout` and preserves the previous plan.
 
 ## Examples
 
@@ -68,6 +72,7 @@ Plan (live schedule):
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/schedules/plan \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"jobs":[{...LoadSpec...}],"capacity_kw":5,"scheduler":"CPSAT","execution":{"policy":"HYBRID"}}'
 # {"schedule_id":"...","lifecycle":"SCHEDULED","version":1,"solver_status":"...","jobs":[...]}
@@ -76,9 +81,10 @@ curl -X POST http://localhost:8000/api/v1/schedules/plan \
 State / history / events:
 
 ```bash
-curl http://localhost:8000/api/v1/schedules/<id>/state
-curl http://localhost:8000/api/v1/schedules/<id>/history
+curl -H "Authorization: Bearer $ACCESS_TOKEN" http://localhost:8000/api/v1/schedules/<id>/state
+curl -H "Authorization: Bearer $ACCESS_TOKEN" http://localhost:8000/api/v1/schedules/<id>/history
 curl -X POST http://localhost:8000/api/v1/schedules/<id>/events \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"event_type":"JOB_STARTED","job_id":"dishwasher-1","timestamp":"2026-10-05T20:00:00+00:00"}'
 ```

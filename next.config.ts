@@ -21,6 +21,7 @@ const BACKEND_URL = RAW_BACKEND_URL.replace(/\/+$/, "");
 const HAS_BACKEND = BACKEND_URL.length > 0;
 
 const nextConfig: NextConfig = {
+  agentRules: false,
   async rewrites() {
     // Same-origin mode (NEXT_PUBLIC_BACKEND_URL="" + BACKEND_URL set):
     // browser calls /api/v1/*, Next proxies server-side to the real backend.

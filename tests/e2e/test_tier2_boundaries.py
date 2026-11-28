@@ -23,7 +23,6 @@ from app.services.providers.synthetic import SyntheticDuckCurveProvider
 from app.services.forecast_service import ForecastService
 
 from .conftest import (
-    FirestoreRulesEvaluator,
     LocalStorageSimulator,
     make_load_spec,
     make_thermal_spec,
@@ -83,34 +82,14 @@ def test_tier2_f01_special_unicode_or_mixed_case():
 # Feature 2: Username Claim Ownership Security — Boundaries
 # ============================================================================
 
-def test_tier2_f02_claim_stealing_by_attacker_rejected(rules_evaluator: FirestoreRulesEvaluator):
-    """F2.B1: Attacker attempting to update another user's claim is rejected."""
-    allowed = rules_evaluator.evaluate_username_update(auth_uid="attacker_uid", existing_uid="victim_uid", new_uid="attacker_uid")
-    assert allowed is False, "Stealing an existing username claim must be strictly rejected"
 
 
-def test_tier2_f02_non_owner_delete_rejected(rules_evaluator: FirestoreRulesEvaluator):
-    """F2.B2: Authenticated non-owner attempting to delete someone else's claim is rejected."""
-    allowed = rules_evaluator.evaluate_username_delete(auth_uid="malicious_user", existing_uid="victim_uid")
-    assert allowed is False, "Deleting another user's username claim must be rejected"
 
 
-def test_tier2_f02_reassign_to_other_uid_by_owner_rejected(rules_evaluator: FirestoreRulesEvaluator):
-    """F2.B3: Owner attempting to transfer claim document to another user is rejected."""
-    allowed = rules_evaluator.evaluate_username_update(auth_uid="owner_uid", existing_uid="owner_uid", new_uid="new_user_uid")
-    assert allowed is False, "Reassigning claim to another UID must be rejected"
 
 
-def test_tier2_f02_unauthenticated_delete_rejected(rules_evaluator: FirestoreRulesEvaluator):
-    """F2.B4: Unauthenticated attempt to delete claim document is rejected."""
-    allowed = rules_evaluator.evaluate_username_delete(auth_uid=None, existing_uid="alice_uid")
-    assert allowed is False, "Unauthenticated deletion must be rejected"
 
 
-def test_tier2_f02_missing_uid_in_create_payload_rejected(rules_evaluator: FirestoreRulesEvaluator):
-    """F2.B5: Creating claim without a matching UID field in document is rejected."""
-    allowed = rules_evaluator.evaluate_username_create(auth_uid="user_123", resource_uid="")
-    assert allowed is False, "Empty or missing resource UID must be rejected"
 
 
 # ============================================================================
